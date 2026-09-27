@@ -14,10 +14,25 @@
 -- member outline; anything past the budget becomes a pointer line.
 
 local graph = require('codeoutline.graph')
+local text = require('codeoutline.text')
 
 local M = {}
 
 M.DEFAULT_BUDGET = 16000
+M.MIN_BUDGET = 256
+M.MAX_BUDGET = 262144
+
+function M.validate(query, opts)
+    assert(type(query) == 'string' and query:find('%S') and #query <= 4096 and not query:find('%z'),
+        'query must contain 1-4096 bytes of non-empty text without NUL')
+    assert(text.valid(query) == query, 'query must be valid UTF-8')
+    assert(opts == nil or type(opts) == 'table', 'options must be a table')
+    local budget = M.DEFAULT_BUDGET
+    if opts and opts.budget ~= nil then budget = opts.budget end
+    assert(type(budget) == 'number' and budget >= M.MIN_BUDGET and budget <= M.MAX_BUDGET and budget % 1 == 0,
+        'budget must be an integer between 256 and 262144 bytes')
+    return budget
+end
 M.MAX_SEEDS = 8
 M.PATH_DEPTH = 4
 M.SEED_FULL_LINES = 160       -- seeds up to this many lines are shown whole
@@ -276,7 +291,7 @@ end
 -- Run a query. Returns the text and a table with what was selected.
 function M.run(G, idx, query, opts)
     opts = opts or {}
-    local budget = opts.budget or M.DEFAULT_BUDGET
+    local budget = M.validate(query, opts)
     file_cache = {}
     local ranked, named_files = find_seeds(G, query)
 
@@ -322,7 +337,7 @@ function M.run(G, idx, query, opts)
         end
     end
 
-    local parts, used = {}, 0
+    local parts, used, omitted = {}, 0, false
     local function emit(s)
         parts[#parts + 1] = s
         used = used + #s + 1
@@ -399,7 +414,7 @@ function M.run(G, idx, query, opts)
                 if #ol >= 60 then ol[#ol + 1] = '\t...'; break end
             end
             local block = header .. ' (outline)\n' .. table.concat(ol, '\n')
-            if used + #block < budget - reserve then emit(block); wrote_header = true end
+            if used + #block < budget - reserve then emit(block); wrote_header = true else omitted = true end
         end
         for _, item in ipairs(items) do
             if not shown[item.id] then
@@ -444,7 +459,6 @@ function M.run(G, idx, query, opts)
     end
     if #rel > 0 then
         local block = '\n## Callers / callees\n' .. table.concat(rel, '\n')
-        if used + #block > budget then block = block:sub(1, math.max(0, budget - used - 20)) .. '\n...' end
         emit(block)
     end
 
@@ -461,10 +475,11 @@ function M.run(G, idx, query, opts)
     if #more > 0 then
         local block = '\n## Not shown (explore these by name for their source)\n' .. table.concat(more, '\n')
         if extra + #pointers > #more then block = block .. string.format('\n  ... %d more', extra + #pointers - #more) end
-        if used + #block <= budget + 400 then emit(block) end
+        if used + #block <= budget + 400 then emit(block) else omitted = true end
     end
 
-    return table.concat(parts, '\n'), { seeds = seeds, spine = spine, shown = shown, flows = flows }
+    local result, truncated = text.limit(table.concat(parts, '\n'), budget, omitted or #pointers > 0)
+    return result, { seeds = seeds, spine = spine, shown = shown, flows = flows, truncated = truncated }
 end
 
 return M

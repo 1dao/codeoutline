@@ -1,7 +1,9 @@
 -- codeoutline/cli.lua — try CodeExplore queries by hand. From the repo root:
 --   .\xnet2lua\bin\xnet.exe scripts/codeoutline/cli.lua ROOT=C:/src/proj "Q=xtimer_poll xtimer_add"
 -- Optional: BUDGET=16000, STATS=1 (index/graph numbers only).
-package.path = 'scripts/?.lua;' .. package.path
+local source = debug.getinfo(1, 'S').source:sub(2):gsub('\\', '/')
+local scripts = assert(source:match('^(.*)/codeoutline/[^/]+$'), 'cannot locate installed scripts')
+package.path = scripts .. '/?.lua;' .. package.path
 local svc = require('codeoutline.service')
 local explore = require('codeoutline.explore')
 

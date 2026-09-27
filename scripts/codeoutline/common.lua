@@ -13,6 +13,7 @@
 -- without each parser tracking scope for every call site.
 
 local M = {}
+local text = require('codeoutline.text')
 
 function M.new(path, language)
     return { path = path, language = language, nodes = {}, refs = {}, imports = {} }
@@ -23,7 +24,7 @@ function M.sig(T, a, b, max)
     local src = T.src:sub(T.s[a], T.e[b])
     src = src:gsub('%s+', ' ')
     max = max or 200
-    if #src > max then src = src:sub(1, max) .. '...' end
+    if #src > max then src = text.prefix(text.valid(src), max) .. '...' end
     return src
 end
 

@@ -2,11 +2,13 @@
   "name": "codeoutline",
   "version": "0.1.0-dev.0",
   "private": true,
+  "license": "BSD-2-Clause",
   "type": "module",
   "description": "Development-only official MCP SDK interoperability tests for the Lua server",
   "engines": { "node": ">=20" },
   "scripts": {
-    "test": "node --test --test-concurrency=1 tests/node/*.test.js"
+    "test": "node --test --test-concurrency=1 tests/node/*.test.js",
+    "test:package": "node --test tests/distribution.test.js"
   },
   "devDependencies": { "@modelcontextprotocol/sdk": "1.30.1" }
 }

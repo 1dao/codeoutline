@@ -1,0 +1,75 @@
+name: Build and verify
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            target: win32-x64
+          - os: ubuntu-22.04
+            target: linux-x64
+          - os: macos-14
+            target: darwin-arm64
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Verify build host
+        run: |
+          $actual = node -p "process.platform + '-' + process.arch"
+          if ($actual -ne '${{ matrix.target }}') { throw "Expected ${{ matrix.target }}, got $actual" }
+      - name: Build Windows runtime
+        if: runner.os == 'Windows'
+        run: |
+          ./tools/build-runtime.ps1
+      - name: Build Unix runtime
+        if: runner.os != 'Windows'
+        shell: bash
+        run: make -C xnet2lua -j2 xnet BUILD_MODE=release WITH_XPROC=1
+      - run: npm ci
+      - run: npm test
+      - run: npm run test:package
+      - name: Stage artifacts
+        run: |
+          $runtime = if ($IsWindows) { './xnet2lua/bin/xnet.exe' } else { './xnet2lua/bin/xnet' }
+          & $runtime tools/package.lua TARGET=${{ matrix.target }} OUTPUT=dist/${{ matrix.target }} LOG_STDERR=1
+          if ($LASTEXITCODE -ne 0) { throw 'Staging failed' }
+          if (-not $IsWindows) {
+            chmod +x dist/${{ matrix.target }}/native/codeoutline dist/${{ matrix.target }}/native/xnet2lua/bin/xnet
+          }
+          npm pack ./dist/${{ matrix.target }}/native --pack-destination ./dist
+          if ($LASTEXITCODE -ne 0) { throw 'Native package failed' }
+          npm pack ./dist/${{ matrix.target }}/npm --pack-destination ./dist
+          if ($LASTEXITCODE -ne 0) { throw 'Entry package failed' }
+          tar -czf dist/codeoutline-${{ matrix.target }}-preview.tar.gz -C dist/${{ matrix.target }}/native .
+          if ($LASTEXITCODE -ne 0) { throw 'Native archive failed' }
+          Get-ChildItem dist -File | ForEach-Object {
+            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLower()
+            "$hash  $($_.Name)"
+          } | Set-Content -Encoding utf8 dist/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: codeoutline-${{ matrix.target }}
+          path: |
+            dist/*.tgz
+            dist/*.tar.gz
+            dist/SHA256SUMS
+          if-no-files-found: error

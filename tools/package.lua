@@ -1,0 +1,89 @@
+-- Stage local npm/native artifacts; publishing is deliberately a separate step.
+-- xnet tools/package.lua TARGET=win32-x64 OUTPUT=dist/win32-x64 LOG_STDERR=1
+local options = {}
+for _, value in ipairs(arg or {}) do
+    local k, v = value:match('^([A-Z_]+)=(.*)$')
+    if k then options[k] = v end
+end
+local target = assert(options.TARGET, 'TARGET is required')
+local targets = { ['win32-x64'] = { 'win32', 'x64' }, ['linux-x64'] = { 'linux', 'x64' },
+    ['darwin-arm64'] = { 'darwin', 'arm64' } }
+local platform = assert(targets[target], 'unsupported TARGET')
+local source = assert(xutils.realpath(debug.getinfo(1, 'S').source:sub(2))):gsub('\\', '/')
+local root = assert(source:match('^(.*)/tools/[^/]+$'))
+package.path = root .. '/scripts/?.lua;' .. package.path
+local version = require('codeoutline.version')
+local output = (options.OUTPUT or root .. '/dist/' .. target):gsub('\\', '/')
+assert(not xutils.stat(output).exists, 'OUTPUT already exists; choose a fresh staging directory')
+local function read(path)
+    local f = assert(io.open(path, 'rb'), 'cannot read ' .. path)
+    local data = f:read('a'); assert(f:close()); return data
+end
+local function write(path, data)
+    assert(xutils.mkdir_p(assert(path:match('^(.*)/[^/]+$'))))
+    local f = assert(io.open(path, 'wb'))
+    assert(f:write(data)); assert(f:close())
+end
+local files = {}
+local function copy(from, relative)
+    local data = read(from)
+    write(output .. '/native/' .. relative, data)
+    files[relative] = xutils.sha256_hex(data)
+end
+local function copy_lua(relative)
+    local entries, truncated = xutils.list_dir(root .. '/' .. relative, 10000)
+    assert(entries and not truncated, 'cannot enumerate ' .. relative)
+    for _, entry in ipairs(entries) do
+        local path = relative .. '/' .. entry.name
+        if entry.dir then copy_lua(path)
+        elseif entry.name:match('%.lua$') then copy(root .. '/' .. path, path) end
+    end
+end
+local function git(command)
+    -- Only fixed read-only commands; no user input interpolated into the shell.
+    local p = assert(io.popen(command))
+    local value = p:read('a'); local ok = p:close()
+    assert(ok, 'run this tool from the repository root with Git available')
+    return value:gsub('%s+$', '')
+end
+local runtime_commit = git('git -C xnet2lua rev-parse HEAD')
+assert(git('git -C xnet2lua diff --name-only') == '', 'runtime has uncommitted changes; commit upstream first')
+local binary = platform[1] == 'win32' and 'xnet.exe' or 'xnet'
+copy(options.RUNTIME or root .. '/xnet2lua/bin/' .. binary, 'xnet2lua/bin/' .. binary)
+copy_lua('scripts/codeoutline')
+copy(root .. '/xnet2lua/scripts/core/share/xhttp_codec.lua', 'xnet2lua/scripts/core/share/xhttp_codec.lua')
+copy(root .. '/xnet2lua/LICENSE', 'licenses/xnet2lua.txt')
+copy(root .. '/xnet2lua/3rd/libdeflate/COPYING', 'licenses/libdeflate.txt')
+copy(root .. '/LICENSE', 'LICENSE')
+for _, name in ipairs({ 'lua-minilua', 'lua-cmsgpack', 'rpmalloc', 'mbedtls' }) do
+    copy(root .. '/licenses/' .. name .. '.txt', 'licenses/' .. name .. '.txt')
+end
+local yyjson = read(root .. '/xnet2lua/3rd/yyjson.h'):match('^(.-)%*/')
+write(output .. '/native/licenses/yyjson.txt', assert(yyjson) .. '*/\n')
+copy(root .. '/README.md', 'README.md')
+copy(root .. '/docs/DISTRIBUTION.md', 'DISTRIBUTION.md')
+copy(root .. '/docs/THIRD_PARTY.md', 'THIRD_PARTY.md')
+local manifest = { name = 'codeoutline-' .. target, version = version, private = true,
+    description = 'CodeOutline native runtime and Lua implementation for ' .. target,
+    os = { platform[1] }, cpu = { platform[2] }, license = 'BSD-2-Clause',
+    files = { 'scripts/', 'xnet2lua/', 'licenses/', 'LICENSE', 'codeoutline', 'codeoutline.cmd', 'build-info.json', '*.md' } }
+if platform[1] == 'linux' then manifest.libc = { 'glibc' } end
+write(output .. '/native/package.json', xutils.json_pack(manifest) .. '\n')
+write(output .. '/native/build-info.json', xutils.json_pack({ version = version, target = target,
+    runtimeCommit = runtime_commit, sourceCommit = git('git rev-parse HEAD'),
+    sourceDirty = git('git status --porcelain --untracked-files=normal') ~= '', sha256 = files,
+    releaseReady = false, note = 'Local preview: platform CI and package-name/account verification required before publication' }) .. '\n')
+write(output .. '/native/codeoutline.cmd', '@echo off\r\n"%~dp0xnet2lua\\bin\\xnet.exe" "%~dp0scripts\\codeoutline\\command.lua" LOG_STDERR=1 %*\r\nexit /b %errorlevel%\r\n')
+write(output .. '/native/codeoutline', '#!/bin/sh\nset -eu\nbase=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\nexec "$base/xnet2lua/bin/xnet" "$base/scripts/codeoutline/command.lua" LOG_STDERR=1 "$@"\n')
+local dependencies = {}
+for name in pairs(targets) do dependencies['codeoutline-' .. name] = version end
+write(output .. '/npm/package.json', xutils.json_pack({ name = 'codeoutline', version = version,
+    private = true, license = 'BSD-2-Clause', description = 'Lua code indexing and MCP service',
+    bin = { codeoutline = 'launcher/codeoutline.cjs' }, engines = { node = '>=20' },
+    files = { 'launcher/', 'LICENSE', '*.md' }, optionalDependencies = dependencies }) .. '\n')
+write(output .. '/npm/LICENSE', read(root .. '/LICENSE'))
+write(output .. '/npm/launcher/codeoutline.cjs', read(root .. '/launcher/codeoutline.cjs'))
+write(output .. '/npm/README.md', read(root .. '/README.md'))
+write(output .. '/npm/DISTRIBUTION.md', read(root .. '/docs/DISTRIBUTION.md'))
+io.write(xutils.json_pack({ output = output, target = target, version = version, runtimeCommit = runtime_commit }), '\n')
+return { __init = function() xthread.stop(0) end }

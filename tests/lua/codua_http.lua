@@ -1,5 +1,5 @@
 -- Opt-in interoperability test against the unmodified sibling client's code.
-local assets = assert(os.getenv('CODEOUTLINE_CODUA2A_SCRIPTS')):gsub('\\', '/')
+local assets = assert(os.getenv('CODEOUTLINE_CODUA_SCRIPTS')):gsub('\\', '/')
 package.path = assets .. '/?.lua;' .. package.path
 local client = require('xagent.mcp.client')
 local fetch_tools = require('xagent.mcp.fetch_tools')
@@ -21,7 +21,7 @@ local function run()
     assert(f:write('function after_edit() return 22 end\n')); f:close()
     local changed = explore.call({ projectPath = project, query = 'after_edit' })
     assert(not changed.is_error and changed.content:find('return 22', 1, true))
-    io.write('CODUA2A_HTTP_OK: initialize, discover, first/repeat query, edit refresh\n'); io.flush()
+    io.write('CODUA_HTTP_OK: initialize, discover, first/repeat query, edit refresh\n'); io.flush()
 end
 return {
     __init = function()

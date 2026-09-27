@@ -8,13 +8,13 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { LuaWorker, defaultRuntime, startHttp, configurePaths } from './helpers.js';
 
-test('unmodified Codua2a MCP client and tool adapter over real HTTP', { skip: !process.env.CODEOUTLINE_CODUA2A_SCRIPTS, timeout: 20000 }, async () => {
-    const root = await mkdtemp(join(tmpdir(), 'codeoutline-codua2a-'));
+test('unmodified Codua MCP client and tool adapter over real HTTP', { skip: !process.env.CODEOUTLINE_CODUA_SCRIPTS, timeout: 20000 }, async () => {
+    const root = await mkdtemp(join(tmpdir(), 'codeoutline-codua-'));
     await writeFile(join(root, 'client.lua'), 'function before_edit() return 11 end\n');
     const worker = new LuaWorker();
     const endpoint = await startHttp(worker, await configurePaths({ project: root }), { port: 0 });
     try {
-        const child = spawn(defaultRuntime, [fileURLToPath(new URL('../lua/codua2a_http.lua', import.meta.url))], {
+        const child = spawn(defaultRuntime, [fileURLToPath(new URL('../lua/codua_http.lua', import.meta.url))], {
             cwd: fileURLToPath(new URL('../../xnet2lua/', import.meta.url)),
             windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
             env: { ...process.env, CODEOUTLINE_TEST_PROJECT: root, CODEOUTLINE_TEST_URL: endpoint.url },
@@ -24,6 +24,6 @@ test('unmodified Codua2a MCP client and tool adapter over real HTTP', { skip: !p
         child.stderr.on('data', (chunk) => { output += chunk; });
         const [code] = await once(child, 'exit');
         assert.equal(code, 0, output);
-        assert.match(output, /CODUA2A_HTTP_OK/);
+        assert.match(output, /CODUA_HTTP_OK/);
     } finally { await endpoint.close(); await worker.close(); await rm(root, { recursive: true, force: true }); }
 });

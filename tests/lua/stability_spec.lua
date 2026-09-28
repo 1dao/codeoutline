@@ -54,6 +54,22 @@ spec.describe('service stability', function()
         spec.equal(rebuilt.cacheLoaded, false)
         spec.equal(rebuilt.refresh.parsed, 1)
     end)
+    spec.it('does not rewrite an unchanged cache after loading it', function()
+        -- The first query persists its encoding confirmation once.
+        service.forget(project)
+        service.explore(project, 'original', opts)
+        service.forget(project)
+        local replace, published = xutils.replace_file, 0
+        xutils.replace_file = function(...) published = published + 1; return replace(...) end
+        local ok, status = pcall(service.status, project, opts)
+        local explored = ok and pcall(service.explore, project, 'original', opts)
+        xutils.replace_file = replace
+        spec.truthy(ok and explored)
+        spec.truthy(status.cacheLoaded)
+        spec.equal(status.refresh.parsed, 0)
+        spec.nil_value(status.refresh.cache_saved)
+        spec.equal(published, 0)
+    end)
     spec.it('recovers corrupt and structurally invalid caches', function()
         for _, blob in ipairs({ '\0broken', cmsgpack.pack({ payload = 'invalid', sha256 = 'bad' }) }) do
             service.forget(project); write(cache, blob)

@@ -60,11 +60,11 @@ function M.get(root, opts)
     end
     local t0 = os.clock()
     local stats = p.idx:refresh()
-    if not p.G or p.G.generation ~= p.idx.generation then p.G = graph.build(p.idx); p.dirty = true end
-    if p.dirty or p.idx.encoding_dirty then
+    if not p.G or p.G.generation ~= p.idx.generation then p.G = graph.build(p.idx) end
+    -- A failed save leaves the index behind its cache, so the next call retries.
+    if p.idx:needs_save() then
         local saved, err = p.idx:save()
         stats.cache_saved, stats.cache_error = saved, err
-        p.dirty = not saved
     end
     stats.seconds = os.clock() - t0
     sequence = sequence + 1
@@ -92,10 +92,9 @@ function M.explore(root, query, opts)
     if p.G.generation ~= idx.generation then
         p.G = G.generation == idx.generation and G or graph.build(idx)
     end
-    if idx.encoding_dirty then
+    if idx:needs_save() then
         local saved, err = idx:save()
         stats.cache_saved, stats.cache_error = saved, err
-        p.dirty = not saved
     end
     if not ok then error(text, 2) end
     info.refresh = stats

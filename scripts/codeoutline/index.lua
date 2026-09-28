@@ -128,7 +128,14 @@ function Index:load()
     if not ok then self.cache_error = 'invalid or stale cache; rebuilding'; return false end
     self.files = files
     self.generation = self.generation + 1
+    self.saved_generation = self.generation
     return true
+end
+
+-- Whether the cache file lags the records. Refresh metadata (mtime, checked)
+-- alone does not count: unchanged files are re-verified by checksum anyway.
+function Index:needs_save()
+    return self.saved_generation ~= self.generation or self.encoding_dirty == true
 end
 
 function Index:save()
@@ -155,6 +162,7 @@ function Index:save()
     local published
     published, err = xutils.replace_file(tmp, self.cache_path)
     if not published then os.remove(tmp); return false, err end
+    self.saved_generation = self.generation
     self.encoding_dirty = false
     return true
 end

@@ -672,6 +672,20 @@ spec.describe('explore', function()
         spec.nil_value(G.by_name.oldname, 'stale symbol dropped')
         os.remove(path)
     end)
+    spec.it('skips reading files whose size and mtime predate the last read', function()
+        local path = tmp_root .. '/settled.lua'
+        write(path, 'function settled() end\n')
+        local deadline = os.time() + 2
+        while os.time() <= deadline do end                  -- let mtime fall behind the next read
+        svc.get(tmp_root, { cache_path = cache })             -- reads it: checked > mtime + 1
+        local opened, raw_open = {}, io.open
+        io.open = function(p, ...) opened[p] = true; return raw_open(p, ...) end
+        local ok, err = pcall(svc.get, tmp_root, { cache_path = cache })
+        io.open = raw_open
+        assert(ok, err)
+        for p in pairs(opened) do spec.truthy(not p:find('settled.lua', 1, true), 'settled file re-read') end
+        os.remove(path)
+    end)
     spec.it('walks the tree without rg, honoring .gitignore and hidden dirs', function()
         local index = require('codeoutline.index')
         local wr = tmp_root .. '_walk'          -- its own tree: the shared one feeds other cases

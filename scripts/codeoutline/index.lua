@@ -6,8 +6,10 @@
 --   local stats = idx:refresh()                   -- reparses only changed files
 --   idx:save()
 --
--- Change detection reads size + CRC-32, skipping parsing for unchanged files
--- even when editors preserve or restore modification timestamps.
+-- Change detection trusts an unchanged size + mtime once the file was last
+-- read strictly after that mtime second, skipping the read entirely; otherwise
+-- it reads the file and compares size + CRC-32, which still skips the parse.
+-- Tools that restore an older mtime at the same size are not detected.
 
 local ci = require('codeoutline.parse')
 local paths = require('codeoutline.path')
@@ -333,6 +335,12 @@ function Index:refresh()
         elseif st and st.size and st.size > self.max_bytes then
             stats.skipped = stats.skipped + 1
             seen[rel] = nil
+        elseif st and rec and st.mtime and rec.size == st.size and rec.mtime == st.mtime
+            and (rec.checked or 0) > st.mtime + 1 then
+            -- (size, mtime) proves "unchanged" only once the content was read
+            -- strictly after that mtime second: an edit within the same second
+            -- keeps both equal forever (the "racy git" problem).
+            stats.unchanged = stats.unchanged + 1
         else
             local src = slurp(abs)
             if not src or #src > self.max_bytes then

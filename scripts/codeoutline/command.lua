@@ -72,7 +72,7 @@ local function doctor(root)
         healthy = healthy and ok
     end
     check('runtime', function()
-        for _, name in ipairs({ 'realpath', 'temp_file', 'replace_file', 'read_stdin', 'random_bytes', 'sha256_hex', 'list_dir' }) do
+        for _, name in ipairs({ 'realpath', 'temp_file', 'replace_file', 'read_stdin', 'random_bytes', 'sha256_hex', 'list_dir', 'to_utf8' }) do
             assert(type(xutils[name]) == 'function', 'rebuild xnet2lua: missing xutils.' .. name)
         end
         assert(cmsgpack and xcompress and xshared and xnet and xproc, 'rebuild xnet2lua with xproc and default modules')

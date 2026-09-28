@@ -61,7 +61,7 @@ function M.get(root, opts)
     local t0 = os.clock()
     local stats = p.idx:refresh()
     if not p.G or p.G.generation ~= p.idx.generation then p.G = graph.build(p.idx); p.dirty = true end
-    if p.dirty then
+    if p.dirty or p.idx.encoding_dirty then
         local saved, err = p.idx:save()
         stats.cache_saved, stats.cache_error = saved, err
         p.dirty = not saved
@@ -77,7 +77,27 @@ end
 function M.explore(root, query, opts)
     explore.validate(query, opts)
     local idx, G, stats = M.get(root, opts)
-    local text, info = explore.run(G, idx, query, opts)
+    idx.query_sources = {}
+    local ok, text, info = pcall(function()
+        while true do
+            local output, details = explore.run(G, idx, query, opts)
+            if not details.encoding_retry then return output, details end
+            G = graph.build(idx)
+        end
+    end)
+    idx.query_sources = nil
+    -- A partial encoding repair can precede an error in another file. Keep
+    -- the resident graph consistent even when the query itself fails.
+    local p = projects[paths.key(idx.root)]
+    if p.G.generation ~= idx.generation then
+        p.G = G.generation == idx.generation and G or graph.build(idx)
+    end
+    if idx.encoding_dirty then
+        local saved, err = idx:save()
+        stats.cache_saved, stats.cache_error = saved, err
+        p.dirty = not saved
+    end
+    if not ok then error(text, 2) end
     info.refresh = stats
     return text, info
 end

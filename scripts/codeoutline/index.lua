@@ -25,7 +25,7 @@ M.VERSION = (function()
         local h = file and io.open(file, 'rb')
         if h then parts[#parts + 1] = h:read('a'); h:close() end
     end
-    return 'p2-' .. xutils.sha256_hex(table.concat(parts))
+    return 'p3-lazy-encoding-' .. xutils.sha256_hex(table.concat(parts))
 end)()
 -- Generated amalgamations (sqlite3.c, minified bundles) cost more to index
 -- than they give back; skip files above this size unless configured.
@@ -114,6 +114,7 @@ function Index:load()
             for part in rec.path:gmatch('[^/]+') do assert(part ~= '..' and part ~= '.') end
             assert(type(rec.nodes) == 'table' and type(rec.refs) == 'table' and type(rec.imports) == 'table')
             assert(type(rec.size) == 'number' and type(rec.language) == 'string')
+            assert(rec.encoding == nil or rec.encoding == 'utf-8' or rec.encoding == 'utf-8-bom' or rec.encoding == 'gbk')
             for _, n in ipairs(rec.nodes) do
                 assert(type(n.name) == 'string' and type(n.qualified) == 'string' and type(n.kind) == 'string')
                 assert(type(n.line) == 'number' and type(n.end_line) == 'number' and n.line >= 1 and n.end_line >= n.line)
@@ -154,7 +155,43 @@ function Index:save()
     local published
     published, err = xutils.replace_file(tmp, self.cache_path)
     if not published then os.remove(tmp); return false, err end
+    self.encoding_dirty = false
     return true
+end
+
+-- Only query-selected files are decoded. This cache lasts for one query and
+-- holds the exact snapshot used for both reparsing and source rendering.
+function Index:query_source(rel)
+    self.query_sources = self.query_sources or {}
+    if self.query_sources[rel] then return self.query_sources[rel], false end
+    local rec = assert(self.files[rel], 'source is not indexed: ' .. rel)
+    local raw = assert(slurp(self:abs(rel)), 'cannot read source: ' .. rel)
+    assert(#raw == rec.size and checksum(raw) == rec.crc,
+        'source changed during query; retry: ' .. rel)
+    assert(xutils.to_utf8, 'rebuild xnet2lua: missing xutils.to_utf8')
+    local src, encoding
+    if rec.encoding == 'utf-8' then
+        src, encoding = raw, rec.encoding
+    elseif rec.encoding == 'utf-8-bom' then
+        src, encoding = raw:sub(4), rec.encoding
+    else
+        src, encoding = xutils.to_utf8(raw, rec.encoding == 'gbk' and 'gbk' or 'auto')
+        assert(src, rel .. ': ' .. tostring(encoding))
+    end
+    local changed = false
+    if not rec.encoding then
+        if encoding == 'gbk' then
+            local parsed = assert(ci.parse(rel, src), 'cannot parse decoded source: ' .. rel)
+            parsed.size, parsed.crc, parsed.mtime, parsed.checked = rec.size, rec.crc, rec.mtime, rec.checked
+            self.files[rel], rec = parsed, parsed
+            self.generation = self.generation + 1
+            changed = true
+        end
+        rec.encoding = encoding
+        self.encoding_dirty = true
+    end
+    self.query_sources[rel] = src
+    return src, changed
 end
 
 -- Supported source files under the root, honoring .gitignore via ripgrep.
@@ -302,6 +339,17 @@ function Index:refresh()
                 else
                     local ok, r = pcall(ci.parse, rel, src)
                     control.check()
+                    -- A parser exception must not permanently hide a GBK file.
+                    -- Successful speculative parsing does not scan encoding here.
+                    if not ok or not r then
+                        if xutils.to_utf8 then
+                            local decoded, encoding = xutils.to_utf8(src)
+                            if decoded then
+                                ok, r = pcall(ci.parse, rel, decoded)
+                                if ok and r then r.encoding = encoding end
+                            end
+                        end
+                    end
                     if ok and r then
                         r.size, r.crc, r.mtime = #src, crc, st and st.mtime or nil
                         r.checked = os.time()

@@ -229,10 +229,8 @@ local function file_lines(idx, rel)
     local lines = file_cache[key]
     if lines then return lines end
     lines = {}
-    local f = io.open(key, 'rb')
-    if f then
-        local src = f:read('a')
-        f:close()
+    local src = idx:query_source(rel)
+    if src then
         for line in (src .. '\n'):gmatch('([^\n]*)\n') do lines[#lines + 1] = (line:gsub('\r$', '')) end
     end
     file_cache[key] = lines
@@ -397,6 +395,23 @@ function M.run(G, idx, query, opts)
         if not by_file[f] then by_file[f] = {}; file_order[#file_order + 1] = f end
         by_file[f].outline = true
     end
+
+    -- Confirm every file whose source or symbol labels this query can emit.
+    -- GBK reparsing invalidates node IDs, so rebuild and select again before
+    -- producing any output. Unrelated project files remain speculative.
+    local selected, changed = {}, false
+    for _, f in ipairs(file_order) do selected[f] = true end
+    for _, c in ipairs(ranked) do selected[G.nodes[c.id].f] = true end
+    for _, id in ipairs(seeds) do
+        for _, edges in ipairs({ G.inn[id] or {}, G.out[id] or {} }) do
+            for _, e in ipairs(edges) do selected[G.nodes[e.id].f] = true end
+        end
+    end
+    for f in pairs(selected) do
+        local _, repaired = idx:query_source(G.files[f].path)
+        changed = repaired or changed
+    end
+    if changed then return nil, { encoding_retry = true } end
 
     local reserve = math.floor(budget * 0.15)     -- keep room for sections 3-4
     for _, f in ipairs(file_order) do

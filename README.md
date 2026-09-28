@@ -42,6 +42,8 @@ Pop-Location
 
 必须重新构建本仓库运行时：当前核心使用新增的 `xutils.realpath`、`temp_file`、`replace_file`，stdio 还需要 `read_stdin` 和启动日志分流。旧的相邻仓库二进制不一定具有这些接口。
 
+按需编码处理还需要运行时提供 `xutils.to_utf8`；`doctor` 会检查该能力。Windows 使用系统代码页 936，Linux/macOS 使用 iconv，iOS 使用 CoreFoundation，Android 使用 JNI CharsetDecoder，不内置 GBK 映射表。Android 宿主须在启动工作线程前调用一次 C 接口 `xutils_android_init(JavaVM*)`，无需逐个 Lua 状态注册；iOS 无需额外初始化。未初始化的 Android GBK 转换会明确报错，UTF-8 不受影响。
+
 ## MCP 服务
 
 统一入口（源码运行时需显式带 `LOG_STDERR=1`；安装后的 `codeoutline` 自动添加）：
@@ -109,6 +111,10 @@ local text, info = service.explore('C:/src/project', 'Session.save', { budget = 
 服务使用真实绝对路径统一目录别名和链接，Windows 键忽略 ASCII 大小写。默认最多驻留 8 个项目、空闲 15 分钟淘汰，可用 `service.configure` 调整。`get`/`explore`/`status` 自动刷新，`forget` 仅清内存，`rebuild` 绕过磁盘缓存完整重建。
 
 缓存位于用户目录 `.codeoutline/cache/<路径SHA-256>.idx`，可用 `cache_path` 覆盖。缓存有完整性校验，损坏后自动重建；每次写入独立临时文件再原子替换，失败保留旧文件并通过刷新统计报告。并发写入采用最后成功发布的快照，下次查询仍会检查源文件。
+
+源码支持按需确认 UTF-8、带 BOM 的 UTF-8 和 GBK。首次索引不额外遍历所有文件检查编码；查询涉及文件时才确认编码，UTF-8 优先，校验失败后尝试严格 GBK 转码。GBK 文件会重新解析、更新调用图，再重新执行本次查询，源码中的中文注释和字符串随之正确显示，不修改原文件。编码结果随索引缓存保存，文件内容改变后失效；无法解码的命中文件会明确报错。两种编码都合法时默认 UTF-8，不能保证自动消除歧义。
+
+未查询文件的索引仍可能包含 GBK 误解析：ASCII 函数名通常可命中，但中文标识符或特殊字符串可能造成漏匹配和不完整的调用关系。可以用文件名查询触发该文件的修正；当前不在查询未命中时全项目扫描，也不增加注释全文检索或函数前置注释提取。
 
 使用 xutils 文件系统能力、cmsgpack 序列化、xcompress 校验；优先使用原生 xscan，提供纯 Lua 回退。优先用 rg 枚举并遵守 gitignore；目录遍历回退仅支持根目录 `.gitignore` 的常见规则，不支持否定规则和嵌套忽略文件，并跳过隐藏目录、`node_modules`、`__pycache__` 及符号链接。枚举失败和超限明确报错。当前拒绝包含 shell 特殊字符（如 `%`、`$`、引号）的项目根路径。
 

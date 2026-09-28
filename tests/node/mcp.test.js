@@ -34,6 +34,13 @@ test('official SDK stdio: discovery, source, incremental refresh, rebuild and er
         const status = JSON.parse((await c.callTool({ name: 'codeoutline_status' })).content[0].text);
         assert.equal(status.files, 1);
         assert.equal(status.refresh.parsed, 0);
+        await writeFile(join(f.project, 'sample.lua'), Buffer.concat([
+            Buffer.from('function gbk()\n -- '), Buffer.from([0xd6, 0xd0, 0xce, 0xc4]),
+            Buffer.from('\n return 42\nend\n'),
+        ]));
+        const decoded = await query('gbk');
+        assert.notEqual(decoded.isError, true);
+        assert.match(decoded.content[0].text, /2\t -- 中文/);
         await writeFile(join(f.project, 'sample.lua'), 'function changed() return 42 end\n');
         assert.match((await query('changed')).content[0].text, /return 42/);
         const rebuilt = JSON.parse((await c.callTool({ name: 'codeoutline_rebuild' })).content[0].text);

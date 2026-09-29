@@ -18,6 +18,10 @@
 - 从缓存加载且源码未变化时，不再重写整个缓存文件。只有文件被解析、删除或编码结果更新时才保存；保存失败会在下次调用时重试。大型项目带缓存重启约快 0.3 秒，多进程共享缓存时也不再用未改动的快照覆盖他人的更新。
 - 未安装 ripgrep 时跳过 rg 枚举测试，并在该测试失败时清理临时文件，避免后续稳定性用例连带失败（macOS 上 3 项失败的根因）。
 
+### 变更
+
+- 开发用运行时改放在仓库根目录 `bin/`：`tools/build-runtime.ps1` 与新增的 `tools/build-runtime.sh` 构建后复制到此处，测试、打包、CI 和文档统一使用 `bin/xnet`。发布包内部结构不变。
+
 ### 依赖
 
 - xnet2lua 更新至 `8aac7a2`，新增 `xutils.to_utf8`：Windows 使用代码页 936，Linux/macOS 使用 iconv，iOS 使用 CoreFoundation，Android 使用 JNI CharsetDecoder（宿主需调用一次 `xutils_android_init`）。

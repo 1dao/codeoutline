@@ -6,11 +6,12 @@ The native archive does not require Node, npm, Lua, a compiler, or Git at runtim
 
 ## Stage a Windows preview
 
-From the repository root, build the Windows runtime with a static CRT, then stage:
+From the repository root, build the Windows runtime with a static CRT (copied to
+`bin/`), then stage:
 
 ```powershell
 .\tools\build-runtime.ps1
-.\xnet2lua\bin\xnet.exe tools/package.lua TARGET=win32-x64 OUTPUT=dist/win32-x64 LOG_STDERR=1
+.\bin\xnet.exe tools/package.lua TARGET=win32-x64 OUTPUT=dist/win32-x64 LOG_STDERR=1
 npm pack ./dist/win32-x64/native --pack-destination ./dist
 npm pack ./dist/win32-x64/npm --pack-destination ./dist
 ```

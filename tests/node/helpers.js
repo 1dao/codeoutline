@@ -11,7 +11,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 
 export const root = fileURLToPath(new URL('../../', import.meta.url));
 export const main = join(root, 'scripts/codeoutline/main.lua');
-export const defaultRuntime = join(root, 'xnet2lua/bin', process.platform === 'win32' ? 'xnet.exe' : 'xnet');
+export const defaultRuntime = join(root, 'bin', process.platform === 'win32' ? 'xnet.exe' : 'xnet');
 export async function configurePaths({ project, allowedRoots = [] } = {}) {
     return { project, roots: await Promise.all((allowedRoots.length ? allowedRoots : [project || root]).map((r) => realpath(r))) };
 }

@@ -1,5 +1,5 @@
 -- Stage local npm/native artifacts; publishing is deliberately a separate step.
--- xnet tools/package.lua TARGET=win32-x64 OUTPUT=dist/win32-x64 LOG_STDERR=1
+-- bin/xnet tools/package.lua TARGET=win32-x64 OUTPUT=dist/win32-x64 LOG_STDERR=1
 local options = {}
 for _, value in ipairs(arg or {}) do
     local k, v = value:match('^([A-Z_]+)=(.*)$')
@@ -49,7 +49,7 @@ end
 local runtime_commit = git('git -C xnet2lua rev-parse HEAD')
 assert(git('git -C xnet2lua diff --name-only') == '', 'runtime has uncommitted changes; commit upstream first')
 local binary = platform[1] == 'win32' and 'xnet.exe' or 'xnet'
-copy(options.RUNTIME or root .. '/xnet2lua/bin/' .. binary, 'xnet2lua/bin/' .. binary)
+copy(options.RUNTIME or root .. '/bin/' .. binary, 'xnet2lua/bin/' .. binary)
 copy_lua('scripts/codeoutline')
 copy(root .. '/xnet2lua/scripts/core/share/xhttp_codec.lua', 'xnet2lua/scripts/core/share/xhttp_codec.lua')
 copy(root .. '/xnet2lua/LICENSE', 'licenses/xnet2lua.txt')

@@ -25,19 +25,25 @@ Lightweight code indexing and exploration for coding agents, designed for MCP in
 git submodule update --init --recursive
 ```
 
-Windows 下在 MSVC 开发者终端构建：
+构建运行时并复制到仓库根目录 `bin/`（已被 Git 忽略）。Windows 在 MSVC 开发者终端执行，产物静态链接 CRT：
 
 ```powershell
-Push-Location xnet2lua
-.\build.bat release xnet xproc
-Pop-Location
+.\tools\build-runtime.ps1
 ```
+
+Linux/macOS：
+
+```sh
+sh tools/build-runtime.sh
+```
+
+测试、打包和文档中的命令都使用 `bin/` 中的副本；直接在 `xnet2lua/` 内构建后，需重新运行上述脚本复制。
 
 该构建包含原生 xscan。xproc 在 Windows 上的可用性受上游限制，索引库本身不依赖 xproc。
 
 ```powershell
-.\xnet2lua\bin\xnet.exe scripts/codeoutline/cli.lua ROOT=C:/src/project "Q=Session.save" BUDGET=16000
-.\xnet2lua\bin\xnet.exe tests/lua/codeoutline_spec.lua
+.\bin\xnet.exe scripts/codeoutline/cli.lua ROOT=C:/src/project "Q=Session.save" BUDGET=16000
+.\bin\xnet.exe tests/lua/codeoutline_spec.lua
 ```
 
 必须重新构建本仓库运行时：当前核心使用新增的 `xutils.realpath`、`temp_file`、`replace_file`，stdio 还需要 `read_stdin` 和启动日志分流。旧的相邻仓库二进制不一定具有这些接口。
@@ -49,8 +55,8 @@ Pop-Location
 统一入口（源码运行时需显式带 `LOG_STDERR=1`；安装后的 `codeoutline` 自动添加）：
 
 ```powershell
-.\xnet2lua\bin\xnet.exe scripts/codeoutline/command.lua LOG_STDERR=1 doctor --project C:/src/project
-.\xnet2lua\bin\xnet.exe scripts/codeoutline/command.lua LOG_STDERR=1 serve --stdio --project C:/src/project
+.\bin\xnet.exe scripts/codeoutline/command.lua LOG_STDERR=1 doctor --project C:/src/project
+.\bin\xnet.exe scripts/codeoutline/command.lua LOG_STDERR=1 serve --stdio --project C:/src/project
 ```
 
 统一 CLI 支持 `serve`、`explore --query ...`、`status`、`rebuild`、`doctor`、`--help` 和 `--version`。
@@ -59,10 +65,10 @@ HTTP 使用 `--host`、`--port`，访问范围使用可重复的 `--allow-root`�
 
 ```powershell
 # stdout 仅输出 MCP 消息；STDIO=1 会在运行时启动阶段将日志分流至 stderr。
-.\xnet2lua\bin\xnet.exe scripts/codeoutline/main.lua STDIO=1 PROJECT=C:/src/project
+.\bin\xnet.exe scripts/codeoutline/main.lua STDIO=1 PROJECT=C:/src/project
 
 # HTTP 默认仅监听本机；客户端使用 http://127.0.0.1:19876/mcp。
-.\xnet2lua\bin\xnet.exe scripts/codeoutline/main.lua HTTP=1 PROJECT=C:/src/project PORT=19876
+.\bin\xnet.exe scripts/codeoutline/main.lua HTTP=1 PROJECT=C:/src/project PORT=19876
 ```
 
 从其他工作目录启动时，将可执行文件和 `main.lua` 写成绝对路径。`PROJECT` 默认不设置；`ALLOW_ROOT` 默认是 `PROJECT` 或启动目录，可重复传入以允许多个目录。调用未传 `projectPath` 时依次使用 `PROJECT`、客户端 roots（`roots/list` 返回的第一个 `file://` 目录，按会话缓存，收到 `roots/list_changed` 后重新获取，10 秒无响应则跳过）、stdio 模式的启动目录；都没有时返回错误。结果仍须位于 `ALLOW_ROOT` 内。因此全局配置无需写 `PROJECT`。路径指向服务所在机器，不是客户端机器。
@@ -76,8 +82,8 @@ HTTP 使用 `--host`、`--port`，访问范围使用可重复的 `--allow-root`�
 ## 测试
 
 ```powershell
-.\xnet2lua\bin\xnet.exe tests/lua/codeoutline_spec.lua
-.\xnet2lua\bin\xnet.exe tests/lua/stability_spec.lua
+.\bin\xnet.exe tests/lua/codeoutline_spec.lua
+.\bin\xnet.exe tests/lua/stability_spec.lua
 
 # 可选：官方 SDK 双传输互操作测试，包含上述原生/纯 Lua 测试。
 npm ci
@@ -94,7 +100,7 @@ npm test
 
 ```powershell
 $env:XSCAN_PURE_LUA = '1'
-.\xnet2lua\bin\xnet.exe tests/lua/codeoutline_spec.lua
+.\bin\xnet.exe tests/lua/codeoutline_spec.lua
 Remove-Item Env:XSCAN_PURE_LUA
 ```
 

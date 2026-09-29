@@ -41,10 +41,31 @@ Windows, or `./codeoutline` on Unix. On Unix, mark `codeoutline` and
 
 ## Platform validation and publication
 
-Targets are Windows x64, Linux x64 (glibc), and macOS arm64. Only a platform
-with a successful native build and installed-package smoke test is validated.
-Linux builds currently target the CI host's glibc, not an older compatibility
-baseline. Alpine/musl and other architectures are unsupported.
+Targets are Windows x64, Linux x64 (glibc 2.28+), and macOS universal
+(`darwin-universal`: Apple Silicon and Intel, macOS 11+). Only a platform with
+a successful native build and installed-package smoke test is validated.
+
+On macOS, `tools/build-runtime.sh` builds an arm64 and an x86_64 slice with
+`MACOSX_DEPLOYMENT_TARGET=11.0` and merges them with `lipo`; clang would
+otherwise require the build machine's own macOS version. CI checks both slices
+and their minimum version, and runs the specs natively and under Rosetta.
+`XNET_MAC_ARCHS=arm64` builds a single slice for local work. CI builds the Linux runtime in the `manylinux_2_28` container
+(AlmaLinux 8) and fails if the binary needs a newer glibc symbol, so one package
+covers RHEL/Rocky/Alma 8 and 9, CentOS Stream 9, Debian 10+, and Ubuntu 20.04+;
+the specs also run inside AlmaLinux 8 and CentOS Stream 9. The npm launcher
+rejects older glibc with a clear message. A Linux runtime built locally with
+`tools/build-runtime.sh` targets the build host's glibc instead. Alpine/musl
+and other architectures are unsupported.
+
+The Windows runtime is x64, links the C runtime statically, and loads only
+system DLLs (`kernel32`, `advapi32`, `ws2_32`, `bcrypt`), so no Visual C++
+redistributable is needed. Its newest Windows API is
+`GetSystemTimePreciseAsFileTime`, which makes Windows 8 / Server 2012 the floor
+for the native archive; the npm route follows Node's own support (Node 20+,
+effectively Windows 10 / Server 2016 or newer). Windows 11 on ARM64 installs
+and runs the x64 package under emulation; Windows 10 on ARM cannot emulate x64.
+The binary is not code-signed, so a downloaded archive may trigger SmartScreen
+or be blocked by application allow-listing.
 
 Preview packages intentionally block `npm publish` using `private: true`.
 Before release: review THIRD_PARTY.md against build options, choose/verify public package names and

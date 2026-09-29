@@ -9,12 +9,24 @@ const { readFileSync, existsSync } = require('node:fs');
 try {
     const manifest = require('../package.json');
     const platform = `${process.platform}-${process.arch}`;
-    const packageName = `codeoutline-${platform}`;
+    // Platforms served by another package, which declares their CPU so npm
+    // installs it: Windows 11 on ARM emulates x64; macOS ships one universal binary.
+    const shared = { 'win32-arm64': 'win32-x64', 'darwin-arm64': 'darwin-universal', 'darwin-x64': 'darwin-universal' };
+    let packageName = `codeoutline-${platform}`;
+    if (!manifest.optionalDependencies?.[packageName] && shared[platform]) {
+        packageName = `codeoutline-${shared[platform]}`;
+    }
     if (!manifest.optionalDependencies?.[packageName]) {
         throw new Error(`Unsupported platform ${platform}. Use a native build; see README.md.`);
     }
-    if (process.platform === 'linux' && !process.report.getReport().header.glibcVersionRuntime) {
-        throw new Error('This Linux package requires glibc; musl is not supported. Use a native build.');
+    if (process.platform === 'linux') {
+        const glibc = process.report.getReport().header.glibcVersionRuntime;
+        if (!glibc) throw new Error('This Linux package requires glibc; musl is not supported. Use a native build.');
+        // Matches the manylinux_2_28 build in CI; older systems fail in the dynamic linker.
+        const [major, minor] = glibc.split('.').map(Number);
+        if (major < 2 || (major === 2 && minor < 28)) {
+            throw new Error(`This Linux package requires glibc 2.28 or newer (found ${glibc}). Use a native build.`);
+        }
     }
     const resolve = createRequire(__filename);
     let packagePath;

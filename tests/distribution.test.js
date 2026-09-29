@@ -16,7 +16,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 test('packed npm and native artifacts work outside the checkout', { timeout: 120000 }, async () => {
     assert(process.env.npm_execpath, 'run via npm run test:package');
     const temp = await mkdtemp(join(tmpdir(), 'codeoutline-dist-'));
-    const target = `${process.platform}-${process.arch}`;
+    const target = process.platform === 'darwin' ? 'darwin-universal' : `${process.platform}-${process.arch}`;
     const stage = join(temp, 'stage');
     const install = join(temp, 'install 中文');
     const project = join(temp, 'project 中文');

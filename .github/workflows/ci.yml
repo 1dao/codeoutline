@@ -15,11 +15,14 @@ jobs:
       matrix:
         include:
           - os: windows-2022
+            host: win32-x64
             target: win32-x64
           - os: ubuntu-22.04
+            host: linux-x64
             target: linux-x64
           - os: macos-14
-            target: darwin-arm64
+            host: darwin-arm64
+            target: darwin-universal
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -35,18 +38,70 @@ jobs:
       - name: Verify build host
         run: |
           $actual = node -p "process.platform + '-' + process.arch"
-          if ($actual -ne '${{ matrix.target }}') { throw "Expected ${{ matrix.target }}, got $actual" }
+          if ($actual -ne '${{ matrix.host }}') { throw "Expected ${{ matrix.host }}, got $actual" }
       - name: Build Windows runtime
         if: runner.os == 'Windows'
         run: |
           ./tools/build-runtime.ps1
-      - name: Build Unix runtime
-        if: runner.os != 'Windows'
+      - name: Build macOS runtime
+        if: runner.os == 'macOS'
         shell: bash
         run: sh tools/build-runtime.sh
+      # clang defaults to the runner's own macOS version as the minimum, which
+      # would lock out older Macs; build-runtime.sh pins 11.0 for both slices.
+      - name: Check macOS universal binary
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          archs=$(lipo -archs bin/xnet); echo "architectures: $archs"
+          for arch in arm64 x86_64; do
+            case " $archs " in *" $arch "*) ;; *) echo "bin/xnet lacks the $arch slice" >&2; exit 1;; esac
+            minos=$(otool -arch "$arch" -l bin/xnet | awk '/LC_BUILD_VERSION/{f=1} f&&/minos/{print $2; exit}')
+            echo "$arch minos: $minos"
+            if [ "$(printf '%s\n11.0\n' "$minos" | sort -V | tail -1)" != "11.0" ]; then
+              echo "$arch slice needs macOS $minos; the baseline is 11.0" >&2
+              exit 1
+            fi
+          done
+      - name: Run the x86_64 slice under Rosetta
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          /usr/bin/pgrep -q oahd || sudo softwareupdate --install-rosetta --agree-to-license
+          arch -x86_64 ./bin/xnet tests/lua/codeoutline_spec.lua
+          arch -x86_64 ./bin/xnet tests/lua/stability_spec.lua
+      # A binary runs only on glibc >= the one it was built against, and the
+      # hosted runners are newer than CentOS Stream 9 (2.34). Build on
+      # manylinux_2_28 (AlmaLinux 8) so EL8/EL9, Debian 10+ and Ubuntu 20.04+ work.
+      - name: Build Linux runtime (glibc 2.28 baseline)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/src" -w /src \
+            quay.io/pypa/manylinux_2_28_x86_64 sh tools/build-runtime.sh
+      - name: Check Linux glibc baseline
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          need=$(objdump -T bin/xnet | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sed 's/GLIBC_//' | sort -Vu | tail -1)
+          echo "highest glibc symbol version: $need"
+          if [ "$(printf '%s\n2.28\n' "$need" | sort -V | tail -1)" != "2.28" ]; then
+            echo "bin/xnet needs glibc $need; the baseline is 2.28" >&2
+            exit 1
+          fi
       - run: npm ci
       - run: npm test
       - run: npm run test:package
+      - name: Run on the oldest and target Linux distributions
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          for image in quay.io/almalinux/almalinux:8 quay.io/centos/centos:stream9; do
+            echo "::group::$image"
+            docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src" -w /src "$image" \
+              sh -c './bin/xnet tests/lua/codeoutline_spec.lua && ./bin/xnet tests/lua/stability_spec.lua'
+            echo "::endgroup::"
+          done
       - name: Stage artifacts
         run: |
           $runtime = if ($IsWindows) { './bin/xnet.exe' } else { './bin/xnet' }

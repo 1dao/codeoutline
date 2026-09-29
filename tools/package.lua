@@ -6,8 +6,11 @@ for _, value in ipairs(arg or {}) do
     if k then options[k] = v end
 end
 local target = assert(options.TARGET, 'TARGET is required')
-local targets = { ['win32-x64'] = { 'win32', 'x64' }, ['linux-x64'] = { 'linux', 'x64' },
-    ['darwin-arm64'] = { 'darwin', 'arm64' } }
+-- { os, cpus npm may install it on }. Windows 11 on ARM runs x64 binaries
+-- under emulation, so the x64 package doubles as its arm64 build; macOS ships
+-- one universal (arm64 + x86_64) binary for both CPUs.
+local targets = { ['win32-x64'] = { 'win32', 'x64', 'arm64' }, ['linux-x64'] = { 'linux', 'x64' },
+    ['darwin-universal'] = { 'darwin', 'arm64', 'x64' } }
 local platform = assert(targets[target], 'unsupported TARGET')
 local source = assert(xutils.realpath(debug.getinfo(1, 'S').source:sub(2))):gsub('\\', '/')
 local root = assert(source:match('^(.*)/tools/[^/]+$'))
@@ -65,7 +68,7 @@ copy(root .. '/docs/DISTRIBUTION.md', 'DISTRIBUTION.md')
 copy(root .. '/docs/THIRD_PARTY.md', 'THIRD_PARTY.md')
 local manifest = { name = 'codeoutline-' .. target, version = version, private = true,
     description = 'CodeOutline native runtime and Lua implementation for ' .. target,
-    os = { platform[1] }, cpu = { platform[2] }, license = 'BSD-2-Clause',
+    os = { platform[1] }, cpu = { platform[2], platform[3] }, license = 'BSD-2-Clause',
     files = { 'scripts/', 'xnet2lua/', 'licenses/', 'LICENSE', 'codeoutline', 'codeoutline.cmd', 'build-info.json', '*.md' } }
 if platform[1] == 'linux' then manifest.libc = { 'glibc' } end
 write(output .. '/native/package.json', xutils.json_pack(manifest) .. '\n')

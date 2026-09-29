@@ -96,12 +96,18 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          for image in quay.io/almalinux/almalinux:8 quay.io/centos/centos:stream9; do
-            echo "::group::$image"
-            docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src" -w /src "$image" \
-              sh -c './bin/xnet tests/lua/codeoutline_spec.lua && ./bin/xnet tests/lua/stability_spec.lua'
+          # AlmaLinux 8 as shipped lacks the GBK converter, so those cases must
+          # skip; CentOS Stream 9 gets glibc-gconv-extra and must run them.
+          distro() {
+            echo "::group::$1"
+            docker run --rm -e HOME=/tmp -e OWNER="$(id -u):$(id -g)" -v "$PWD:/src" -w /src "$1" \
+              sh tools/ci-distro-test.sh "${@:2}"
+            local rc=$?
             echo "::endgroup::"
-          done
+            return $rc
+          }
+          distro quay.io/almalinux/almalinux:8 0
+          distro quay.io/centos/centos:stream9 1 glibc-gconv-extra
       - name: Stage artifacts
         run: |
           $runtime = if ($IsWindows) { './bin/xnet.exe' } else { './bin/xnet' }

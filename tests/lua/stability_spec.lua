@@ -179,6 +179,13 @@ do
         assert(f:write(bytes)); assert(f:close())
     end
     local chinese = '\214\208\206\196'
+    -- GBK decoding uses the system converter (glibc-gconv-extra on EL8/EL9);
+    -- without it the GBK cases are skipped, like the rg case above.
+    local gbk_available = (pcall(xutils.to_utf8, chinese, 'gbk')) and xutils.to_utf8(chinese, 'gbk') == '中文'
+    local function gbk_or_skip()
+        if not gbk_available then print('SKIP system iconv has no GBK converter') end
+        return gbk_available
+    end
     write('gbk.lua', 'function abc()\r\n -- ' .. chinese .. '\r\n return "' .. chinese .. '"\r\nend\r\n')
     write('unused.lua', 'function unused() return "' .. chinese .. '" end\n')
     write('bom.lua', '\239\187\191function bom() return "中文" end\n')
@@ -195,6 +202,7 @@ do
             spec.equal(idx.files['unused.lua'].encoding, nil)
         end)
         spec.it('finds ASCII functions and decodes comments and strings only on demand', function()
+            if not gbk_or_skip() then return end
             local output = svc.explore(project, 'abc', opts)
             spec.contains(output, '2\t -- 中文')
             spec.contains(output, '3\t return "中文"')
@@ -216,6 +224,7 @@ do
             assert(ok, output)
         end)
         spec.it('persists repaired records and invalidates encoding after editing', function()
+            if not gbk_or_skip() then return end
             svc.forget(project)
             local idx = svc.get(project, opts)
             spec.truthy(idx.cache_loaded)
@@ -228,6 +237,7 @@ do
             spec.equal(idx.files['gbk.lua'].encoding, 'utf-8')
         end)
         spec.it('repairs GBK backslash-tail strings and discovers swallowed calls', function()
+            if not gbk_or_skip() then return end
             write('tail.lua', 'function tail()\n local s = "\129\92"\n return helper()\nend\nfunction helper() return 1 end\n')
             local output = svc.explore(project, 'tail.lua', opts)
             spec.contains(output, 'helper')

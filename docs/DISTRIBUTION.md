@@ -57,6 +57,13 @@ rejects older glibc with a clear message. A Linux runtime built locally with
 `tools/build-runtime.sh` targets the build host's glibc instead. Alpine/musl
 and other architectures are unsupported.
 
+GBK source decoding on Linux uses glibc's iconv module, which minimal EL8/EL9
+installs and container images omit (`dnf install glibc-gconv-extra`). Without it
+UTF-8 projects work normally, `doctor` reports the `gbk` check as unavailable, and
+a query touching a GBK file fails with that installation hint. CI runs the specs
+on AlmaLinux 8 as shipped (GBK cases must skip) and on CentOS Stream 9 with
+`glibc-gconv-extra` (GBK cases must run).
+
 The Windows runtime is x64, links the C runtime statically, and loads only
 system DLLs (`kernel32`, `advapi32`, `ws2_32`, `bcrypt`), so no Visual C++
 redistributable is needed. Its newest Windows API is

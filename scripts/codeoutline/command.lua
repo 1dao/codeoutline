@@ -78,6 +78,12 @@ local function doctor(root)
         assert(cmsgpack and xcompress and xshared and xnet and xproc, 'rebuild xnet2lua with xproc and default modules')
         return 'xnet2lua / ' .. (jit and jit.version or _VERSION)
     end)
+    -- A warning, not a failure: UTF-8 projects work without the GBK converter.
+    check('gbk', function()
+        if xutils.to_utf8('\214\208\206\196', 'gbk') == '中文' then return 'system converter available' end
+        return 'unavailable: GBK sources cannot be decoded; install the system GBK converter'
+            .. ' (glibc-gconv-extra on EL8/EL9)'
+    end)
     check('scanner', function()
         return xscan and os.getenv('XSCAN_PURE_LUA') ~= '1' and 'native xscan' or 'pure Lua fallback'
     end)

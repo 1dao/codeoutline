@@ -186,7 +186,13 @@ function Index:query_source(rel)
         src, encoding = raw:sub(4), rec.encoding
     else
         src, encoding = xutils.to_utf8(raw, rec.encoding == 'gbk' and 'gbk' or 'auto')
-        assert(src, rel .. ': ' .. tostring(encoding))
+        if not src then
+            local reason = tostring(encoding)
+            -- Minimal EL8/EL9 installs and containers omit the GBK module.
+            local hint = reason:find('does not provide GBK', 1, true)
+                and ' (install the system GBK converter, e.g. glibc-gconv-extra on EL8/EL9)' or ''
+            error(rel .. ': ' .. reason .. hint, 0)
+        end
     end
     local changed = false
     if not rec.encoding then

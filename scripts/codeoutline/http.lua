@@ -31,8 +31,12 @@ function M.start(config, submit, cancel, codec)
         if not config.token then return true end
         local expected = 'Bearer ' .. config.token
         if type(header) ~= 'string' or #header ~= #expected then return false end
+        -- Constant time without bitwise operators, which LuaJIT cannot parse.
         local diff = 0
-        for i = 1, #expected do diff = diff | (header:byte(i) ~ expected:byte(i)) end
+        for i = 1, #expected do
+            local d = header:byte(i) - expected:byte(i)
+            diff = diff + d * d
+        end
         return diff == 0
     end
     local function remove_session(sid)

@@ -25,6 +25,7 @@
 ### 依赖
 
 - xnet2lua 更新至 `8aac7a2`，新增 `xutils.to_utf8`：Windows 使用代码页 936，Linux/macOS 使用 iconv，iOS 使用 CoreFoundation，Android 使用 JNI CharsetDecoder（宿主需调用一次 `xutils_android_init`）。
+- xnet2lua 更新至 `c9fbc0d`：LuaJIT 后端恢复可用（C 兼容层、`utf8` 库、协程内定时器回调修复、脚本去除 5.3+ 语法），并修复 `build.bat` 测试覆盖脚本与 nohttps 链接失败。CodeOutline 的 Lua 代码与测试在 LuaJIT 运行时下全部通过；默认仍为内置 Lua 5.5。
 
 ## 2026-09-27
 

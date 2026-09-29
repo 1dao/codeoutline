@@ -39,7 +39,7 @@ sh tools/build-runtime.sh
 
 测试、打包和文档中的命令都使用 `bin/` 中的副本；直接在 `xnet2lua/` 内构建后，需重新运行上述脚本复制。
 
-该构建包含原生 xscan。xproc 在 Windows 上的可用性受上游限制，索引库本身不依赖 xproc。
+该构建使用 LuaJIT 运行时，开启 xproc、MPSCQ 与 HTTPS，包含原生 xscan；发布包使用同一构建。LuaJIT 编译后的代码不触发计数 hook，取消在每个文件的显式检查点生效，单个文件解析期间无法中断（单文件上限 1.5 MB）。
 
 ```powershell
 .\bin\xnet.exe scripts/codeoutline/cli.lua ROOT=C:/src/project "Q=Session.save" BUDGET=16000

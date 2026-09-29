@@ -76,7 +76,7 @@ local function doctor(root)
             assert(type(xutils[name]) == 'function', 'rebuild xnet2lua: missing xutils.' .. name)
         end
         assert(cmsgpack and xcompress and xshared and xnet and xproc, 'rebuild xnet2lua with xproc and default modules')
-        return 'xnet2lua / ' .. _VERSION
+        return 'xnet2lua / ' .. (jit and jit.version or _VERSION)
     end)
     check('scanner', function()
         return xscan and os.getenv('XSCAN_PURE_LUA') ~= '1' and 'native xscan' or 'pure Lua fallback'

@@ -4,11 +4,14 @@ The preview package bundles xnet2lua at the commit recorded in `build-info.json`
 including its HTTP codec. Its BSD-2-Clause notice is copied into `licenses/`.
 The libdeflate and yyjson notices are also copied from the pinned source tree.
 
-CodeOutline uses BSD-2-Clause. The default minilua build includes these notices:
+CodeOutline uses BSD-2-Clause. Release packages use the LuaJIT runtime
+(`tools/build-runtime.*`); the packaging tool ships the notice for whichever Lua
+the runtime links, recorded as `lua` in `build-info.json`:
 
 | Component | Source in xnet2lua | Packaged notice |
 | --- | --- | --- |
-| Lua / minilua | `3rd/minilua.h` | `licenses/lua-minilua.txt` (MIT) |
+| LuaJIT (release; includes Lua 5.1 notice) | `3rd/luajit/` | `licenses/luajit.txt` (MIT) |
+| Lua / minilua (embedded-Lua builds only) | `3rd/minilua.h` | `licenses/lua-minilua.txt` (MIT) |
 | lua-cmsgpack | `xlua/lua_cmsgpack.c` | `licenses/lua-cmsgpack.txt` (MIT) |
 | rpmalloc | `3rd/rpmalloc/` | `licenses/rpmalloc.txt` (source public-domain dedication) |
 | Mbed TLS 3.6.5 | `3rd/mbedtls3/` | `licenses/mbedtls.txt` (Apache-2.0 option) |
@@ -21,8 +24,9 @@ The MCP SDK is a development test dependency and is not in either runtime packag
 Lua, minilua, cmsgpack, and rpmalloc notices were extracted from the pinned runtime
 sources. Mbed TLS's complete dual-license text is preserved from its
 [v3.6.5 upstream LICENSE](https://github.com/Mbed-TLS/mbedtls/blob/v3.6.5/LICENSE);
-this distribution selects its Apache-2.0 option. Recheck this inventory when the
-runtime commit or build options change (in particular, LuaJIT is not bundled).
+this distribution selects its Apache-2.0 option. The LuaJIT notice is copied from
+`3rd/luajit/COPYRIGHT`. Recheck this inventory when the runtime commit or build
+options change.
 
 Staged npm manifests remain `private: true` until platform validation and release
 configuration are complete. The project license does not replace dependency licenses.

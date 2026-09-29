@@ -58,7 +58,13 @@ copy(root .. '/xnet2lua/scripts/core/share/xhttp_codec.lua', 'xnet2lua/scripts/c
 copy(root .. '/xnet2lua/LICENSE', 'licenses/xnet2lua.txt')
 copy(root .. '/xnet2lua/3rd/libdeflate/COPYING', 'licenses/libdeflate.txt')
 copy(root .. '/LICENSE', 'LICENSE')
-for _, name in ipairs({ 'lua-minilua', 'lua-cmsgpack', 'rpmalloc', 'mbedtls' }) do
+-- This tool runs on the runtime it packages, so `jit` tells which Lua is linked in.
+if jit then
+    copy(root .. '/xnet2lua/3rd/luajit/COPYRIGHT', 'licenses/luajit.txt')
+else
+    copy(root .. '/licenses/lua-minilua.txt', 'licenses/lua-minilua.txt')
+end
+for _, name in ipairs({ 'lua-cmsgpack', 'rpmalloc', 'mbedtls' }) do
     copy(root .. '/licenses/' .. name .. '.txt', 'licenses/' .. name .. '.txt')
 end
 local yyjson = read(root .. '/xnet2lua/3rd/yyjson.h'):match('^(.-)%*/')
@@ -73,7 +79,7 @@ local manifest = { name = 'codeoutline-' .. target, version = version, private =
 if platform[1] == 'linux' then manifest.libc = { 'glibc' } end
 write(output .. '/native/package.json', xutils.json_pack(manifest) .. '\n')
 write(output .. '/native/build-info.json', xutils.json_pack({ version = version, target = target,
-    runtimeCommit = runtime_commit, sourceCommit = git('git rev-parse HEAD'),
+    runtimeCommit = runtime_commit, lua = jit and jit.version or _VERSION, sourceCommit = git('git rev-parse HEAD'),
     sourceDirty = git('git status --porcelain --untracked-files=normal') ~= '', sha256 = files,
     releaseReady = false, note = 'Local preview: platform CI and package-name/account verification required before publication' }) .. '\n')
 write(output .. '/native/codeoutline.cmd', '@echo off\r\n"%~dp0xnet2lua\\bin\\xnet.exe" "%~dp0scripts\\codeoutline\\command.lua" LOG_STDERR=1 %*\r\nexit /b %errorlevel%\r\n')

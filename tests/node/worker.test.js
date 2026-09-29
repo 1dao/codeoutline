@@ -38,7 +38,9 @@ test('HTTP cancellation interrupts real indexing and keeps the Lua service respo
     await mkdir(small); await mkdir(large);
     await writeFile(join(small, 'small.lua'), 'function small() return 1 end\n');
     const source = Array.from({ length: 16000 }, (_, i) => `function fn_${i}() return ${i} end\n`).join('');
-    for (let i = 0; i < 12; i++) await writeFile(join(large, `${i}.lua`), source);
+    // Sized so indexing outlasts the checks below on the faster LuaJIT runtime
+    // (12 files finished in ~1.4 s there and raced the abort).
+    for (let i = 0; i < 36; i++) await writeFile(join(large, `${i}.lua`), source);
     const worker = new LuaWorker();
     const endpoint = await startHttp(worker, await configurePaths({ project: small, allowedRoots: [root] }), { port: 0 });
     const client = new Client({ name: 'cancel-test', version: '1' });
@@ -58,6 +60,7 @@ test('HTTP cancellation interrupts real indexing and keeps the Lua service respo
         const t0 = Date.now();
         await client.ping();
         assert.ok(Date.now() - t0 < 1000, 'ping is not blocked by Lua parsing');
+        assert.equal(complete, false, 'indexing is still running when cancelled');
         controller.abort(new Error('test cancelled'));
         await rejected;
         const next = await client.callTool({ name: 'codeoutline_status' });

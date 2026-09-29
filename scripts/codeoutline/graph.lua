@@ -13,6 +13,7 @@
 -- included header > same directory), never across languages. Ties keep up
 -- to MAX_TIES targets instead of guessing.
 
+local control = require('codeoutline.control')
 local M = {}
 
 M.MAX_TIES = 3
@@ -315,7 +316,10 @@ function M.build(idx)
     local paths = {}
     for rel in pairs(idx.files) do paths[#paths + 1] = rel end
     table.sort(paths)
+    -- Checkpoints per file: LuaJIT does not run count hooks inside compiled
+    -- loops, so cancellation relies on these (as in Index:refresh).
     for f, rel in ipairs(paths) do
+        control.check()
         local rec = idx.files[rel]
         G.files[f] = rec
         G.file_index[rel] = f
@@ -346,6 +350,7 @@ function M.build(idx)
     -- Edges.
     local edges = 0
     for f, rec in ipairs(G.files) do
+        control.check()
         local deps, paired = resolve_deps(G, f)
         G.deps[f] = deps
         for _, ref in ipairs(rec.refs) do

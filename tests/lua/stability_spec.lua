@@ -125,13 +125,18 @@ spec.describe('service stability', function()
         service.configure({ max_projects = 8 })
     end)
     spec.it('rg respects ignored extensions and negations outside a git repository', function()
+        if not index.rg_available() then print('SKIP ripgrep is unavailable'); return end
         write(project .. '/.gitignore', '*.lua\n!keep.lua\n')
         write(project .. '/keep.lua', 'function kept() end\n')
-        local idx = index.open(project, { lister = 'rg', cache_path = cache })
-        local files = idx:list_files()
-        spec.equal(#files, 1)
-        spec.equal(files[1], 'keep.lua')
+        local ok, err = pcall(function()
+            local idx = index.open(project, { lister = 'rg', cache_path = cache })
+            local files = idx:list_files()
+            spec.equal(#files, 1)
+            spec.equal(files[1], 'keep.lua')
+        end)
+        -- Later cases share the fixture; clean up even when rg fails.
         os.remove(project .. '/.gitignore'); os.remove(project .. '/keep.lua')
+        if not ok then error(err, 0) end
     end)
     spec.it('validates query and budgets before indexing', function()
         for _, query in ipairs({ '', '  ', 'a\0b', '\255', string.rep('x', 4097) }) do

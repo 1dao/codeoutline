@@ -221,6 +221,7 @@ local function rg_available()
     end
     return has_rg
 end
+M.rg_available = rg_available
 
 -- Directories the walk never enters, besides hidden ones (like rg's default).
 M.WALK_SKIP = { node_modules = true, __pycache__ = true }

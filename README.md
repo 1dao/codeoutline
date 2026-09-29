@@ -65,7 +65,7 @@ HTTP 使用 `--host`、`--port`，访问范围使用可重复的 `--allow-root`�
 .\xnet2lua\bin\xnet.exe scripts/codeoutline/main.lua HTTP=1 PROJECT=C:/src/project PORT=19876
 ```
 
-从其他工作目录启动时，将可执行文件和 `main.lua` 写成绝对路径。`PROJECT` 默认不设置；`ALLOW_ROOT` 默认是 `PROJECT` 或启动目录，可重复传入以允许多个目录。未设置 `PROJECT` 时，每次调用需要 `projectPath`。路径指向服务所在机器，不是客户端机器。
+从其他工作目录启动时，将可执行文件和 `main.lua` 写成绝对路径。`PROJECT` 默认不设置；`ALLOW_ROOT` 默认是 `PROJECT` 或启动目录，可重复传入以允许多个目录。调用未传 `projectPath` 时依次使用 `PROJECT`、客户端 roots（`roots/list` 返回的第一个 `file://` 目录，按会话缓存，收到 `roots/list_changed` 后重新获取，10 秒无响应则跳过）、stdio 模式的启动目录；都没有时返回错误。结果仍须位于 `ALLOW_ROOT` 内。因此全局配置无需写 `PROJECT`。路径指向服务所在机器，不是客户端机器。
 
 协议基线为 [MCP 2025-06-18](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports)。提供 `codeoutline_explore`（`projectPath`、`query`、可选 `budget`）、`codeoutline_status` 和 `codeoutline_rebuild`。查询预算为 256–262144 字节，默认 16000；超限输出保持 UTF-8 有效并附截断提示。
 

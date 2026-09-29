@@ -6,7 +6,9 @@ import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import http from 'node:http';
+import { pathToFileURL } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { ListRootsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { LuaWorker, configurePaths, startHttp, main, defaultRuntime } from './helpers.js';
@@ -95,6 +97,69 @@ test('official SDK HTTP: sessions, concurrency, refresh, path aliases and perime
         assert.equal((await bad.json()).error.code, -32602);
         await transport.terminateSession();
     } finally { await c.close(); await c2.close(); await endpoint.close(); await worker.close(); await f.cleanup(); }
+});
+
+async function twoProjects() {
+    const f = await fixture();
+    const other = join(f.root, 'other');
+    await mkdir(other);
+    await writeFile(join(other, 'a.lua'), 'function a() end\n');
+    await writeFile(join(other, 'b.lua'), 'function b() end\n');
+    return { ...f, other };
+}
+function rootsClient(getRoot) {
+    const c = new Client({ name: 'codeoutline-roots', version: '1.0.0' }, { capabilities: { roots: { listChanged: true } } });
+    let calls = 0;
+    c.setRequestHandler(ListRootsRequestSchema, async () => {
+        calls += 1;
+        const root = getRoot();
+        return { roots: root ? [{ uri: pathToFileURL(root).href, name: 'workspace' }] : [] };
+    });
+    return { c, calls: () => calls };
+}
+const files = async (c) => JSON.parse((await c.callTool({ name: 'codeoutline_status' })).content[0].text).files;
+
+test('stdio without PROJECT defaults to client roots, then the working directory', { timeout: 30000 }, async () => {
+    const f = await twoProjects();
+    const stdio = () => new StdioClientTransport({ command: defaultRuntime,
+        args: [main, 'STDIO=1', `ALLOW_ROOT=${f.root}`], cwd: f.project, stderr: 'ignore' });
+    const plain = client();
+    let root = f.other;
+    const withRoots = rootsClient(() => root);
+    try {
+        await plain.connect(stdio());
+        assert.equal(await files(plain), 1, 'no roots capability uses the startup directory');
+        await withRoots.c.connect(stdio());
+        assert.equal(await files(withRoots.c), 2, 'first client root wins over the startup directory');
+        assert.equal(await files(withRoots.c), 2);
+        assert.equal(withRoots.calls(), 1, 'roots are cached per session');
+        root = undefined;
+        await withRoots.c.sendRootsListChanged();
+        assert.equal(await files(withRoots.c), 1, 'empty roots fall back to the startup directory');
+        assert.equal(withRoots.calls(), 2);
+        root = f.other;
+        await withRoots.c.sendRootsListChanged();
+        const explicit = await withRoots.c.callTool({ name: 'codeoutline_status', arguments: { projectPath: f.project } });
+        assert.equal(JSON.parse(explicit.content[0].text).files, 1, 'explicit projectPath wins');
+        assert.equal(withRoots.calls(), 2, 'explicit projectPath skips roots/list');
+    } finally { await plain.close(); await withRoots.c.close(); await f.cleanup(); }
+});
+
+test('HTTP without PROJECT requests client roots over the response stream', { timeout: 30000 }, async () => {
+    const f = await twoProjects();
+    const worker = new LuaWorker();
+    const endpoint = await startHttp(worker, await configurePaths({ allowedRoots: [f.root] }), { port: 0 });
+    const plain = client();
+    const withRoots = rootsClient(() => f.other);
+    try {
+        await plain.connect(new StreamableHTTPClientTransport(new URL(endpoint.url)));
+        const missing = await plain.callTool({ name: 'codeoutline_status' });
+        assert.equal(missing.isError, true);
+        assert.match(missing.content[0].text, /projectPath is required/);
+        await withRoots.c.connect(new StreamableHTTPClientTransport(new URL(endpoint.url)));
+        assert.deepEqual(await Promise.all([files(withRoots.c), files(withRoots.c)]), [2, 2]);
+        assert.equal(withRoots.calls(), 1, 'concurrent calls share one roots/list request');
+    } finally { await plain.close(); await withRoots.c.close(); await endpoint.close(); await worker.close(); await f.cleanup(); }
 });
 
 test('remote bind requires auth and explicit allowed host', async () => {

@@ -15,7 +15,7 @@ for _, argument in ipairs(arg or {}) do
 end
 assert((options.STDIO == '1') ~= (options.HTTP == '1'), 'Specify exactly one of STDIO=1 or HTTP=1')
 local config = { roots = {}, project = options.PROJECT and assert(paths.canonical(options.PROJECT)),
-    host = options.HOST or '127.0.0.1', port = tonumber(options.PORT or '19876'),
+    workdir = options.STDIO == '1' and paths.canonical('.') or nil, host = options.HOST or '127.0.0.1', port = tonumber(options.PORT or '19876'),
     token = os.getenv('CODEOUTLINE_TOKEN'), hosts = options.ALLOW_HOST, origins = options.ALLOW_ORIGIN }
 assert(config.port and config.port % 1 == 0 and config.port >= 1 and config.port <= 65535, 'Invalid PORT')
 if config.token == '' then config.token = nil end

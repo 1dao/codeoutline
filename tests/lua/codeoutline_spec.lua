@@ -610,6 +610,19 @@ local function edges_from(G, name)
     return table.concat(out, ' ')
 end
 
+spec.describe('mcp roots', function()
+    spec.it('maps file URIs to local paths', function()
+        local uri_path = require('codeoutline.mcp').uri_path
+        spec.equal(uri_path('file:///C:/src/%E4%B8%AD%E6%96%87%20app'), 'C:/src/中文 app')
+        spec.equal(uri_path('file:///c%3A/src'), 'c:/src')
+        spec.equal(uri_path('file:///home/me/app'), '/home/me/app')
+        spec.equal(uri_path('file://localhost/srv/app'), '/srv/app')
+        spec.equal(uri_path('file://server/share/app'), '//server/share/app')
+        spec.equal(uri_path('https://example.com/app'), nil)
+        spec.equal(uri_path(nil), nil)
+    end)
+end)
+
 spec.describe('graph', function()
     local _, G = svc.get(tmp_root, { cache_path = cache })
     spec.it('binds calls across #include to the defining .c file', function()

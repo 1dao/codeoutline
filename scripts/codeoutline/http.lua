@@ -89,7 +89,7 @@ function M.start(config, submit, cancel, codec)
             else
                 local headers = session.initialized and { ['Mcp-Session-Id'] = sid } or {}
                 if not session.initialized then remove_session(sid) end
-                respond(conn, req, response and 200 or (msg.id == nil and 202 or 204),
+                respond(conn, req, response and 200 or ((msg.id == nil or msg.method == nil) and 202 or 204),
                     response and xutils.json_pack(response) or '', headers)
             end
         end)

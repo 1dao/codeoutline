@@ -12,9 +12,11 @@ try {
     // Platforms served by another package, which declares their CPU so npm
     // installs it: Windows 11 on ARM emulates x64; macOS ships one universal binary.
     const shared = { 'win32-arm64': 'win32-x64', 'darwin-arm64': 'darwin-universal', 'darwin-x64': 'darwin-universal' };
-    let packageName = `codeoutline-${platform}`;
+    // Scoped: npm's spam filter rejects new unscoped "<name>-<platform>" names.
+    const packageFor = (target) => `@chybin/codeoutline-${target}`;
+    let packageName = packageFor(platform);
     if (!manifest.optionalDependencies?.[packageName] && shared[platform]) {
-        packageName = `codeoutline-${shared[platform]}`;
+        packageName = packageFor(shared[platform]);
     }
     if (!manifest.optionalDependencies?.[packageName]) {
         throw new Error(`Unsupported platform ${platform}. Use a native build; see README.md.`);

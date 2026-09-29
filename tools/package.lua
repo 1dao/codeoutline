@@ -84,8 +84,13 @@ if release then
         'tag ' .. tostring(options.TAG) .. ' does not match version ' .. version)
 end
 local repository = { type = 'git', url = 'git+https://github.com/1dao/codeoutline.git' }
-local manifest = { name = 'codeoutline-' .. target, version = version, private = not release or nil,
-    repository = repository,
+-- Platform packages are scoped: npm's spam filter rejects new unscoped
+-- "<name>-<platform>" names, and a scope keeps look-alikes out. Scoped
+-- packages default to restricted, so they declare public access.
+local scope = '@chybin/'
+local public = { access = 'public' }
+local manifest = { name = scope .. 'codeoutline-' .. target, version = version, private = not release or nil,
+    repository = repository, publishConfig = public,
     description = 'CodeOutline native runtime and Lua implementation for ' .. target,
     os = { platform[1] }, cpu = { platform[2], platform[3] }, license = 'BSD-2-Clause',
     files = { 'scripts/', 'xnet2lua/', 'licenses/', 'LICENSE', 'codeoutline', 'codeoutline.cmd', 'build-info.json', '*.md' } }
@@ -99,12 +104,12 @@ write(output .. '/native/build-info.json', xutils.json_pack({ version = version,
 write(output .. '/native/codeoutline.cmd', '@echo off\r\n"%~dp0xnet2lua\\bin\\xnet.exe" "%~dp0scripts\\codeoutline\\command.lua" LOG_STDERR=1 %*\r\nexit /b %errorlevel%\r\n')
 write(output .. '/native/codeoutline', '#!/bin/sh\nset -eu\nbase=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\nexec "$base/xnet2lua/bin/xnet" "$base/scripts/codeoutline/command.lua" LOG_STDERR=1 "$@"\n')
 local dependencies = {}
-for name in pairs(targets) do dependencies['codeoutline-' .. name] = version end
+for name in pairs(targets) do dependencies[scope .. 'codeoutline-' .. name] = version end
 write(output .. '/npm/package.json', xutils.json_pack({ name = 'codeoutline', version = version,
     private = not release or nil, license = 'BSD-2-Clause',
     description = 'MCP server for code exploration: symbols, line-numbered source and call paths',
     keywords = { 'mcp', 'model-context-protocol', 'code-index', 'call-graph', 'lua' },
-    repository = repository, homepage = 'https://github.com/1dao/codeoutline#readme',
+    repository = repository, homepage = 'https://github.com/1dao/codeoutline#readme', publishConfig = public,
     bugs = { url = 'https://github.com/1dao/codeoutline/issues' },
     bin = { codeoutline = 'launcher/codeoutline.cjs' }, engines = { node = '>=20' },
     files = { 'launcher/', 'LICENSE', '*.md' }, optionalDependencies = dependencies }) .. '\n')

@@ -8,7 +8,7 @@ import { mkdtemp, mkdir, writeFile, readFile, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { root, defaultRuntime } from './node/helpers.js';
+import { root, defaultRuntime, version } from './node/helpers.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
@@ -51,8 +51,8 @@ test('packed npm and native artifacts work outside the checkout', { timeout: 120
     assert.equal(JSON.parse(invoke('rebuild')).cacheLoaded, false);
     // Native runtime and launcher also work without Node or a source checkout.
     if (process.platform === 'win32') {
-        assert.match(run(process.env.ComSpec || 'cmd.exe', ['/d', '/c', join(native, 'codeoutline.cmd'), '--version'], project), /^0\.1\.0-dev\.0/);
-    } else assert.match(run(join(native, 'codeoutline'), ['--version'], project), /^0\.1\.0-dev\.0/);
+        assert.equal(run(process.env.ComSpec || 'cmd.exe', ['/d', '/c', join(native, 'codeoutline.cmd'), '--version'], project).trim(), version);
+    } else assert.equal(run(join(native, 'codeoutline'), ['--version'], project).trim(), version);
     const transport = new StdioClientTransport({ command: process.execPath,
         args: [entry, 'serve', '--stdio', '--project', project], cwd: project, stderr: 'pipe' });
     transport.stderr?.resume();

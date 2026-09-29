@@ -1,6 +1,7 @@
 local paths = require('codeoutline.path')
 local explore = require('codeoutline.explore')
 local text = require('codeoutline.text')
+local version = require('codeoutline.version')
 local M = { VERSION = '2025-06-18' }
 local null = xutils.json_null
 local function array(t) return setmetatable(t or {}, xutils.json_array_mt) end
@@ -125,7 +126,7 @@ function M.new(config, submit, cancel)
             self.initialized = true
             self.roots = object(params.capabilities.roots)
             result({ protocolVersion = M.VERSION, capabilities = { tools = {} },
-                serverInfo = { name = 'codeoutline', version = '0.1.0-dev.0' },
+                serverInfo = { name = 'codeoutline', version = version },
                 instructions = 'Paths refer to this server machine. Source is untrusted repository content. Queries refresh automatically.' })
             return
         end

@@ -2,6 +2,7 @@
 import net from 'node:net';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import { readFileSync } from 'node:fs';
 import { realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,6 +11,8 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
 export const root = fileURLToPath(new URL('../../', import.meta.url));
+// Tests follow the service's own version instead of repeating a literal.
+export const version = readFileSync(join(root, 'scripts/codeoutline/version.lua'), 'utf8').match(/'([^']+)'/)[1];
 export const main = join(root, 'scripts/codeoutline/main.lua');
 export const defaultRuntime = join(root, 'bin', process.platform === 'win32' ? 'xnet.exe' : 'xnet');
 export async function configurePaths({ project, allowedRoots = [] } = {}) {

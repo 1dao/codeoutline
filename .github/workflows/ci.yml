@@ -111,7 +111,12 @@ jobs:
       - name: Stage artifacts
         run: |
           $runtime = if ($IsWindows) { './bin/xnet.exe' } else { './bin/xnet' }
-          & $runtime tools/package.lua TARGET=${{ matrix.target }} OUTPUT=dist/${{ matrix.target }} LOG_STDERR=1
+          # Tag pushes stage publishable packages; package.lua checks the tag
+          # against the version and refuses a dirty checkout.
+          $release = '${{ github.ref_type }}' -eq 'tag'
+          $releaseArgs = if ($release) { @('RELEASE=1', 'TAG=${{ github.ref_name }}') } else { @() }
+          $suffix = if ($release) { '' } else { '-preview' }
+          & $runtime tools/package.lua TARGET=${{ matrix.target }} OUTPUT=dist/${{ matrix.target }} LOG_STDERR=1 @releaseArgs
           if ($LASTEXITCODE -ne 0) { throw 'Staging failed' }
           if (-not $IsWindows) {
             chmod +x dist/${{ matrix.target }}/native/codeoutline dist/${{ matrix.target }}/native/xnet2lua/bin/xnet
@@ -120,7 +125,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Native package failed' }
           npm pack ./dist/${{ matrix.target }}/npm --pack-destination ./dist
           if ($LASTEXITCODE -ne 0) { throw 'Entry package failed' }
-          tar -czf dist/codeoutline-${{ matrix.target }}-preview.tar.gz -C dist/${{ matrix.target }}/native .
+          tar -czf "dist/codeoutline-${{ matrix.target }}$suffix.tar.gz" -C dist/${{ matrix.target }}/native .
           if ($LASTEXITCODE -ne 0) { throw 'Native archive failed' }
           Get-ChildItem dist -File | ForEach-Object {
             $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLower()

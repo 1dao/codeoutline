@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { root, defaultRuntime } from './helpers.js';
+import { root, defaultRuntime, version } from './helpers.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
@@ -20,7 +20,7 @@ test('unified Lua CLI: commands, JSON output, failures and MCP startup', async (
     try {
         await writeFile(join(project, 'demo.lua'), 'function hello_world() return 7 end\n');
         assert.match(success('--help'), /codeoutline doctor/);
-        assert.match(success('--version'), /^0\.1\.0-dev\.0\r?\n$/);
+        assert.equal(success('--version').trim(), version);
         assert.equal(JSON.parse(success('doctor')).ok, true);
         assert.equal(JSON.parse(success('status')).files, 1);
         assert.equal(JSON.parse(success('rebuild')).cacheLoaded, false);

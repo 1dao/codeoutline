@@ -25,7 +25,7 @@ Install both generated tarballs in a fresh directory (use absolute paths):
 
 ```powershell
 npm init -y
-npm install --offline --ignore-scripts C:/build/codeoutline-0.1.0-dev.0.tgz C:/build/codeoutline-win32-x64-0.1.0-dev.0.tgz
+npm install --offline --ignore-scripts C:/build/codeoutline-0.1.0.tgz C:/build/codeoutline-win32-x64-0.1.0.tgz
 .\node_modules\.bin\codeoutline.cmd doctor --project C:/src/project
 .\node_modules\.bin\codeoutline.cmd serve --stdio --project C:/src/project
 ```
@@ -74,12 +74,14 @@ and runs the x64 package under emulation; Windows 10 on ARM cannot emulate x64.
 The binary is not code-signed, so a downloaded archive may trigger SmartScreen
 or be blocked by application allow-listing.
 
-Preview packages intentionally block `npm publish` using `private: true`.
-Before release: review THIRD_PARTY.md against build options, choose/verify public package names and
-account permissions, align version numbers, validate each platform, and remove
-the publication guard in the packaging tool. Publish platform packages first,
-then the entry package at the identical version. Generate archive checksums.
-Public publishing and repository pushes require an explicit release request.
+Staged packages keep `private: true`, which blocks `npm publish`, unless the
+packaging tool runs with `RELEASE=1`. A release build refuses to run from a
+checkout with tracked changes, from a pre-release version such as `-dev`, or
+when `TAG` does not equal `v<version>`. CI stages release packages only for tag
+pushes (`RELEASE=1 TAG=<tag>`), so pushing `v0.1.0` from a commit whose
+`scripts/codeoutline/version.lua` says `0.1.0` yields the publishable artifacts;
+branch pushes keep producing private previews. Publish the platform packages
+first, then the entry package at the identical version.
 
 The workflow in `.github/workflows/ci.yml` builds and tests all three targets and
 uploads preview tarballs, native archives, and SHA-256 checksums. Adding the

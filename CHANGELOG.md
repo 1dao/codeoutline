@@ -1,8 +1,8 @@
 # 变更日志
 
-本文件记录 CodeOutline 的主要变更。尚未发布安装包，当前版本为 `0.1.0-dev.0`。
+本文件记录 CodeOutline 的主要变更。首个发布版本为 `0.1.0`。
 
-## 未发布
+## 0.1.0 (2026-09-30)
 
 ### 新增
 
@@ -22,6 +22,7 @@
 
 ### 变更
 
+- 版本号定为 `0.1.0`，MCP `serverInfo` 改为读取 `version.lua`。打包工具新增 `RELEASE=1`：仅在干净的检出、正式版本号且 `TAG` 与版本一致时去掉 `private: true`，并在清单中补充仓库、主页与关键词；CI 仅对标签推送生成可发布产物，原生压缩包去掉 `-preview` 后缀。
 - 开发用运行时改放在仓库根目录 `bin/`：`tools/build-runtime.ps1` 与新增的 `tools/build-runtime.sh` 构建后复制到此处，测试、打包、CI 和文档统一使用 `bin/xnet`。发布包内部结构不变。
 - Linux 运行时改在 `manylinux_2_28`（AlmaLinux 8，glibc 2.28）容器中构建，原先在 CI 主机 ubuntu-22.04（glibc 2.35）上构建的包无法在 CentOS Stream 9（glibc 2.34）等系统运行。CI 检查二进制所需的最高 glibc 符号版本不超过 2.28，并在 AlmaLinux 8 与 CentOS Stream 9 容器中运行测试；npm 启动器遇到低于 2.28 的 glibc 时给出明确提示。
 - Windows 平台包同时声明 `arm64`，启动器在 Windows 11 ARM64 上回退到 x64 包经仿真运行，不再报不支持的平台。分发文档补充 Windows 系统要求：x64、静态 CRT、无需 VC++ 运行库，原生包最低 Windows 8 / Server 2012。

@@ -72,7 +72,20 @@ write(output .. '/native/licenses/yyjson.txt', assert(yyjson) .. '*/\n')
 copy(root .. '/README.md', 'README.md')
 copy(root .. '/docs/DISTRIBUTION.md', 'DISTRIBUTION.md')
 copy(root .. '/docs/THIRD_PARTY.md', 'THIRD_PARTY.md')
-local manifest = { name = 'codeoutline-' .. target, version = version, private = true,
+-- RELEASE=1 stages publishable packages; anything else keeps `private: true`
+-- so a preview cannot be published by accident. Untracked files inside the
+-- submodule (its build output) do not count as a dirty checkout.
+local release = options.RELEASE == '1'
+local source_dirty = git('git status --porcelain --untracked-files=normal --ignore-submodules=untracked') ~= ''
+if release then
+    assert(not source_dirty, 'RELEASE=1 requires a clean checkout')
+    assert(not version:find('-', 1, true), 'RELEASE=1 requires a final version, not ' .. version)
+    assert(not options.TAG or options.TAG == 'v' .. version,
+        'tag ' .. tostring(options.TAG) .. ' does not match version ' .. version)
+end
+local repository = { type = 'git', url = 'git+https://github.com/1dao/codeoutline.git' }
+local manifest = { name = 'codeoutline-' .. target, version = version, private = not release or nil,
+    repository = repository,
     description = 'CodeOutline native runtime and Lua implementation for ' .. target,
     os = { platform[1] }, cpu = { platform[2], platform[3] }, license = 'BSD-2-Clause',
     files = { 'scripts/', 'xnet2lua/', 'licenses/', 'LICENSE', 'codeoutline', 'codeoutline.cmd', 'build-info.json', '*.md' } }
@@ -80,14 +93,19 @@ if platform[1] == 'linux' then manifest.libc = { 'glibc' } end
 write(output .. '/native/package.json', xutils.json_pack(manifest) .. '\n')
 write(output .. '/native/build-info.json', xutils.json_pack({ version = version, target = target,
     runtimeCommit = runtime_commit, lua = jit and jit.version or _VERSION, sourceCommit = git('git rev-parse HEAD'),
-    sourceDirty = git('git status --porcelain --untracked-files=normal') ~= '', sha256 = files,
-    releaseReady = false, note = 'Local preview: platform CI and package-name/account verification required before publication' }) .. '\n')
+    sourceDirty = source_dirty, sha256 = files, releaseReady = release,
+    note = release and 'Release build from a clean checkout'
+        or 'Preview: stage with RELEASE=1 from a clean, tagged checkout to publish' }) .. '\n')
 write(output .. '/native/codeoutline.cmd', '@echo off\r\n"%~dp0xnet2lua\\bin\\xnet.exe" "%~dp0scripts\\codeoutline\\command.lua" LOG_STDERR=1 %*\r\nexit /b %errorlevel%\r\n')
 write(output .. '/native/codeoutline', '#!/bin/sh\nset -eu\nbase=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\nexec "$base/xnet2lua/bin/xnet" "$base/scripts/codeoutline/command.lua" LOG_STDERR=1 "$@"\n')
 local dependencies = {}
 for name in pairs(targets) do dependencies['codeoutline-' .. name] = version end
 write(output .. '/npm/package.json', xutils.json_pack({ name = 'codeoutline', version = version,
-    private = true, license = 'BSD-2-Clause', description = 'Lua code indexing and MCP service',
+    private = not release or nil, license = 'BSD-2-Clause',
+    description = 'MCP server for code exploration: symbols, line-numbered source and call paths',
+    keywords = { 'mcp', 'model-context-protocol', 'code-index', 'call-graph', 'lua' },
+    repository = repository, homepage = 'https://github.com/1dao/codeoutline#readme',
+    bugs = { url = 'https://github.com/1dao/codeoutline/issues' },
     bin = { codeoutline = 'launcher/codeoutline.cjs' }, engines = { node = '>=20' },
     files = { 'launcher/', 'LICENSE', '*.md' }, optionalDependencies = dependencies }) .. '\n')
 write(output .. '/npm/LICENSE', read(root .. '/LICENSE'))

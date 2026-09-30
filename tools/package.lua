@@ -87,7 +87,7 @@ local repository = { type = 'git', url = 'git+https://github.com/1dao/codeoutlin
 -- Platform packages are scoped: npm's spam filter rejects new unscoped
 -- "<name>-<platform>" names, and a scope keeps look-alikes out. Scoped
 -- packages default to restricted, so they declare public access.
-local scope = '@chybin/'
+local scope = '@codua/'
 local public = { access = 'public' }
 local manifest = { name = scope .. 'codeoutline-' .. target, version = version, private = not release or nil,
     repository = repository, publishConfig = public,

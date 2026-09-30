@@ -25,7 +25,7 @@ Install both generated tarballs in a fresh directory (use absolute paths):
 
 ```powershell
 npm init -y
-npm install --offline --ignore-scripts C:/build/codeoutline-0.1.0.tgz C:/build/chybin-codeoutline-win32-x64-0.1.0.tgz
+npm install --offline --ignore-scripts C:/build/codeoutline-0.1.0.tgz C:/build/codua-codeoutline-win32-x64-0.1.0.tgz
 .\node_modules\.bin\codeoutline.cmd doctor --project C:/src/project
 .\node_modules\.bin\codeoutline.cmd serve --stdio --project C:/src/project
 ```
@@ -83,9 +83,9 @@ pushes (`RELEASE=1 TAG=<tag>`), so pushing `v0.1.0` from a commit whose
 branch pushes keep producing private previews. Publish the platform packages
 first, then the entry package at the identical version.
 
-Platform packages are published under the `@chybin` scope
-(`@chybin/codeoutline-win32-x64`, `-linux-x64`, `-darwin-universal`; `npm pack`
-names their tarballs `chybin-codeoutline-<target>-<version>.tgz`). npm's spam
+Platform packages are published under the `@codua` scope
+(`@codua/codeoutline-win32-x64`, `-linux-x64`, `-darwin-universal`; `npm pack`
+names their tarballs `codua-codeoutline-<target>-<version>.tgz`). npm's spam
 filter rejects new unscoped `<name>-<platform>` names, and a scope keeps
 look-alike packages out. Users still install the unscoped entry package
 `codeoutline`. Every package declares `publishConfig.access = public`.

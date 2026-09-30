@@ -98,7 +98,7 @@ test('packed npm and native artifacts work outside the checkout', { timeout: 120
     await writeFile(join(isolated, 'package.json'), '{"name":"missing-smoke","private":true}\n');
     npm(['install', '--offline', '--omit=optional', '--ignore-scripts', '--no-audit', '--no-fund', archives[1]], isolated);
     const missing = spawnSync(process.execPath, [join(isolated, 'node_modules/codeoutline/launcher/codeoutline.cjs'), '--version'], { encoding: 'utf8' });
-    assert.notEqual(missing.status, 0); assert.match(missing.stderr, /Missing @chybin\/codeoutline-/);
+    assert.notEqual(missing.status, 0); assert.match(missing.stderr, /Missing @codua\/codeoutline-/);
     // Retain artifacts for inspection and an independent pnpm installation.
     console.log(`Distribution preview: ${temp}`);
 });

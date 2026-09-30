@@ -1,6 +1,12 @@
 # 变更日志
 
-本文件记录 CodeOutline 的主要变更。首个发布版本为 `0.1.0`。
+本文件记录 CodeOutline 的主要变更。
+
+## 0.1.1 (未发布)
+
+### 依赖
+
+- xnet2lua 更新至 `f2c3ddf`：新增 `LOG_LEVEL`、`LOG_FILE`、`LOG_DIR` 启动参数；修复 `build.bat` 重新构建 LuaJIT 时误链 `luajit.lib`。
 
 ## 0.1.0 (2026-09-30)
 

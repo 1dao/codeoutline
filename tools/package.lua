@@ -70,6 +70,7 @@ end
 local yyjson = read(root .. '/xnet2lua/3rd/yyjson.h'):match('^(.-)%*/')
 write(output .. '/native/licenses/yyjson.txt', assert(yyjson) .. '*/\n')
 copy(root .. '/README.md', 'README.md')
+copy(root .. '/README.zh-CN.md', 'README.zh-CN.md')
 copy(root .. '/docs/DISTRIBUTION.md', 'DISTRIBUTION.md')
 copy(root .. '/docs/THIRD_PARTY.md', 'THIRD_PARTY.md')
 -- RELEASE=1 stages publishable packages; anything else keeps `private: true`
@@ -116,6 +117,7 @@ write(output .. '/npm/package.json', xutils.json_pack({ name = 'codeoutline', ve
 write(output .. '/npm/LICENSE', read(root .. '/LICENSE'))
 write(output .. '/npm/launcher/codeoutline.cjs', read(root .. '/launcher/codeoutline.cjs'))
 write(output .. '/npm/README.md', read(root .. '/README.md'))
+write(output .. '/npm/README.zh-CN.md', read(root .. '/README.zh-CN.md'))
 write(output .. '/npm/DISTRIBUTION.md', read(root .. '/docs/DISTRIBUTION.md'))
 io.write(xutils.json_pack({ output = output, target = target, version = version, runtimeCommit = runtime_commit }), '\n')
 return { __init = function() xthread.stop(0) end }

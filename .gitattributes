@@ -1,0 +1,3 @@
+# LF everywhere, including Windows checkouts (CI builds the Windows packages
+# from one, which otherwise ship CRLF text files). Binaries are detected.
+* text=auto eol=lf

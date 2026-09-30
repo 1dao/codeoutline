@@ -52,10 +52,19 @@ return {
             assert(xutils.read_stdin, 'Rebuild runtime for nonblocking stdin support')
             stdio = mcp.new(config, submit, cancel)
         else
-            local runtime = options.RUNTIME_ROOT or install .. '/xnet2lua'
-            local codec = dofile(runtime .. '/scripts/core/share/xhttp_codec.lua')
+            -- Packages ship the codec as lib/xhttp_codec.lua; a source checkout
+            -- reads it from the xnet2lua submodule.
+            local codec_path = options.RUNTIME_ROOT and options.RUNTIME_ROOT .. '/scripts/core/share/xhttp_codec.lua'
+                or install .. '/lib/xhttp_codec.lua'
+            local probe = io.open(codec_path, 'rb')
+            if probe then probe:close()
+            else codec_path = install .. '/xnet2lua/scripts/core/share/xhttp_codec.lua' end
+            local codec = dofile(codec_path)
             endpoint = http.start(config, submit, cancel, codec)
-            io.stderr:write(string.format('[codeoutline] listening http://%s:%d/mcp\n', config.host, config.port))
+            -- A status line, not an error: xnet routes io.stderr through the
+            -- error log. HTTP mode leaves stdout free (stdio mode owns it).
+            io.stdout:write(string.format('[codeoutline] listening http://%s:%d/mcp\n', config.host, config.port))
+            io.stdout:flush()
         end
     end,
     __thread_handle = function(_, op, id, ok, result)

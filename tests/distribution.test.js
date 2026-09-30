@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import net from 'node:net';
+import { existsSync } from 'node:fs';
 import { mkdtemp, mkdir, writeFile, readFile, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -30,7 +31,7 @@ test('packed npm and native artifacts work outside the checkout', { timeout: 120
     const npm = (args, cwd) => run(process.execPath, [process.env.npm_execpath, ...args], cwd);
     run(defaultRuntime, [join(root, 'tools/package.lua'), `TARGET=${target}`, `OUTPUT=${stage}`, 'LOG_STDERR=1'], root);
     const native = join(stage, 'native');
-    const nativeBin = join(native, 'xnet2lua/bin', process.platform === 'win32' ? 'xnet.exe' : 'xnet');
+    const nativeBin = join(native, 'bin', process.platform === 'win32' ? 'xnet.exe' : 'xnet');
     if (process.platform !== 'win32') { await chmod(nativeBin, 0o755); await chmod(join(native, 'codeoutline'), 0o755); }
     const info = JSON.parse(await readFile(join(native, 'build-info.json'), 'utf8'));
     for (const [path, hash] of Object.entries(info.sha256)) {
@@ -40,6 +41,13 @@ test('packed npm and native artifacts work outside the checkout', { timeout: 120
     for (const folder of [native, join(stage, 'npm')]) {
         const [packed] = JSON.parse(npm(['pack', folder, '--json', '--pack-destination', temp]));
         for (const f of packed.files) assert(!/(^|\/)(AGENTS\.md|PLAN\.md|tests|node_modules|\.git)(\/|$)/.test(f.path), f.path);
+        if (folder === native) {
+            // Flat layout: the runtime and its HTTP codec, not the submodule's tree.
+            const paths = packed.files.map((f) => f.path);
+            assert(paths.includes(`bin/${process.platform === 'win32' ? 'xnet.exe' : 'xnet'}`), paths.join(' '));
+            assert(paths.includes('lib/xhttp_codec.lua'), paths.join(' '));
+            assert(!paths.some((p) => p.startsWith('xnet2lua/')), paths.join(' '));
+        }
         archives.push(join(temp, packed.filename));
     }
     npm(['install', '--offline', '--ignore-scripts', '--no-audit', '--no-fund', ...archives], install);
@@ -53,6 +61,16 @@ test('packed npm and native artifacts work outside the checkout', { timeout: 120
     if (process.platform === 'win32') {
         assert.equal(run(process.env.ComSpec || 'cmd.exe', ['/d', '/c', join(native, 'codeoutline.cmd'), '--version'], project).trim(), version);
     } else assert.equal(run(join(native, 'codeoutline'), ['--version'], project).trim(), version);
+    // Both launchers keep the runtime quiet and leave no log files behind.
+    const nativeCommand = process.platform === 'win32'
+        ? [process.env.ComSpec || 'cmd.exe', ['/d', '/c', join(native, 'codeoutline.cmd'), '--version']]
+        : [join(native, 'codeoutline'), ['--version']];
+    for (const [command, args] of [[process.execPath, [entry, '--version']], nativeCommand]) {
+        const r = spawnSync(command, args, { cwd: project, encoding: 'utf8', timeout: 60000 });
+        assert.equal(r.status, 0, r.stderr);
+        assert.equal(r.stderr, '', `${command} ${args.join(' ')} wrote to stderr:\n${r.stderr}`);
+    }
+    assert(!existsSync(join(project, 'logs')), 'CLI commands created logs/ in the project');
     const transport = new StdioClientTransport({ command: process.execPath,
         args: [entry, 'serve', '--stdio', '--project', project], cwd: project, stderr: 'pipe' });
     transport.stderr?.resume();
@@ -70,19 +88,22 @@ test('packed npm and native artifacts work outside the checkout', { timeout: 120
     const child = spawn(process.execPath, [entry, 'serve', '--http', '--port', String(port), '--project', project], {
         cwd: project, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
     });
-    child.stdout.resume();
     const httpClient = new Client({ name: 'installed-http-smoke', version: '1' });
+    let httpStderr = '';
     try {
         await new Promise((resolve, reject) => {
             let logs = '';
             const timer = setTimeout(() => reject(new Error(`HTTP startup timeout: ${logs}`)), 10000);
-            child.stderr.on('data', (chunk) => {
+            child.stderr.on('data', (chunk) => { logs += chunk; httpStderr += chunk; });
+            // The URL is a status line on stdout, not an [ERRR] record on stderr.
+            child.stdout.on('data', (chunk) => {
                 logs += chunk;
                 if (logs.includes('[codeoutline] listening')) { clearTimeout(timer); resolve(); }
             });
             child.once('error', (err) => { clearTimeout(timer); reject(err); });
             child.once('exit', () => { clearTimeout(timer); reject(new Error(logs)); });
         });
+        assert.equal(httpStderr, '', `serve --http wrote to stderr:\n${httpStderr}`);
         await httpClient.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`)));
         const result = await httpClient.callTool({ name: 'codeoutline_status', arguments: {} });
         assert.notEqual(result.isError, true); assert.equal(JSON.parse(result.content[0].text).files, 1);
@@ -93,6 +114,8 @@ test('packed npm and native artifacts work outside the checkout', { timeout: 120
         if (process.platform === 'win32') run('taskkill.exe', ['/pid', String(child.pid), '/t', '/f']);
         else { const exited = once(child, 'exit'); child.kill('SIGTERM'); await exited; }
     }
+    // MCP clients start the server in the project root: it must stay clean too.
+    assert(!existsSync(join(project, 'logs')), 'serve created logs/ in the project');
     // Simulate optional dependencies disabled: fail explicitly, never fall back to a sibling runtime.
     const isolated = join(temp, 'missing-runtime'); await mkdir(isolated);
     await writeFile(join(isolated, 'package.json'), '{"name":"missing-smoke","private":true}\n');

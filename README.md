@@ -65,6 +65,8 @@ codeoutline doctor [--project PATH]
 
 `status`, `rebuild`, and `doctor` print JSON; a failed diagnostic exits nonzero. One-shot commands default to the current directory as the project.
 
+The runtime logs only warnings and errors, to stderr, and writes no log files, so starting it in a project leaves nothing behind. For troubleshooting, set `CODEOUTLINE_LOG_LEVEL` (`DEBUG`, `INFO`, `WARN`, `ERROR`, ...) and `CODEOUTLINE_LOG_DIR` to write log files to that directory.
+
 ## MCP service details
 
 The protocol baseline is [MCP 2025-06-18](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports). Query budgets range from 256 to 262144 bytes (default 16000); truncated output stays valid UTF-8 and ends with a truncation notice. Paths always refer to the machine running the service.

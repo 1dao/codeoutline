@@ -119,7 +119,7 @@ jobs:
           & $runtime tools/package.lua TARGET=${{ matrix.target }} OUTPUT=dist/${{ matrix.target }} LOG_STDERR=1 @releaseArgs
           if ($LASTEXITCODE -ne 0) { throw 'Staging failed' }
           if (-not $IsWindows) {
-            chmod +x dist/${{ matrix.target }}/native/codeoutline dist/${{ matrix.target }}/native/xnet2lua/bin/xnet
+            chmod +x dist/${{ matrix.target }}/native/codeoutline dist/${{ matrix.target }}/native/bin/xnet
           }
           npm pack ./dist/${{ matrix.target }}/native --pack-destination ./dist
           if ($LASTEXITCODE -ne 0) { throw 'Native package failed' }

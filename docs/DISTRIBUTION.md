@@ -37,7 +37,8 @@ packages explicitly. Neither installation path uses postinstall downloads.
 
 For native use, extract the `native/` directory and run `codeoutline.cmd` on
 Windows, or `./codeoutline` on Unix. On Unix, mark `codeoutline` and
-`xnet2lua/bin/xnet` executable before packing or archiving.
+`bin/xnet` executable before packing or archiving. A package holds the runtime
+as `bin/xnet` (`bin/xnet.exe`) and its HTTP codec as `lib/xhttp_codec.lua`.
 
 ## Platform validation and publication
 

@@ -59,10 +59,11 @@ export async function startHttp(_unused, config, options = {}) {
     const child = spawn(defaultRuntime, args, { cwd: tmpdir(), windowsHide: true,
         env: { ...process.env, CODEOUTLINE_TOKEN: options.token || '' }, stdio: ['ignore', 'pipe', 'pipe'] });
     let logs = '';
-    child.stdout.resume();
     await new Promise((resolve, reject) => {
         const timer = setTimeout(() => { child.kill(); reject(new Error(logs || 'Startup timed out')); }, 10000);
-        child.stderr.on('data', (chunk) => {
+        child.stderr.on('data', (chunk) => { logs += chunk; });
+        // The startup notice is a status line on stdout (stderr is the error log).
+        child.stdout.on('data', (chunk) => {
             logs += chunk;
             if (logs.includes('[codeoutline] listening')) { clearTimeout(timer); resolve(); }
         });

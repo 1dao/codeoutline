@@ -2,7 +2,18 @@
 
 本文件记录 CodeOutline 的主要变更。
 
-## 0.1.1 (未发布)
+## 0.1.1 (2026-09-30)
+
+### 修复
+
+- 在哪个目录运行 `codeoutline`，运行时就在该目录创建 `logs/` 并写入日志文件；MCP 客户端在项目根目录启动服务，因此会在用户项目中留下 `logs/`。启动器（npm、原生 `codeoutline` / `codeoutline.cmd`）现在默认传入 `LOG_FILE=0` 与 `LOG_LEVEL=WARN`：不写日志文件，终端只显示警告和错误。需要排查时可设置 `CODEOUTLINE_LOG_LEVEL` 调整级别、`CODEOUTLINE_LOG_DIR` 将日志写到指定目录。
+- 一次性命令（如 `--version`）不再输出 `xthread.init: no handler set` 警告；命令行解析忽略运行时的 `LOG_*` 参数。
+- `serve --http` 启动后的监听地址提示改为输出到 stdout，不再以 `[ERRR]` 错误日志的形式出现：xnet 将 Lua 的 `io.stderr` 写入统一记为错误日志；HTTP 模式下 stdout 不承载协议数据。
+
+### 变更
+
+- 安装包内部结构扁平化：运行时为 `bin/xnet`（Windows 为 `bin/xnet.exe`），HTTP 编解码器为 `lib/xhttp_codec.lua`，不再保留 `xnet2lua/` 目录结构。
+- 安装包测试新增检查：包内结构、两种启动器的 `--version` 不向 stderr 输出，CLI 与 MCP 服务运行后项目目录中没有 `logs/`。
 
 ### 依赖
 

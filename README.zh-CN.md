@@ -65,6 +65,8 @@ codeoutline doctor [--project PATH]
 
 `status`、`rebuild`、`doctor` 输出 JSON；诊断失败返回非零退出码。一次性命令的项目默认为当前目录。
 
+运行时只把警告和错误输出到 stderr，不写日志文件，在项目中启动不会留下任何文件。排查问题时可设置 `CODEOUTLINE_LOG_LEVEL`（`DEBUG`、`INFO`、`WARN`、`ERROR` 等）调整级别，设置 `CODEOUTLINE_LOG_DIR` 将日志文件写到该目录。
+
 ## MCP 服务细节
 
 协议基线为 [MCP 2025-06-18](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports)。查询预算为 256–262144 字节，默认 16000；超限输出保持 UTF-8 有效并附截断提示。路径均指服务所在机器。

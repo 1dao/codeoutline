@@ -37,9 +37,13 @@ try {
     const runtimeManifest = JSON.parse(readFileSync(packagePath, 'utf8'));
     if (runtimeManifest.version !== manifest.version) throw new Error(`Version mismatch: expected ${packageName}@${manifest.version}`);
     const root = dirname(packagePath);
-    const executable = join(root, 'xnet2lua', 'bin', process.platform === 'win32' ? 'xnet.exe' : 'xnet');
+    const executable = join(root, 'bin', process.platform === 'win32' ? 'xnet.exe' : 'xnet');
     if (!existsSync(executable)) throw new Error(`Runtime missing from ${packageName}; reinstall the package.`);
-    const child = spawn(executable, [join(root, 'scripts/codeoutline/command.lua'), 'LOG_STDERR=1', ...process.argv.slice(2)], {
+    // Quiet, file-free runtime logs unless asked for: clients start the MCP
+    // server in the user's project, which must not gain a logs/ directory.
+    const { CODEOUTLINE_LOG_LEVEL: level, CODEOUTLINE_LOG_DIR: logDir } = process.env;
+    const logArgs = ['LOG_STDERR=1', `LOG_LEVEL=${level || 'WARN'}`, logDir ? `LOG_DIR=${logDir}` : 'LOG_FILE=0'];
+    const child = spawn(executable, [join(root, 'scripts/codeoutline/command.lua'), ...logArgs, ...process.argv.slice(2)], {
         stdio: 'inherit', windowsHide: true,
     });
     const handlers = new Map();

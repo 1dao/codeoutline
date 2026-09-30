@@ -23,7 +23,9 @@ doctor reports JSON diagnostics and exits nonzero on a failed check.
 local function parse(args)
     local clean = {}
     for _, value in ipairs(args) do
-        if value ~= 'LOG_STDERR=1' then clean[#clean + 1] = value end
+        -- Runtime logging options (LOG_STDERR, LOG_LEVEL, LOG_FILE, LOG_DIR)
+        -- are read by xnet itself; the launchers add them before user args.
+        if not value:match('^LOG_[A-Z_]+=') then clean[#clean + 1] = value end
     end
     local command = clean[1] or '--help'
     if command == '--help' or command == '-h' or command == '--version' then
@@ -152,4 +154,6 @@ local ok, result = pcall(run)
 if not ok then io.stderr:write('codeoutline: ', tostring(result), '\n'); result = 1 end
 if type(result) == 'table' then return result end
 io.stdout:flush()
-return { __init = function() xthread.stop(result) end }
+-- One-shot commands exchange no thread messages; the empty handler keeps the
+-- runtime from warning that none is set.
+return { __init = function() xthread.stop(result) end, __thread_handle = function() end }

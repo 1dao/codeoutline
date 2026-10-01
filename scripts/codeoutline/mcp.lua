@@ -161,9 +161,7 @@ function M.new(config, submit, cancel)
             local root, err
             if project_path then root, err = paths.canonical(project_path)
             else err = 'projectPath is required: no PROJECT, client root or working directory is available' end
-            local allowed = false
-            if root then for _, r in ipairs(config.roots) do if paths.contains(r, root) then allowed = true; break end end end
-            if not root or not allowed then
+            if not root or not paths.allowed(config.roots, root) then
                 self.pending[id] = nil
                 result({ content = array({ { type = 'text', text = err or 'projectPath is outside allowed roots' } }), isError = true }); return
             end

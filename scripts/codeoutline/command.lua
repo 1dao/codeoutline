@@ -7,7 +7,7 @@ local help = [[CodeOutline - Lua code indexing and MCP
 
 Usage:
   codeoutline serve --stdio [--project PATH] [--allow-root PATH ...]
-  codeoutline serve --http [--host HOST] [--port PORT] [--project PATH]
+  codeoutline serve --http [--host HOST] [--port PORT] [--project PATH] [--allow-root PATH ...]
   codeoutline explore --project PATH --query QUERY [--budget BYTES]
   codeoutline status [--project PATH]
   codeoutline rebuild [--project PATH]
@@ -16,6 +16,8 @@ Usage:
 
 HTTP options: --allow-host HOST, --allow-origin ORIGIN (repeatable).
 Remote HTTP requires CODEOUTLINE_TOKEN (at least 16 bytes).
+Local HTTP without --allow-root serves any project; stdio and remote HTTP
+default to --project or the working directory.
 Project defaults to the working directory for one-shot commands.
 doctor reports JSON diagnostics and exits nonzero on a failed check.
 ]]

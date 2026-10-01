@@ -19,8 +19,27 @@ local config = { roots = {}, project = options.PROJECT and assert(paths.canonica
     token = os.getenv('CODEOUTLINE_TOKEN'), hosts = options.ALLOW_HOST, origins = options.ALLOW_ORIGIN }
 assert(config.port and config.port % 1 == 0 and config.port >= 1 and config.port <= 65535, 'Invalid PORT')
 if config.token == '' then config.token = nil end
-for _, root in ipairs(options.ALLOW_ROOT) do config.roots[#config.roots + 1] = assert(paths.canonical(root)) end
-if #config.roots == 0 then config.roots[1] = config.project or assert(paths.canonical('.')) end
+-- Stdio mode owns stdout for protocol messages, so its notices go to stderr.
+local function notice(text)
+    local stream = options.STDIO == '1' and io.stderr or io.stdout
+    stream:write('[codeoutline] ', text, '\n'); stream:flush()
+end
+-- A missing root (an unmounted drive, say) is kept as written and matches once
+-- it exists: failing startup would take down a service started at login.
+for _, root in ipairs(options.ALLOW_ROOT) do
+    local canonical, err = paths.canonical(root)
+    if not canonical then notice('warning: allowed root ' .. root .. ' is unavailable (' .. err .. ')') end
+    config.roots[#config.roots + 1] = canonical or paths.normalize(root)
+end
+if #config.roots == 0 then
+    if options.HTTP == '1' and (config.host == '127.0.0.1' or config.host == 'localhost' or config.host == '::1') then
+        -- One loopback service serves every project of every session. Only local
+        -- processes reach it, and they already hold the user's file access.
+        config.roots = false
+    else
+        config.roots[1] = config.project or assert(paths.canonical('.'))
+    end
+end
 local shared = assert(xshared.create('codeoutline_control', 65536, 256))
 local jobs, next_id, job_count, worker_ready = {}, 0, 0, false
 local endpoint, stdio, input = nil, nil, ''

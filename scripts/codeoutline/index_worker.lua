@@ -8,11 +8,7 @@ local shared = assert(xshared.dict('codeoutline_control'))
 
 local function execute(req)
     local root = assert(paths.canonical(req.projectPath))
-    local allowed = false
-    for _, configured in ipairs(req.allowedRoots) do
-        if paths.contains(configured, root) then allowed = true; break end
-    end
-    assert(allowed, 'project path is outside allowed roots')
+    assert(paths.allowed(req.allowedRoots, root), 'project path is outside allowed roots')
     if req.method == 'explore' then
         local text, info = service.explore(root, req.query, { budget = req.budget })
         return { text = text, truncated = info.truncated or false, refresh = info.refresh }

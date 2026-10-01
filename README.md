@@ -8,25 +8,48 @@ CodeOutline answers symbol queries with line-numbered source, call paths, and ca
 
 ## Installation and setup
 
-Requires Node.js 20 or newer. npm downloads the runtime for your platform automatically; no compiler or Lua installation is needed.
+Requires Node.js 20 or newer. npm downloads the runtime for your platform automatically; no compiler or Lua installation is needed. Install it globally rather than configuring clients with `npx -y`: npx keeps a full npm process running beside every server it starts.
 
 ```sh
-npx -y codeoutline --version
+npm install -g codeoutline
+codeoutline --version
 ```
+
+### Recommended: one shared HTTP service
+
+A stdio server is a child process of its client, so every agent session (each Claude Code session, each Cursor window) starts its own copy and builds its own in-memory index. One HTTP service serves all sessions from a single process and a single index.
+
+```sh
+codeoutline serve --http
+```
+
+The service listens on `127.0.0.1:19876` and, without `--allow-root`, serves projects anywhere on the machine, so switching between projects on different drives needs no configuration. Only local processes can reach it, and they already have your file access. To restrict it anyway, repeat `--allow-root` for each directory tree to allow; a tree that is unavailable at startup, such as an unmounted drive, is reported and becomes usable once it appears.
 
 **Claude Code** (added globally, available in every project):
 
 ```sh
-claude mcp add codeoutline --scope user -- npx -y codeoutline serve --stdio
+claude mcp add --transport http codeoutline --scope user http://127.0.0.1:19876/mcp
 ```
 
 **Cursor** (`~/.cursor/mcp.json`):
 
 ```json
-{ "mcpServers": { "codeoutline": { "command": "npx", "args": ["-y", "codeoutline", "serve", "--stdio"] } } }
+{ "mcpServers": { "codeoutline": { "url": "http://127.0.0.1:19876/mcp" } } }
 ```
 
-When no project is specified, the service uses, in order: the `projectPath` argument of the call, the `--project` option, the client's roots (the first directory returned by `roots/list`), and the directory the service was started in. Clients usually start the service in the project directory, so a global configuration needs no project path. Access defaults to `--project` or the start directory; repeat `--allow-root` to allow more.
+A shared service has no project of its own: it uses the client's roots when the client provides them, and otherwise the agent passes `projectPath`, which the tools ask for when it is missing. Clients do not start an HTTP service, so start it at login (Task Scheduler on Windows, launchd on macOS, a systemd user unit on Linux). On Windows, supervise the native launcher rather than the npm one; see [DISTRIBUTION.md](docs/DISTRIBUTION.md).
+
+### Alternative: stdio, one process per session
+
+Use stdio when you do not want a resident service. Each session then starts and stops its own server.
+
+```sh
+claude mcp add codeoutline --scope user -- codeoutline serve --stdio
+```
+
+On Windows, Claude Code cannot start the `codeoutline.cmd` shim directly; use `-- cmd /c codeoutline serve --stdio`. For Cursor, set `"command": "codeoutline", "args": ["serve", "--stdio"]`.
+
+When no project is specified, the service uses, in order: the `projectPath` argument of the call, the `--project` option, the client's roots (the first directory returned by `roots/list`), and the directory the service was started in. Clients usually start a stdio service in the project directory, so a global configuration needs no project path. Access defaults to `--project` or the start directory; repeat `--allow-root` to allow more.
 
 Three tools are provided:
 
@@ -56,7 +79,7 @@ C, C++, C#, Go, Java, JavaScript / TypeScript (including JSX/TSX), Lua, Python, 
 
 ```sh
 codeoutline serve --stdio [--project PATH] [--allow-root PATH ...]
-codeoutline serve --http [--host HOST] [--port PORT] [--project PATH]
+codeoutline serve --http [--host HOST] [--port PORT] [--project PATH] [--allow-root PATH ...]
 codeoutline explore --project PATH --query QUERY [--budget BYTES]
 codeoutline status [--project PATH]
 codeoutline rebuild [--project PATH]
@@ -71,7 +94,7 @@ The runtime logs only warnings and errors, to stderr, and writes no log files, s
 
 The protocol baseline is [MCP 2025-06-18](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports). Query budgets range from 256 to 262144 bytes (default 16000); truncated output stays valid UTF-8 and ends with a truncation notice. Paths always refer to the machine running the service.
 
-In stdio mode, stdout carries only MCP messages and logs go to stderr. HTTP listens on the local machine by default; clients connect to `http://127.0.0.1:19876/mcp`. Remote listening requires a `CODEOUTLINE_TOKEN` of at least 16 bytes and hosts allowed explicitly with `--allow-host`; clients send `Authorization: Bearer ...`. Repeat `--allow-origin` to allow full browser origins; unlisted origins are rejected. Protect the token with a TLS reverse proxy for remote deployments.
+In stdio mode, stdout carries only MCP messages and logs go to stderr. HTTP listens on the local machine by default; clients connect to `http://127.0.0.1:19876/mcp`. Remote listening requires a `CODEOUTLINE_TOKEN` of at least 16 bytes and hosts allowed explicitly with `--allow-host`; clients send `Authorization: Bearer ...`. Unlike local HTTP, a remote service without `--allow-root` is limited to `--project` or its start directory. Repeat `--allow-origin` to allow full browser origins; unlisted origins are rejected. Protect the token with a TLS reverse proxy for remote deployments.
 
 The main thread handles the protocol while a resident index thread serves queries one at a time. Requests with a progress token receive progress every second (over SSE for HTTP); there is no standalone GET/SSE endpoint (it returns 405). Limits: 64 sessions, 64 queued or running jobs, a 120-second job deadline, and sessions expire after 15 idle minutes. Cancellation takes effect at per-file checkpoints, so a single file's parse cannot be interrupted (files are capped at 1.5 MB); after a cancellation the possibly incomplete in-memory index is discarded and the next query recovers from the cache.
 

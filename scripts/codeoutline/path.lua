@@ -33,4 +33,14 @@ function M.contains(root, candidate)
     return candidate == root or candidate:sub(1, #prefix) == prefix
 end
 
+-- `roots == false` is the unrestricted access of a loopback HTTP service
+-- started without ALLOW_ROOT; otherwise the candidate must sit under a root.
+function M.allowed(roots, candidate)
+    if roots == false then return true end
+    for _, root in ipairs(roots) do
+        if M.contains(root, candidate) then return true end
+    end
+    return false
+end
+
 return M

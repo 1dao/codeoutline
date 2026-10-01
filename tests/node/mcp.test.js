@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, rm, symlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm, symlink, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -160,6 +160,30 @@ test('HTTP without PROJECT requests client roots over the response stream', { ti
         assert.deepEqual(await Promise.all([files(withRoots.c), files(withRoots.c)]), [2, 2]);
         assert.equal(withRoots.calls(), 1, 'concurrent calls share one roots/list request');
     } finally { await plain.close(); await withRoots.c.close(); await endpoint.close(); await worker.close(); await f.cleanup(); }
+});
+
+test('loopback HTTP without ALLOW_ROOT serves any project; an unavailable root only warns', { timeout: 30000 }, async () => {
+    const f = await twoProjects();
+    const worker = new LuaWorker();
+    const status = async (c, projectPath) => c.callTool({ name: 'codeoutline_status', arguments: { projectPath } });
+    // Realpath first: a later mkdir must produce the exact spelling of the kept root.
+    const later = join(await realpath(f.root), 'mounted later');
+    const open = await startHttp(worker, { roots: [] }, { port: 0 });
+    const limited = await startHttp(worker, { roots: [f.project, later] }, { port: 0 });
+    const a = client(), b = client();
+    try {
+        await a.connect(new StreamableHTTPClientTransport(new URL(open.url)));
+        assert.equal(JSON.parse((await status(a, f.project)).content[0].text).files, 1);
+        assert.equal(JSON.parse((await status(a, f.other)).content[0].text).files, 2);
+        assert.match(limited.logs(), /allowed root .*mounted later is unavailable/);
+        await b.connect(new StreamableHTTPClientTransport(new URL(limited.url)));
+        assert.equal((await status(b, f.project)).isError, false);
+        assert.match((await status(b, f.other)).content[0].text, /outside allowed/);
+        await mkdir(later);
+        assert.equal((await status(b, later)).isError, false, 'the kept root matches once it exists');
+    } finally {
+        await a.close(); await b.close(); await open.close(); await limited.close(); await worker.close(); await f.cleanup();
+    }
 });
 
 test('remote bind requires auth and explicit allowed host', async () => {

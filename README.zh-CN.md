@@ -8,25 +8,48 @@ Lightweight code indexing and exploration for coding agents, as an MCP server. P
 
 ## 安装与配置
 
-需要 Node.js 20 或更新版本。npm 会按系统自动下载对应平台的运行时，无需编译器或 Lua。
+需要 Node.js 20 或更新版本。npm 会按系统自动下载对应平台的运行时，无需编译器或 Lua。请全局安装，不要在客户端配置里写 `npx -y`：npx 会在它启动的每个服务旁边常驻一个完整的 npm 进程。
 
 ```sh
-npx -y codeoutline --version
+npm install -g codeoutline
+codeoutline --version
 ```
+
+### 推荐：共享一个 HTTP 服务
+
+stdio 服务是客户端的子进程，每个智能体会话（每个 Claude Code 会话、每个 Cursor 窗口）都会各自启动一份，并各自建一份内存索引。HTTP 服务只用一个进程、一份索引，供所有会话共用。
+
+```sh
+codeoutline serve --http
+```
+
+服务监听 `127.0.0.1:19876`。不传 `--allow-root` 时可访问本机任意位置的项目，在不同盘的项目之间切换无需额外配置；只有本机进程能连到它，而本机进程本来就有你的文件访问权限。仍想限制时，为每个允许的目录树重复一次 `--allow-root`；启动时不可用的目录（如未挂载的盘）只会给出提示，出现后即可使用。
 
 **Claude Code**（全局添加，在任意项目中可用）：
 
 ```sh
-claude mcp add codeoutline --scope user -- npx -y codeoutline serve --stdio
+claude mcp add --transport http codeoutline --scope user http://127.0.0.1:19876/mcp
 ```
 
 **Cursor**（`~/.cursor/mcp.json`）：
 
 ```json
-{ "mcpServers": { "codeoutline": { "command": "npx", "args": ["-y", "codeoutline", "serve", "--stdio"] } } }
+{ "mcpServers": { "codeoutline": { "url": "http://127.0.0.1:19876/mcp" } } }
 ```
 
-未指定项目时，服务依次使用：调用参数 `projectPath`、启动参数 `--project`、客户端 roots（`roots/list` 返回的第一个目录）、服务启动目录。客户端通常在项目目录中启动服务，因此全局配置无需写项目路径。访问范围默认为 `--project` 或启动目录，可用可重复的 `--allow-root` 扩大。
+共享服务没有自己的项目：客户端提供 roots 时使用 roots，否则由智能体传入 `projectPath`，缺少时工具会提示需要它。客户端不会启动 HTTP 服务，请让它随登录启动（Windows 用任务计划程序，macOS 用 launchd，Linux 用 systemd 用户单元）。Windows 上请托管原生启动器而不是 npm 启动器，原因见 [DISTRIBUTION.md](docs/DISTRIBUTION.md)。
+
+### 备选：stdio，每个会话一个进程
+
+不想常驻服务时使用 stdio，每个会话自行启动和关闭自己的服务进程。
+
+```sh
+claude mcp add codeoutline --scope user -- codeoutline serve --stdio
+```
+
+Windows 上 Claude Code 无法直接启动 `codeoutline.cmd`，请改用 `-- cmd /c codeoutline serve --stdio`。Cursor 配置为 `"command": "codeoutline", "args": ["serve", "--stdio"]`。
+
+未指定项目时，服务依次使用：调用参数 `projectPath`、启动参数 `--project`、客户端 roots（`roots/list` 返回的第一个目录）、服务启动目录。客户端通常在项目目录中启动 stdio 服务，因此全局配置无需写项目路径。访问范围默认为 `--project` 或启动目录，可用可重复的 `--allow-root` 扩大。
 
 提供三个工具：
 
@@ -56,7 +79,7 @@ C、C++、C#、Go、Java、JavaScript / TypeScript（含 JSX/TSX）、Lua、Pyth
 
 ```sh
 codeoutline serve --stdio [--project PATH] [--allow-root PATH ...]
-codeoutline serve --http [--host HOST] [--port PORT] [--project PATH]
+codeoutline serve --http [--host HOST] [--port PORT] [--project PATH] [--allow-root PATH ...]
 codeoutline explore --project PATH --query QUERY [--budget BYTES]
 codeoutline status [--project PATH]
 codeoutline rebuild [--project PATH]
@@ -71,7 +94,7 @@ codeoutline doctor [--project PATH]
 
 协议基线为 [MCP 2025-06-18](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports)。查询预算为 256–262144 字节，默认 16000；超限输出保持 UTF-8 有效并附截断提示。路径均指服务所在机器。
 
-stdio 模式下 stdout 只输出 MCP 消息，日志写入 stderr。HTTP 默认只监听本机，客户端地址为 `http://127.0.0.1:19876/mcp`。远程监听需设置至少 16 字节的 `CODEOUTLINE_TOKEN` 并用 `--allow-host` 显式允许主机，客户端使用 `Authorization: Bearer ...`；`--allow-origin` 可重复指定允许的完整 Origin，未配置的浏览器 Origin 被拒绝。远程部署应由 TLS 反向代理保护令牌。
+stdio 模式下 stdout 只输出 MCP 消息，日志写入 stderr。HTTP 默认只监听本机，客户端地址为 `http://127.0.0.1:19876/mcp`。远程监听需设置至少 16 字节的 `CODEOUTLINE_TOKEN` 并用 `--allow-host` 显式允许主机，客户端使用 `Authorization: Bearer ...`；与本机 HTTP 不同，远程服务未传 `--allow-root` 时只允许访问 `--project` 或启动目录；`--allow-origin` 可重复指定允许的完整 Origin，未配置的浏览器 Origin 被拒绝。远程部署应由 TLS 反向代理保护令牌。
 
 主线程处理协议，常驻索引线程串行处理查询。请求含进度 token 时每秒报告进度，HTTP 使用 SSE；没有独立的 GET/SSE 订阅端点（返回 405）。最多 64 个会话、64 个排队或执行中的任务；任务期限 120 秒，会话空闲 15 分钟过期。取消在每个文件的检查点生效，单个文件解析期间无法中断（单文件上限 1.5 MB）；取消后丢弃可能不完整的内存索引，下次查询从缓存恢复。
 

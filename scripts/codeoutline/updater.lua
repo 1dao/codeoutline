@@ -19,6 +19,7 @@ function M.config(options)
         directory=os.getenv('CODEOUTLINE_UPDATE_DIR') or assert(home,'set CODEOUTLINE_UPDATE_DIR') .. '/.codeoutline/updates',
         minimumSequence=tonumber(os.getenv('CODEOUTLINE_UPDATE_MIN_SEQUENCE')) or build.updateSequence or 0,
         http=require('xupgate.http_client'),
+        runtimeDirectory=install,
     }
     cfg.validate=function(root,m)
         local info=c.decode_json(c.read(root .. '/build-info.json'))

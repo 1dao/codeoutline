@@ -43,7 +43,24 @@ function M.manifest(envelope, public_key)
     assert(require('xupgate.signature').verify(public_key, envelope.payload, sig), 'manifest signature invalid')
     local m = assert(M.decode_json(envelope.payload), 'invalid manifest JSON')
     assert(m.schema == 1 and M.id(m.project) and M.version(m.version) and M.id(m.platform), 'invalid manifest identity')
-    assert(m.minUpdater == 1, 'unsupported updater version')
+    assert(m.minUpdater == 1 or m.minUpdater == 2, 'unsupported updater version')
+    assert(m.kind == nil or m.kind == 'full' or m.kind == 'scripts', 'invalid package kind')
+    if m.kind == 'scripts' then
+        assert(m.minUpdater == 2 and type(m.runtimeFiles) == 'table' and M.path(m.runtime), 'script package requires updater 2 and runtime references')
+        local count, seen = 0, {}
+        for path, hash in pairs(m.runtimeFiles) do
+            assert(M.path(path) and type(hash) == 'string' and #hash == 64 and hash:match('^[0-9a-f]+$'), 'invalid runtime reference')
+            assert(not seen[path:lower()], 'duplicate runtime reference'); seen[path:lower()] = true
+            count = count + 1
+        end
+        assert(count > 0 and count <= 1000 and m.runtimeFiles[m.runtime], 'runtime reference missing')
+        if m.runtimeRelease then
+            local r = m.runtimeRelease
+            assert(type(r) == 'table' and M.version(r.version) and type(r.sequence) == 'number'
+                and r.sequence > 0 and r.sequence % 1 == 0 and r.sequence < m.sequence
+                and type(r.sha256) == 'string' and #r.sha256 == 64 and r.sha256:match('^[0-9a-f]+$'), 'invalid runtime release reference')
+        end
+    else assert(m.runtimeFiles == nil and m.runtimeRelease == nil, 'runtime references require a script package') end
     assert(type(m.sha256) == 'string' and #m.sha256 == 64 and m.sha256:match('^[0-9a-f]+$'), 'invalid package hash')
     assert(type(m.size) == 'number' and m.size > 0 and m.size <= 50331648 and m.size % 1 == 0, 'invalid package size')
     assert(type(m.sequence) == 'number' and m.sequence >= 1 and m.sequence % 1 == 0, 'invalid release sequence')
@@ -64,6 +81,11 @@ function M.bundle(data, manifest)
         total = total + #bytes; assert(total <= 50331648, 'expanded package too large')
         decoded[#decoded+1] = { path = f.path, data = bytes, executable = f.executable == true }
         if f.path == manifest.entry then entry = true end
+    end
+    if manifest.kind == 'scripts' then
+        for path in pairs(manifest.runtimeFiles) do
+            local key = path:lower(); assert(not seen[key], 'runtime/script file collision'); seen[key] = true
+        end
     end
     for key in pairs(seen) do
         local prefix = key:match('^(.*)/[^/]+$')

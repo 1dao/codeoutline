@@ -133,8 +133,11 @@ Treat these overrides and the initial installation as trusted configuration.
 To publish, stage a fresh native package for each target with
 `UPDATE_SEQUENCE=N`; N must increase for every release (the 0.1.3 baseline is 3).
 Use `tools/update-release.lua` for a script-only change: it reuses the previous
-platform runtimes, replaces Lua scripts and native launchers, and produces signed
-complete bundles for all three platforms. Upload these as drafts before publishing
+platform runtimes, replaces Lua scripts and native launchers, and with `KIND=scripts`
+produces signed script bundles for all three platforms. Runtime binaries, native
+libraries and their license files are omitted from downloads; their hashes are
+signed as runtime references and checked before copying them from a compatible
+local installation. Upload these as drafts before publishing
 the version to the desired channel. The updater
 checks signatures, file hashes, platform, version, sequence and runtime health
 before activating the directory. CI must produce each platform runtime; a Windows
@@ -171,18 +174,52 @@ applies the proxy to Git, GitHub CLI, npm, and XUpgate requests, including child
 upload/publish commands. It changes neither global Git/npm configuration nor the
 calling terminal's proxy environment.
 
-For script changes that only need XUpgate, use `MODE=update`. It reuses baseline
+For script changes that only need XUpgate, use `MODE=update`. Unless `BASE` is
+explicitly provided, it selects the newest locally available, published full CI
+release with all three platforms and the current runtime commit. It reuses baseline
 runtimes, checks that their runtime commit matches the current submodule, and does
 not require GitHub CLI or npm publishing authentication:
 
 ```powershell
-.\bin\xnet.exe tools/release.lua MODE=update BASE=C:/release/0.1.3 LOG_STDERR=1 LOG_FILE=0
+.\bin\xnet.exe tools/release.lua MODE=update LOG_STDERR=1 LOG_FILE=0
 ```
 
 This mode still commits/pushes the release version and tag; CI runs on the tag but
-the local tool does not wait for or publish its npm/GitHub artifacts. npm read
+the local tool does not wait for or publish its npm/GitHub artifacts. It now sends
+script-only bundles rather than embedding the reused executables. npm read
 access remains necessary for duplicate-version checks. The initial npm launcher
 is only upgraded by full npm publication, not an XUpgate script bundle.
+
+For native runtime/executable updates without publishing npm, use `MODE=runtime`:
+
+```powershell
+.\bin\xnet.exe tools/release.lua MODE=runtime PROXY=socks5://127.0.0.1:1080 LOG_STDERR=1 LOG_FILE=0
+```
+
+This waits for all-platform CI and publishes complete signed XUpgate bundles,
+including the new executables. It requires GitHub CLI but does not publish npm or
+create a GitHub Release. `MODE=full` retains the complete npm/GitHub/XUpgate workflow.
+Both full bundles and script bundles install into immutable version directories;
+active executables are never overwritten. `serve` installs in the background and
+the next launch selects the verified scripts and matching executable. Rollback
+switches the complete local version, including the reused or downloaded runtime.
+
+Script bundles use protocol updater version 2. Existing 0.1.4 initial bootstraps
+only understand updater version 1 and safely reject script bundles. They need a
+one-time upgrade of the initial bootstrap (npm or native initial installation)
+before using script-only updates; merely receiving a full update through the old
+bootstrap does not replace that bootstrap. After that upgrade, both script and
+executable updates can be delivered solely through XUpgate. Full bundles retain
+updater version 1 for compatibility. A script bundle whose exact runtime hashes
+are unavailable locally is rejected, preserving the active version; distribute
+a compatible full update first. When a script package includes a signed reference
+to that published full release, clients missing its runtime automatically download
+and verify the referenced full package, cache only the required runtime files,
+and activate the new script version after its health check. This does not activate
+the intermediate full version. The server rejects references to unpublished full
+releases; withdrawals and disabled projects are respected. If no full artifact is
+available locally when building a manual script bundle, only local runtime reuse
+is possible and missing compatible runtimes still cause a safe rejection.
 
 Use `DRY_RUN=1` to exercise prompting and remote version checks without changing
 files, commits, tags or publications. An explicit `VERSION` is also accepted; a
@@ -196,6 +233,22 @@ versions are retained rather than reverted. Inspect the error before retrying;
 after a partial release, use the recorded version and existing artifacts with the
 individual upload/publish commands instead of rebuilding that version.
 
+If a full release stops after CI downloads and signed bundles have been created,
+resume the same artifacts with `RESUME=<version>`:
+
+```powershell
+.\bin\xnet.exe tools/release.lua RESUME=0.1.4 PROXY=socks5://127.0.0.1:1080 LOG_STDERR=1 LOG_FILE=0
+```
+
+Resume verifies the recorded commit, local/remote tag, CI checksums, signatures and
+remote draft hashes. It does not create a new version, commit, tag or build.
+Published npm packages are skipped only when their registry shasum matches the
+local tarball. npm publishing inherits the terminal so required authentication
+prompts remain usable. Fix npm publishing authentication before retrying; login
+alone may not meet the package's 2FA policy. `DRY_RUN=1` validates resume without
+publishing anything. Earlier failures that lack complete CI artifacts or bundles
+still need the individual repair commands.
+
 Run from the repository root. `BASE` contains the extracted CI packages under
 `codeoutline-<target>/native/package`. `OUTPUT` must be a new directory.
 Python is not required. OpenSSL must be on PATH for offline private-key signing;
@@ -205,7 +258,7 @@ Manual bundles record the real source commit/dirty state and are not marked as C
 release builds. Review and test the staged files before uploading.
 
 ```powershell
-.\bin\xnet.exe tools/update-release.lua ACTION=build BASE=C:/release/0.1.3 OUTPUT=C:/release/0.1.4 VERSION=0.1.4 SEQUENCE=4 KEY=C:/private/codeoutline.private.pem LOG_STDERR=1 LOG_FILE=0
+.\bin\xnet.exe tools/update-release.lua ACTION=build KIND=scripts BASE=C:/release/0.1.3 OUTPUT=C:/release/0.1.5 VERSION=0.1.5 SEQUENCE=5 KEY=C:/private/codeoutline.private.pem LOG_STDERR=1 LOG_FILE=0
 ```
 
 Native directories are written under `OUTPUT/native/<target>`. Uploadable signed
@@ -219,14 +272,24 @@ The upload step checks existing remote hashes, so an interrupted upload can be
 retried with the same artifacts. Do not rebuild or overwrite an uploaded version.
 
 ```powershell
-.\bin\xnet.exe tools/update-release.lua ACTION=upload OUTPUT=C:/release/0.1.4 VERSION=0.1.4 SEQUENCE=4 CREDENTIAL_FILE=C:/private/xupgate-admin.env LOG_STDERR=1 LOG_FILE=0
-.\bin\xnet.exe tools/update-release.lua ACTION=publish OUTPUT=C:/release/0.1.4 VERSION=0.1.4 SEQUENCE=4 CHANNEL=stable CREDENTIAL_FILE=C:/private/xupgate-admin.env LOG_STDERR=1 LOG_FILE=0
+.\bin\xnet.exe tools/update-release.lua ACTION=upload OUTPUT=C:/release/0.1.5 VERSION=0.1.5 SEQUENCE=5 CREDENTIAL_FILE=C:/private/xupgate-admin.env LOG_STDERR=1 LOG_FILE=0
+.\bin\xnet.exe tools/update-release.lua ACTION=publish OUTPUT=C:/release/0.1.5 VERSION=0.1.5 SEQUENCE=5 CHANNEL=stable CREDENTIAL_FILE=C:/private/xupgate-admin.env LOG_STDERR=1 LOG_FILE=0
 ```
 
 `ACTION=publish` verifies that all three matching platform releases exist before
 switching the channel. Both network actions default to the packaged HTTPS server
 and pinned CA; `URL` and `CA_FILE` can override them for another deployment.
 Existing services keep running; an installed update applies on the next launch.
+
+The Lua updater regression runs with `npm test` when OpenSSL is available. An
+opt-in real HTTPS protocol regression uses only xnet Lua and an isolated project:
+
+```powershell
+.\bin\xnet.exe tests/lua/update_http_spec.lua CREDENTIAL_FILE=C:/private/xupgate-admin.env LOG_STDERR=1 LOG_FILE=0
+```
+
+It tests full/script downloads, signature rejection, rollback and withdrawal,
+then disables its test project. It never publishes a production CodeOutline version.
 
 The opt-in deployed integration test needs Python, OpenSSL, a staged Windows
 package, and the sibling XUpgate release builder:

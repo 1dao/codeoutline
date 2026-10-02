@@ -51,6 +51,22 @@ function M.open(config)
         assert(m.project==config.project and m.platform==config.platform,'manifest target mismatch')
         return m
     end
+    function api.cache_runtime(envelope, data, scripts)
+        local full = verified(envelope)
+        local reference = assert(scripts.runtimeRelease, 'runtime release reference missing')
+        assert(scripts.kind == 'scripts' and full.kind ~= 'scripts' and full.version == reference.version
+            and full.sequence == reference.sequence and full.sha256 == reference.sha256, 'runtime release mismatch')
+        local source_files = {}
+        for _, file in ipairs(c.bundle(data, full)) do source_files[file.path] = file.data end
+        for path, hash in pairs(scripts.runtimeFiles) do
+            assert(source_files[path] and u.sha256_hex(source_files[path]) == hash, 'runtime release file mismatch')
+        end
+        return locked(function()
+            local directory = root .. '/runtime-cache/' .. reference.sha256 .. '/files'
+            for path in pairs(scripts.runtimeFiles) do c.write(directory .. '/' .. path, source_files[path]) end
+            return directory
+        end)
+    end
     function api.current()
         local s=state();if not s.current then return nil end
         local dir=root .. '/versions/' .. s.current
@@ -60,7 +76,10 @@ function M.open(config)
         assert(u.sha256_hex(envelope.payload)==s.current,'invalid active identity')
         local files=c.bundle(assert(c.read(dir .. '/bundle.json')),m)
         for _,f in ipairs(files)do assert(c.read(dir .. '/files/' .. f.path)==f.data,'installed file changed')end
-        return {version=m.version,sequence=m.sequence,root=dir .. '/files',entry=m.entry,runtime=m.runtime,sha256=m.sha256}
+        for path, hash in pairs(m.runtimeFiles or {}) do
+            assert(u.sha256_hex(assert(c.read(dir .. '/files/' .. path), 'runtime file missing')) == hash, 'installed runtime changed')
+        end
+        return {version=m.version,sequence=m.sequence,root=dir .. '/files',entry=m.entry,runtime=m.runtime,sha256=m.sha256,kind=m.kind or 'full'}
     end
     function api.install(envelope,data)
         local m=verified(envelope);local files=c.bundle(data,m)
@@ -76,6 +95,30 @@ function M.open(config)
                 for _,f in ipairs(files)do
                     c.write(dir .. '/files/' .. f.path,f.data)
                     if f.executable and package.config:sub(1,1)~='\\' then assert(command_ok('chmod 755 ' .. shell_path(dir .. '/files/' .. f.path)),'chmod failed')end
+                end
+                if m.kind == 'scripts' then
+                    local candidates = { config.runtimeDirectory }
+                    if s.current then candidates[#candidates + 1] = root .. '/versions/' .. s.current .. '/files' end
+                    if s.previous then candidates[#candidates + 1] = root .. '/versions/' .. s.previous .. '/files' end
+                    if m.runtimeRelease then candidates[#candidates + 1] = root .. '/runtime-cache/' .. m.runtimeRelease.sha256 .. '/files' end
+                    local runtime_root
+                    for _, candidate in ipairs(candidates) do
+                        local matches = true
+                        for path, hash in pairs(m.runtimeFiles) do
+                            local bytes = c.read(candidate .. '/' .. path)
+                            if not bytes or u.sha256_hex(bytes) ~= hash then matches = false; break end
+                        end
+                        if matches then runtime_root = candidate; break end
+                    end
+                    assert(runtime_root, 'compatible local runtime missing; install a full update first')
+                    for path, hash in pairs(m.runtimeFiles) do
+                        local bytes = assert(c.read(runtime_root .. '/' .. path))
+                        assert(u.sha256_hex(bytes) == hash, 'runtime changed during installation')
+                        c.write(dir .. '/files/' .. path, bytes)
+                        if package.config:sub(1,1) ~= '\\' and (path == m.runtime or path:match('^bin/')) then
+                            assert(command_ok('chmod 755 ' .. shell_path(dir .. '/files/' .. path)), 'chmod failed')
+                        end
+                    end
                 end
                 c.write(dir .. '/bundle.json',data)
                 c.write(dir .. '/manifest.json',assert(u.json_pack(envelope)))
@@ -126,6 +169,33 @@ function M.open(config)
                 if download_error then callback(download_error);return end
                 if resp.status~=200 then callback('package HTTP ' .. resp.status);return end
                 local ok,result=pcall(api.install,update.envelope,resp.body)
+                if not ok and update.manifest.runtimeRelease and tostring(result):find('compatible local runtime missing', 1, true) then
+                    local scripts_data = resp.body
+                    local reference = update.manifest.runtimeRelease
+                    http.request({url=base .. '/api/v1/projects/' .. config.project .. '/releases/' .. reference.version .. '/' .. config.platform,
+                        timeout_ms=15000,max_redirects=0,verify=true,ca_file=config.caFile},function(reference_error,reference_response)
+                        if reference_error then callback(reference_error);return end
+                        if reference_response.status~=200 then callback('runtime reference HTTP ' .. reference_response.status);return end
+                        local valid, envelope = pcall(function()
+                            local envelope = assert(c.decode_json(reference_response.body))
+                            local full = verified(envelope)
+                            assert(full.kind ~= 'scripts' and full.version == reference.version and full.sequence == reference.sequence
+                                and full.sha256 == reference.sha256, 'runtime reference mismatch')
+                            return envelope
+                        end)
+                        if not valid then callback(tostring(envelope));return end
+                        http.request({url=base .. '/packages/' .. reference.sha256 .. '.json',timeout_ms=120000,max_redirects=0,
+                            verify=true,ca_file=config.caFile,decompress=false},function(runtime_error,runtime_response)
+                            if runtime_error then callback(runtime_error);return end
+                            if runtime_response.status~=200 then callback('runtime package HTTP ' .. runtime_response.status);return end
+                            local cached, failure = pcall(api.cache_runtime, envelope, runtime_response.body, update.manifest)
+                            if not cached then callback(tostring(failure));return end
+                            local installed, current = pcall(api.install, update.envelope, scripts_data)
+                            callback(not installed and tostring(current) or nil, installed and current or nil)
+                        end)
+                    end)
+                    return
+                end
                 callback(not ok and tostring(result) or nil,ok and result or nil)
             end)
         end)

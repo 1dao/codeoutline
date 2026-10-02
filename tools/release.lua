@@ -1,5 +1,5 @@
 -- Interactive release orchestrator. No credentials are embedded in commands.
--- xnet tools/release.lua MODE=update|full [DRY_RUN=1]
+-- xnet tools/release.lua MODE=update|runtime|full [DRY_RUN=1]
 local source = assert(xutils.realpath(debug.getinfo(1, 'S').source:sub(2))):gsub('\\', '/')
 local root = assert(source:match('^(.*)/tools/[^/]+$'))
 package.path = root .. '/scripts/?.lua;' .. package.path
@@ -9,7 +9,7 @@ for _, value in ipairs(arg or {}) do
     local k, v = value:match('^([A-Z_]+)=(.*)$'); if k then options[k] = v end
 end
 local mode = options.MODE or 'full'
-assert(mode == 'update' or mode == 'full', 'MODE=update|full')
+assert(mode == 'update' or mode == 'full' or mode == 'runtime', 'MODE=update|runtime|full')
 local dry = options.DRY_RUN == '1'
 local windows = package.config:sub(1, 1) == '\\'
 local runtime = root .. '/bin/' .. (windows and 'xnet.exe' or 'xnet')
@@ -34,7 +34,7 @@ local function quote(value)
     assert(not value:find("'", 1, true), 'unsafe shell argument')
     return "'" .. value .. "'"
 end
-local function command(text, allow_failure)
+local function shell_command(text)
     if proxy then
         if text:match('^git ') then text = text:gsub('^git ', 'git -c ' .. quote('http.proxy=' .. proxy) .. ' ', 1) end
         if windows then
@@ -50,10 +50,25 @@ local function command(text, allow_failure)
         end
     end
     if windows and text:sub(1, 1) == '"' then text = '"' .. text .. '"' end
-    local pipe = assert(io.popen(text .. ' 2>&1'))
+    return text
+end
+local function command(text, allow_failure)
+    local pipe = assert(io.popen(shell_command(text) .. ' 2>&1'))
     local output = pipe:read('a'); local ok = pipe:close()
     if not ok and not allow_failure then error(output ~= '' and output or 'Command failed') end
     return output:gsub('%s+$', ''), ok
+end
+local npm_exists
+local function publish_npm(file, name, version)
+    if npm_exists(name, version) then
+        local hash = assert(u.json_unpack(command('npm view ' .. quote(name .. '@' .. version) .. ' dist.shasum --json')))
+        local local_hash = command('openssl dgst -sha1 ' .. quote(file)):match('([a-f0-9]+)%s*$')
+        assert(local_hash and hash == local_hash, 'Published npm package differs: ' .. name)
+        io.write('Already published ', name, '@', version, '\n'); return
+    end
+    io.write('Publish ', name, ' (npm authentication prompts remain interactive)...\n'); io.stdout:flush()
+    local ok = os.execute(shell_command('npm publish ' .. quote(file) .. ' --access public'))
+    assert(ok == true or ok == 0, 'npm publication failed; fix publishing authentication and retry RESUME=' .. version)
 end
 local function step(label, text)
     io.write(label, '\n'); io.stdout:flush()
@@ -71,7 +86,7 @@ local function newer(a, b)
     for i = 1, 3 do if a[i] ~= b[i] then return a[i] > b[i] end end
     return false
 end
-local function npm_exists(name, version)
+npm_exists = function(name, version)
     local output, ok = command('npm view ' .. quote(name .. '@' .. version) .. ' version --json', true)
     if ok then return output ~= '' end
     assert(output:find('E404', 1, true), 'npm version check failed; fix registry access before releasing:\n' .. output)
@@ -93,8 +108,86 @@ local function resume_release(thread)
         xthread.stop(1)
     end
 end
+local function finish_release(output, version, sequence)
+    local baseline, bundles = output .. '/ci', output .. '/bundles'
+    if mode == 'full' then
+        for _, target in ipairs(targets) do
+            publish_npm(baseline .. '/codeoutline-' .. target .. '/codua-codeoutline-' .. target .. '-' .. version .. '.tgz',
+                '@codua/codeoutline-' .. target, version)
+        end
+        publish_npm(baseline .. '/codeoutline-win32-x64/codeoutline-' .. version .. '.tgz', 'codeoutline', version)
+        local assets = {}
+        for _, target in ipairs(targets) do assets[#assets + 1] = quote(baseline .. '/codeoutline-' .. target .. '/codeoutline-' .. target .. '.tar.gz') end
+        local exists, ok = command('gh release view ' .. quote('v' .. version) .. ' --json tagName', true)
+        if ok then
+            assert(c.decode_json(exists).tagName == 'v' .. version, 'GitHub release mismatch')
+            step('Update GitHub release assets...', 'gh release upload ' .. quote('v' .. version) .. ' --clobber ' .. table.concat(assets, ' '))
+        else
+            assert(exists:find('release not found', 1, true) or exists:find('Not Found', 1, true), 'GitHub release lookup failed: ' .. exists)
+            step('Publish GitHub release...', 'gh release create ' .. quote('v' .. version) .. ' --verify-tag --title '
+                .. quote('v' .. version) .. ' --generate-notes ' .. table.concat(assets, ' '))
+        end
+    end
+    step('Publish all-platform stable update...', tool('publish', bundles, version, sequence))
+    io.write('Release completed: ', version, '\n'); xthread.stop(0)
+end
+local function continue_release(project)
+    local version = options.RESUME
+    assert(c.version(version), 'RESUME must be a version such as 0.1.4')
+    local output = parent .. '/' .. version
+    local state = assert(c.decode_json(c.read(output .. '/release-state.json')), 'Release state missing')
+    assert(state.version == version and state.mode == mode, 'Release state/mode mismatch')
+    assert(command('git rev-list -n 1 ' .. quote('v' .. version)) == state.commit, 'Local release tag changed')
+    local remote = command('git ls-remote --tags origin ' .. quote('refs/tags/v' .. version))
+    assert(remote:match('^(%x+)') == state.commit, 'Remote release tag changed')
+    local public = assert(c.read(root .. '/keys/update-public.pem'))
+    for _, target in ipairs(targets) do
+        if mode ~= 'update' then
+            local folder = output .. '/ci/codeoutline-' .. target
+            local sums = assert(c.read(folder .. '/SHA256SUMS')):gsub('^\239\187\191', '')
+            for hash, file in sums:gmatch('([a-f0-9]+)%s+([^\r\n]+)') do
+                assert(c.path(file) and u.sha256_hex(assert(c.read(folder .. '/' .. file))) == hash, 'CI file changed: ' .. file)
+            end
+            local info = assert(c.decode_json(c.read(folder .. '/native/package/build-info.json')))
+            assert(info.sourceCommit == state.commit and info.version == version and info.updateSequence == state.sequence, 'CI identity mismatch')
+        end
+        local artifact = assert(c.decode_json(c.read(output .. '/bundles/xupgate/' .. target .. '.json')))
+        local manifest = c.manifest(artifact.envelope, public)
+        assert(manifest.project == 'codeoutline' and manifest.version == version and manifest.platform == target and manifest.sequence == state.sequence, 'Signed artifact mismatch')
+        c.bundle(assert(u.base64_decode(artifact.package)), manifest)
+        local existing = project.releases[version .. '/' .. target]
+        if existing then assert(existing.manifest.sha256 == manifest.sha256 and existing.status ~= 'withdrawn', 'Remote artifact differs') end
+    end
+    io.write('Verified existing release ', version, '; continue without new commits, tags or builds.\n'); io.stdout:flush()
+    if dry then io.write('DRY_RUN: resume validation passed; no publications changed.\n'); xthread.stop(0); return end
+    step('Verify/upload existing drafts...', tool('upload', output .. '/bundles', version, state.sequence))
+    finish_release(output, version, state.sequence)
+end
 local function release(project)
+    if options.RESUME then continue_release(project); return end
     local current = require('codeoutline.version')
+    if mode == 'update' and not options.BASE then
+        local runtime_commit = command('git -C xnet2lua rev-parse HEAD')
+        local directories, truncated = u.list_dir(parent, 10000)
+        assert(not truncated, 'Too many release directories')
+        local best_sequence = -1
+        for _, directory in ipairs(directories or {}) do
+            if directory.dir and c.version(directory.name) then
+                for _, candidate in ipairs({ parent .. '/' .. directory.name .. '/ci', parent .. '/' .. directory.name }) do
+                    local matches, candidate_sequence = true, nil
+                    for _, target in ipairs(targets) do
+                        local info = c.decode_json(c.read(candidate .. '/codeoutline-' .. target .. '/native/package/build-info.json'))
+                        local published = info and project.releases[info.version .. '/' .. target]
+                        if not info or not published or published.status ~= 'published' or published.manifest.kind == 'scripts'
+                            or info.runtimeCommit ~= runtime_commit or info.target ~= target or not info.updateSequence
+                            or (candidate_sequence and candidate_sequence ~= info.updateSequence) then matches = false; break end
+                        candidate_sequence = info.updateSequence
+                    end
+                    if matches and candidate_sequence > best_sequence then base, best_sequence = candidate, candidate_sequence end
+                end
+            end
+        end
+    end
     local highest = assert(version_parts(current))
     local sequence = require('codeoutline.update_sequence')
     for _, item in pairs(project.releases) do
@@ -141,7 +234,7 @@ local function release(project)
         for _, target in ipairs(targets) do
             local directory = base .. '/codeoutline-' .. target .. '/native/package'
             local info = assert(c.decode_json(c.read(directory .. '/build-info.json')), 'Missing baseline: ' .. directory)
-            assert(info.runtimeCommit == command('git -C xnet2lua rev-parse HEAD'), 'Runtime changed; use MODE=full')
+            assert(info.runtimeCommit == command('git -C xnet2lua rev-parse HEAD'), 'Runtime changed; use MODE=runtime or MODE=full')
             for path, hash in pairs(info.sha256) do assert(c.path(path) and u.sha256_hex(assert(c.read(directory .. '/' .. path))) == hash, 'Base file changed: ' .. path) end
         end
         baseline = base
@@ -162,7 +255,7 @@ local function release(project)
     step('Push commit and tag...', 'git push --atomic origin main ' .. quote('refs/tags/v' .. version))
     assert(u.mkdir_p(output))
     c.write(output .. '/release-state.json', assert(u.json_pack({ version = version, sequence = sequence, commit = commit, mode = mode })) .. '\n')
-    if mode == 'full' then
+    if mode ~= 'update' then
         -- GitHub CLI downloads the tested artifacts for exactly this tag/commit.
         local run_id
         for _ = 1, 20 do
@@ -191,21 +284,9 @@ local function release(project)
     end
     local bundles = output .. '/bundles'
     step('Build signed all-platform updates...', tool('build', bundles, version, sequence,
-        { 'BASE=' .. baseline, 'KEY=' .. key, 'CI=' .. (mode == 'full' and '1' or '0') }))
+        { 'BASE=' .. baseline, 'KEY=' .. key, 'CI=' .. (mode ~= 'update' and '1' or '0'), 'KIND=' .. (mode == 'update' and 'scripts' or 'full') }))
     step('Upload all three drafts...', tool('upload', bundles, version, sequence))
-    if mode == 'full' then
-        for _, target in ipairs(targets) do
-            step('Publish npm ' .. target .. '...', 'npm publish ' .. quote(baseline .. '/codeoutline-' .. target
-                .. '/codua-codeoutline-' .. target .. '-' .. version .. '.tgz') .. ' --access public')
-        end
-        step('Publish npm entry...', 'npm publish ' .. quote(baseline .. '/codeoutline-win32-x64/codeoutline-' .. version .. '.tgz') .. ' --access public')
-        local assets = {}
-        for _, target in ipairs(targets) do assets[#assets + 1] = quote(baseline .. '/codeoutline-' .. target .. '/codeoutline-' .. target .. '.tar.gz') end
-        step('Publish GitHub release...', 'gh release create ' .. quote('v' .. version) .. ' --verify-tag --title '
-            .. quote('v' .. version) .. ' --generate-notes ' .. table.concat(assets, ' '))
-    end
-    step('Publish all-platform stable update...', tool('publish', bundles, version, sequence))
-    io.write('Release completed: ', version, '\n'); xthread.stop(0)
+    finish_release(output, version, sequence)
 end
 return {
     __init = function()
@@ -216,7 +297,8 @@ return {
             command('openssl version')
             local signing_public = command('openssl pkey -in ' .. quote(key) .. ' -pubout')
             assert(signing_public:gsub('%s', '') == assert(c.read(root .. '/keys/update-public.pem')):gsub('%s', ''), 'Signing private key does not match project public key')
-            if mode == 'full' then command('gh auth status'); command('npm whoami') end
+            if mode ~= 'update' then command('gh auth status') end
+            if mode == 'full' then command('npm whoami') end
         end
         local token = os.getenv('XUPGATE_PUBLISH_TOKEN') or assert(c.read(credential), 'Configure CREDENTIAL_FILE'):match('^[%w_]+=(.-)%s*$')
         assert(token and not token:find('[\r\n]'), 'Invalid credential file')

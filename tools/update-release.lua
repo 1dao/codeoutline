@@ -9,6 +9,8 @@ for _, value in ipairs(arg or {}) do
     if k then options[k] = v end
 end
 local action = options.ACTION or 'build'
+local kind = options.KIND or 'full'
+assert(kind == 'full' or kind == 'scripts', 'KIND=full|scripts')
 assert(action == 'build' or action == 'upload' or action == 'publish', 'ACTION=build|upload|publish')
 local version = assert(options.VERSION, 'VERSION is required')
 local sequence = assert(tonumber(options.SEQUENCE), 'SEQUENCE is required')
@@ -102,16 +104,45 @@ local function build()
         c.write(directory .. '/build-info.json', json(info) .. '\n')
         end
         local files = {}
+        local runtime_files = {}
         walk(directory, function(path, file)
-            files[#files + 1] = { path = path, data = u.base64_encode(read(file)),
-                executable = path:match('^bin/') ~= nil or path == 'codeoutline' }
+            local bytes = read(file)
+            if kind == 'scripts' and (path:match('^bin/') or path:match('^lib/') or path:match('^licenses/')) then
+                runtime_files[path] = u.sha256_hex(bytes)
+            else
+                files[#files + 1] = { path = path, data = u.base64_encode(bytes),
+                    executable = path:match('^bin/') ~= nil or path == 'codeoutline' }
+            end
         end)
         local bundle = json({ schema = 1, files = files })
         assert(#bundle <= 50331648, 'package exceeds 48 MiB')
         local manifest = { schema = 1, project = 'codeoutline', version = version, sequence = sequence,
-            platform = target, minUpdater = 1, entry = 'scripts/codeoutline/command.lua',
+            platform = target, minUpdater = kind == 'scripts' and 2 or 1, kind = kind, entry = 'scripts/codeoutline/command.lua',
             runtime = target == 'win32-x64' and 'bin/xnet.exe' or 'bin/xnet',
             size = #bundle, sha256 = u.sha256_hex(bundle), notes = options.NOTES or '' }
+        if kind == 'scripts' then
+            manifest.runtimeFiles = runtime_files
+            -- Pin the already published full artifact so clients that skipped it
+            -- can fetch its runtime without activating an intermediate version.
+            for _, candidate in ipairs({ base .. '/xupgate/' .. target .. '.json', base .. '/../bundles/xupgate/' .. target .. '.json' }) do
+                local existing = c.decode_json(c.read(candidate))
+                if existing then
+                    local full = c.manifest(existing.envelope, public_key)
+                    if full.kind ~= 'scripts' and full.project == 'codeoutline' and full.platform == target and full.sequence < sequence then
+                        local reference_files = {}
+                        for _, file in ipairs(c.bundle(assert(u.base64_decode(existing.package)), full)) do reference_files[file.path] = file.data end
+                        local matches = true
+                        for path, hash in pairs(runtime_files) do
+                            if not reference_files[path] or u.sha256_hex(reference_files[path]) ~= hash then matches = false; break end
+                        end
+                        if matches then
+                            manifest.runtimeRelease = { version = full.version, sequence = full.sequence, sha256 = full.sha256 }
+                            break
+                        end
+                    end
+                end
+            end
+        end
         local payload = json(manifest)
         local message, signature = output .. '/xupgate/' .. target .. '.payload', output .. '/xupgate/' .. target .. '.sig'
         c.write(message, payload)

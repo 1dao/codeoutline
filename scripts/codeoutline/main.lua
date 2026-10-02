@@ -43,6 +43,7 @@ end
 local shared = assert(xshared.create('codeoutline_control', 65536, 256))
 local jobs, next_id, job_count, worker_ready = {}, 0, 0, false
 local endpoint, stdio, input = nil, nil, ''
+local updating = false
 local startup = xtimer.now_ms()
 
 local function submit(req, done)
@@ -67,6 +68,10 @@ return {
     __init = function()
         assert(xnet.init())
         assert(xthread.create_thread(2, 'INDEX', scripts .. '/codeoutline/index_worker.lua'))
+        -- Launchers enable this for serve. Updating never delays or blocks requests.
+        if os.getenv('CODEOUTLINE_AUTO_UPDATE') == '1' then
+            updating = xthread.create_thread(3, 'UPDATE', scripts .. '/codeoutline/update_worker.lua') and true
+        end
         if options.STDIO == '1' then
             assert(xutils.read_stdin, 'Rebuild runtime for nonblocking stdin support')
             stdio = mcp.new(config, submit, cancel)
@@ -96,6 +101,10 @@ return {
         elseif op == 'worker_result' then
             local job = jobs[id]
             if job then jobs[id], job_count = nil, job_count - 1; job.done(ok, result) end
+        elseif op == 'update_result' then
+            -- Arguments: error, installed version (nil when already current).
+            if id then notice('update unavailable: ' .. tostring(id))
+            elseif ok then notice('update ' .. tostring(ok) .. ' installed; restart to use it') end
         end
     end,
     __update = function()
@@ -127,6 +136,7 @@ return {
         if stdio then stdio:close() end
         if endpoint then endpoint.close() end
         xthread.shutdown_thread(2)
+        if updating then xthread.shutdown_thread(3) end
         xnet.uninit()
     end,
 }

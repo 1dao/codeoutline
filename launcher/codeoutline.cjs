@@ -44,11 +44,11 @@ try {
     const { CODEOUTLINE_LOG_LEVEL: level, CODEOUTLINE_LOG_DIR: logDir } = process.env;
     const logArgs = ['LOG_STDERR=1', `LOG_LEVEL=${level || 'WARN'}`, logDir ? `LOG_DIR=${logDir}` : 'LOG_FILE=0'];
     // Lua verifies installed versions. Recovery uses the npm-installed updater.
+    // Selection reads installed versions only; serve updates in a background thread.
+    const env = { ...process.env, CODEOUTLINE_AUTO_UPDATE: process.env.CODEOUTLINE_AUTO_UPDATE ?? (process.argv[2] === 'serve' ? '1' : '0') };
     if (process.argv[2] !== 'update') {
-        const auto = process.env.CODEOUTLINE_AUTO_UPDATE ?? (process.argv[2] === 'serve' ? '1' : '0');
         const selection = spawnSync(executable, [join(root, 'scripts/codeoutline/updater.lua'), ...logArgs, 'ACTION=select'], {
-            stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8', windowsHide: true,
-            timeout: 135000, env: {...process.env, CODEOUTLINE_AUTO_UPDATE: auto},
+            stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8', windowsHide: true, timeout: 30000, env,
         });
         if (selection.stderr) process.stderr.write(selection.stderr);
         if (selection.status === 0) {
@@ -60,7 +60,7 @@ try {
         }
     }
     const child = spawn(executable, [join(root, 'scripts/codeoutline/command.lua'), ...logArgs, ...process.argv.slice(2)], {
-        stdio: 'inherit', windowsHide: true,
+        stdio: 'inherit', windowsHide: true, env,
     });
     const handlers = new Map();
     for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {

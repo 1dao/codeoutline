@@ -4,7 +4,7 @@ local install=assert(source:match('^(.*)/scripts/codeoutline/[^/]+$'))
 package.path=install .. '/scripts/?.lua;' .. package.path
 local c,u=require('xupgate.common'),require('xutils')
 local M={}
-local function config(options)
+function M.config(options)
     options=options or {}
     local build=c.decode_json(c.read(install .. '/build-info.json')) or {}
     local home=os.getenv('USERPROFILE') or os.getenv('HOME')
@@ -40,7 +40,7 @@ local function config(options)
     return cfg
 end
 function M.run(action,options)
-    local api=require('xupgate.client').open(config(options))
+    local api=require('xupgate.client').open(M.config(options))
     local function selected()
         local ok,current=pcall(api.current)
         if not ok then io.stderr:write('codeoutline: installed update invalid; using initial version\n')end
@@ -48,7 +48,6 @@ function M.run(action,options)
     end
     local function finish(err,result)
         if action=='select' then
-            if err then io.stderr:write('codeoutline: update unavailable; using local version\n')end
             io.write(selected(),'\n');io.stdout:flush();xthread.stop(0)
         else
             io.write(assert(u.json_pack({ok=not err,error=err,result=result})),'\n');io.stdout:flush();xthread.stop(err and 1 or 0)
@@ -56,7 +55,8 @@ function M.run(action,options)
     end
     return {__init=function()
         assert(xnet.init());xtimer.init(16)
-        if action=='select' and os.getenv('CODEOUTLINE_AUTO_UPDATE')~='1' then finish(nil)
+        -- Selection is local only; serve updates in its background thread.
+        if action=='select' then finish(nil)
         elseif action=='rollback' then
             local ok,result=pcall(api.rollback)
             if not ok and tostring(result):find('no previous version',1,true)then ok,result=pcall(api.use_initial)end

@@ -1,5 +1,5 @@
 """Opt-in signed npm update smoke test. Creates and disables an isolated XUpgate project."""
-import argparse,os,json,ssl,urllib.request,subprocess,sys,secrets,shutil,hashlib
+import argparse,os,json,ssl,urllib.request,subprocess,sys,secrets,shutil,hashlib,time
 from pathlib import Path
 parser=argparse.ArgumentParser()
 parser.add_argument('--credential-file',required=True,type=Path)
@@ -36,9 +36,12 @@ try:
   assert json.loads(cli('update','--check'))['ok']
   if seq==4:assert json.loads(cli('update'))['ok']
   else:
-   env['CODEOUTLINE_AUTO_UPDATE']='1'
-   assert cli('--version')==version
-   env['CODEOUTLINE_AUTO_UPDATE']='0'
+   # serve starts at once and installs in the background for the next launch.
+   p=subprocess.Popen(['node',str(launcher),'serve','--stdio'],stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,env={**env,'CODEOUTLINE_AUTO_UPDATE':'1'})
+   for _ in range(120):
+    if cli('--version')==version:break
+    time.sleep(1)
+   p.stdin.close();p.wait(30)
   assert cli('--version')==version
   print('npm launcher verified signed update',version,flush=True)
  assert json.loads(cli('update','--rollback'))['ok'];assert cli('--version')=='0.1.4'

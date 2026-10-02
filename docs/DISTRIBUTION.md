@@ -112,9 +112,10 @@ codeoutline update
 codeoutline update --rollback
 ```
 
-`serve` checks for updates before starting. A verified update applies to that new
-process; existing services keep running. Failed checks retain the local version.
-Other commands select a verified installed version without requesting the network.
+Every command starts the newest verified installed version without requesting the
+network. `serve` then checks for updates in a background thread, so an unreachable
+update server never delays startup or requests; a verified update applies to the
+next launch, and failed checks are reported on stderr.
 Set `CODEOUTLINE_AUTO_UPDATE=0` to disable automatic checks. Manual update still works.
 Rollback switches between the two installed versions; after the first update it
 returns to the initial installation. Accepted sequence numbers are retained, so a
@@ -131,14 +132,101 @@ Treat these overrides and the initial installation as trusted configuration.
 
 To publish, stage a fresh native package for each target with
 `UPDATE_SEQUENCE=N`; N must increase for every release (the 0.1.3 baseline is 3).
-Use XUpgate's `tools/release.py` with the same version and sequence,
-`--entry scripts/codeoutline/command.lua`, and
-`--runtime bin/xnet.exe` for Windows or `--runtime bin/xnet` otherwise.
-Sign the native directory with the project's offline private key, upload the signed
-artifact in XUpgate, then publish its version to the desired channel. The updater
+Use `tools/update-release.lua` for a script-only change: it reuses the previous
+platform runtimes, replaces Lua scripts and native launchers, and produces signed
+complete bundles for all three platforms. Upload these as drafts before publishing
+the version to the desired channel. The updater
 checks signatures, file hashes, platform, version, sequence and runtime health
 before activating the directory. CI must produce each platform runtime; a Windows
 package cannot update a Linux or macOS installation.
+
+### Make an all-platform script update with xnet
+
+For automatic releases, commit the feature changes and the release tools first,
+then run one command from a clean `main` checkout:
+
+```powershell
+.\bin\xnet.exe tools/release.lua LOG_STDERR=1 LOG_FILE=0
+```
+
+The tool prompts for a new version and rejects versions already present in local
+or remote tags, any XUpgate release (including drafts), npm, or the output folder.
+It assigns the next unused update sequence, runs local tests, updates the source
+version and sequence files, commits only those files as `release: <version>`, and
+pushes the commit and tag atomically. Full mode waits for the tagged GitHub Actions
+CI, downloads and verifies artifacts for that exact commit, signs and uploads all
+three XUpgate drafts, publishes the three npm platform packages then the entry
+package, creates the GitHub release, and finally switches XUpgate stable.
+
+Full mode requires Git, Node/npm, OpenSSL and GitHub CLI (`gh`) on PATH, a signed-in
+GitHub account (`gh auth login`), and npm credentials usable for publishing. npm
+may still ask for account-required authentication; configure appropriate publishing
+credentials before attempting unattended releases. Private key and administrator
+credential defaults match the local development setup; `KEY`, `CREDENTIAL_FILE`,
+`URL`, `CA_FILE`, and `RELEASE_DIR` override them.
+
+Pass `PROXY=socks5://127.0.0.1:1080` (or set `CODEOUTLINE_RELEASE_PROXY`) when
+GitHub access requires a proxy. The tool uses SOCKS remote DNS (`socks5h`) and
+applies the proxy to Git, GitHub CLI, npm, and XUpgate requests, including child
+upload/publish commands. It changes neither global Git/npm configuration nor the
+calling terminal's proxy environment.
+
+For script changes that only need XUpgate, use `MODE=update`. It reuses baseline
+runtimes, checks that their runtime commit matches the current submodule, and does
+not require GitHub CLI or npm publishing authentication:
+
+```powershell
+.\bin\xnet.exe tools/release.lua MODE=update BASE=C:/release/0.1.3 LOG_STDERR=1 LOG_FILE=0
+```
+
+This mode still commits/pushes the release version and tag; CI runs on the tag but
+the local tool does not wait for or publish its npm/GitHub artifacts. npm read
+access remains necessary for duplicate-version checks. The initial npm launcher
+is only upgraded by full npm publication, not an XUpgate script bundle.
+
+Use `DRY_RUN=1` to exercise prompting and remote version checks without changing
+files, commits, tags or publications. An explicit `VERSION` is also accepted; a
+duplicate then stops instead of prompting. The default output is `C:/release/<version>`
+on Windows and `dist/releases/<version>` elsewhere. Signed bundles are under
+`<output>/bundles/xupgate`. Full mode stores the downloaded CI artifacts under
+`<output>/ci`. `release-state.json` records the chosen version, sequence and commit.
+
+Failures stop the release. Already-created commits/tags, immutable uploads and npm
+versions are retained rather than reverted. Inspect the error before retrying;
+after a partial release, use the recorded version and existing artifacts with the
+individual upload/publish commands instead of rebuilding that version.
+
+Run from the repository root. `BASE` contains the extracted CI packages under
+`codeoutline-<target>/native/package`. `OUTPUT` must be a new directory.
+Python is not required. OpenSSL must be on PATH for offline private-key signing;
+the tool verifies each signature against the bundled public key before saving it.
+It verifies the base packages' recorded hashes and preserves their runtime commits.
+Manual bundles record the real source commit/dirty state and are not marked as CI
+release builds. Review and test the staged files before uploading.
+
+```powershell
+.\bin\xnet.exe tools/update-release.lua ACTION=build BASE=C:/release/0.1.3 OUTPUT=C:/release/0.1.4 VERSION=0.1.4 SEQUENCE=4 KEY=C:/private/codeoutline.private.pem LOG_STDERR=1 LOG_FILE=0
+```
+
+Native directories are written under `OUTPUT/native/<target>`. Uploadable signed
+JSON files are under `OUTPUT/xupgate/<target>.json`. The private key is never
+included. The version argument sets the staged version without editing the source
+checkout; npm's Node launcher is outside these native bundles.
+
+Use administrator credentials via `XUPGATE_PUBLISH_TOKEN` or an environment file
+containing one `ADMIN_TOKEN=...` line. Credentials are read without printing them.
+The upload step checks existing remote hashes, so an interrupted upload can be
+retried with the same artifacts. Do not rebuild or overwrite an uploaded version.
+
+```powershell
+.\bin\xnet.exe tools/update-release.lua ACTION=upload OUTPUT=C:/release/0.1.4 VERSION=0.1.4 SEQUENCE=4 CREDENTIAL_FILE=C:/private/xupgate-admin.env LOG_STDERR=1 LOG_FILE=0
+.\bin\xnet.exe tools/update-release.lua ACTION=publish OUTPUT=C:/release/0.1.4 VERSION=0.1.4 SEQUENCE=4 CHANNEL=stable CREDENTIAL_FILE=C:/private/xupgate-admin.env LOG_STDERR=1 LOG_FILE=0
+```
+
+`ACTION=publish` verifies that all three matching platform releases exist before
+switching the channel. Both network actions default to the packaged HTTPS server
+and pinned CA; `URL` and `CA_FILE` can override them for another deployment.
+Existing services keep running; an installed update applies on the next launch.
 
 The opt-in deployed integration test needs Python, OpenSSL, a staged Windows
 package, and the sibling XUpgate release builder:

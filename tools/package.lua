@@ -105,7 +105,7 @@ write(output .. '/native/package.json', xutils.json_pack(manifest) .. '\n')
 copy(root .. '/launcher/codeoutline.cmd', 'codeoutline.cmd')
 copy(root .. '/launcher/codeoutline', 'codeoutline')
 write(output .. '/native/build-info.json', xutils.json_pack({ version = version, target = target,
-    updateSequence = tonumber(options.UPDATE_SEQUENCE or '3'), runtimeCommit = runtime_commit, lua = jit and jit.version or _VERSION, sourceCommit = git('git rev-parse HEAD'),
+    updateSequence = tonumber(options.UPDATE_SEQUENCE) or require('codeoutline.update_sequence'), runtimeCommit = runtime_commit, lua = jit and jit.version or _VERSION, sourceCommit = git('git rev-parse HEAD'),
     sourceDirty = source_dirty, sha256 = files, releaseReady = release,
     note = release and 'Release build from a clean checkout'
         or 'Preview: stage with RELEASE=1 from a clean, tagged checkout to publish' }) .. '\n')

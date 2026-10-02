@@ -8,3 +8,4 @@
 /dist/
 
 /.update-test/
+/tests/__pycache__/

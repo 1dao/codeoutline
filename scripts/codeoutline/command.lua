@@ -12,6 +12,7 @@ Usage:
   codeoutline status [--project PATH]
   codeoutline rebuild [--project PATH]
   codeoutline doctor [--project PATH]
+  codeoutline update [--check | --rollback] [--channel CHANNEL]
   codeoutline --version
 
 HTTP options: --allow-host HOST, --allow-origin ORIGIN (repeatable).
@@ -38,6 +39,7 @@ local function parse(args)
         serve = { stdio = true, http = true, project = true, host = true, port = true,
             ['allow-root'] = true, ['allow-host'] = true, ['allow-origin'] = true },
         explore = { project = true, query = true, budget = true },
+        update = { check = true, rollback = true, channel = true },
         status = { project = true }, rebuild = { project = true }, doctor = { project = true },
     }
     assert(allowed[command], 'unknown command: ' .. command)
@@ -46,7 +48,7 @@ local function parse(args)
         local name, value = clean[i]:match('^%-%-([%w-]+)=(.*)$')
         if not name then name = clean[i]:match('^%-%-([%w-]+)$') end
         assert(name and (allowed[command][name] or name == 'help'), 'unknown option: ' .. clean[i])
-        local flag = name == 'stdio' or name == 'http' or name == 'help'
+        local flag = name == 'check' or name == 'rollback' or name == 'stdio' or name == 'http' or name == 'help'
         if flag then
             assert(value == nil, '--' .. name .. ' does not take a value')
             value = true
@@ -124,6 +126,10 @@ local function run()
     local command, options = parse(arg or {})
     if command == '--help' or command == '-h' or options.help then io.write(help); return 0 end
     if command == '--version' then io.write(version, '\n'); return 0 end
+    if command == 'update' then
+        assert(not (options.check and options.rollback), '--check and --rollback are mutually exclusive')
+        return require('codeoutline.updater').run(options.check and 'check' or options.rollback and 'rollback' or 'update', options)
+    end
     if command == 'serve' then
         assert(not not options.stdio ~= not not options.http, 'serve requires exactly one of --stdio or --http')
         arg = { options.stdio and 'STDIO=1' or 'HTTP=1' }

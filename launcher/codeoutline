@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+base=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ -n "${CODEOUTLINE_LOG_DIR:-}" ]; then log_out="LOG_DIR=$CODEOUTLINE_LOG_DIR"; else log_out=LOG_FILE=0; fi
+if [ "${1:-}" != "update" ]; then
+    if [ "${CODEOUTLINE_AUTO_UPDATE:-}" = "" ]; then
+        if [ "${1:-}" = "serve" ]; then CODEOUTLINE_AUTO_UPDATE=1; else CODEOUTLINE_AUTO_UPDATE=0; fi
+        export CODEOUTLINE_AUTO_UPDATE
+    fi
+    selected=$("$base/bin/xnet" "$base/scripts/codeoutline/updater.lua" LOG_STDERR=1 LOG_FILE=0 LOG_LEVEL=ERROR ACTION=select) || selected="$base"
+    base="$selected"
+fi
+exec "$base/bin/xnet" "$base/scripts/codeoutline/command.lua" LOG_STDERR=1 "LOG_LEVEL=${CODEOUTLINE_LOG_LEVEL:-WARN}" "$log_out" "$@"

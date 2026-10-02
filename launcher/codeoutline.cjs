@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // npm platform selection only. All commands and service logic live in Lua.
 'use strict';
-const { spawn } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 const { createRequire } = require('node:module');
 const { join, dirname } = require('node:path');
 const { readFileSync, existsSync } = require('node:fs');
@@ -36,13 +36,29 @@ try {
     catch { throw new Error(`Missing ${packageName}@${manifest.version}. Install with optional dependencies enabled, or install that exact package alongside codeoutline.`); }
     const runtimeManifest = JSON.parse(readFileSync(packagePath, 'utf8'));
     if (runtimeManifest.version !== manifest.version) throw new Error(`Version mismatch: expected ${packageName}@${manifest.version}`);
-    const root = dirname(packagePath);
-    const executable = join(root, 'bin', process.platform === 'win32' ? 'xnet.exe' : 'xnet');
+    let root = dirname(packagePath);
+    let executable = join(root, 'bin', process.platform === 'win32' ? 'xnet.exe' : 'xnet');
     if (!existsSync(executable)) throw new Error(`Runtime missing from ${packageName}; reinstall the package.`);
     // Quiet, file-free runtime logs unless asked for: clients start the MCP
     // server in the user's project, which must not gain a logs/ directory.
     const { CODEOUTLINE_LOG_LEVEL: level, CODEOUTLINE_LOG_DIR: logDir } = process.env;
     const logArgs = ['LOG_STDERR=1', `LOG_LEVEL=${level || 'WARN'}`, logDir ? `LOG_DIR=${logDir}` : 'LOG_FILE=0'];
+    // Lua verifies installed versions. Recovery uses the npm-installed updater.
+    if (process.argv[2] !== 'update') {
+        const auto = process.env.CODEOUTLINE_AUTO_UPDATE ?? (process.argv[2] === 'serve' ? '1' : '0');
+        const selection = spawnSync(executable, [join(root, 'scripts/codeoutline/updater.lua'), ...logArgs, 'ACTION=select'], {
+            stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8', windowsHide: true,
+            timeout: 135000, env: {...process.env, CODEOUTLINE_AUTO_UPDATE: auto},
+        });
+        if (selection.stderr) process.stderr.write(selection.stderr);
+        if (selection.status === 0) {
+            const selected = selection.stdout.trim();
+            if (selected && existsSync(join(selected, 'scripts/codeoutline/command.lua'))) {
+                root = selected;
+                executable = join(root, 'bin', process.platform === 'win32' ? 'xnet.exe' : 'xnet');
+            }
+        }
+    }
     const child = spawn(executable, [join(root, 'scripts/codeoutline/command.lua'), ...logArgs, ...process.argv.slice(2)], {
         stdio: 'inherit', windowsHide: true,
     });

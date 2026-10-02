@@ -97,3 +97,56 @@ workflow does not mean its remote runs have passed. Windows npm launchers forwar
 console signals; forcefully killing the Node process alone cannot forward a
 signal. For supervised HTTP services on Windows, use the native launcher or stop
 the process tree. Closing MCP stdin causes the native stdio service to exit.
+
+## Signed self-updates
+
+Starting with 0.1.3, npm and native launchers can run signed versions stored in
+`~/.codeoutline/updates` (the user profile on Windows). npm remains the initial
+installation and recovery version. An older npm installation needs one npm upgrade
+to acquire this updater. Updating does not change npm's recorded package version;
+`codeoutline --version` reports the version actually running.
+
+```sh
+codeoutline update --check
+codeoutline update
+codeoutline update --rollback
+```
+
+`serve` checks for updates before starting. A verified update applies to that new
+process; existing services keep running. Failed checks retain the local version.
+Other commands select a verified installed version without requesting the network.
+Set `CODEOUTLINE_AUTO_UPDATE=0` to disable automatic checks. Manual update still works.
+Rollback switches between the two installed versions; after the first update it
+returns to the initial installation. Accepted sequence numbers are retained, so a
+rolled-back release is not immediately reinstalled by automatic checks.
+
+The default endpoint is `https://43.133.255.193:51215`, project `codeoutline`,
+channel `stable`. Packages pin the signing public key and the server's TLS CA in
+`keys/`. Private signing keys stay outside the repository and update server.
+`CODEOUTLINE_UPDATE_URL`, `CODEOUTLINE_UPDATE_PROJECT`,
+`CODEOUTLINE_UPDATE_CHANNEL`, `CODEOUTLINE_UPDATE_DIR`,
+`CODEOUTLINE_UPDATE_PUBLIC_KEY`, `CODEOUTLINE_UPDATE_CA`, and
+`CODEOUTLINE_UPDATE_TARGET` override these settings for testing or private deployments.
+Treat these overrides and the initial installation as trusted configuration.
+
+To publish, stage a fresh native package for each target with
+`UPDATE_SEQUENCE=N`; N must increase for every release (the 0.1.3 baseline is 3).
+Use XUpgate's `tools/release.py` with the same version and sequence,
+`--entry scripts/codeoutline/command.lua`, and
+`--runtime bin/xnet.exe` for Windows or `--runtime bin/xnet` otherwise.
+Sign the native directory with the project's offline private key, upload the signed
+artifact in XUpgate, then publish its version to the desired channel. The updater
+checks signatures, file hashes, platform, version, sequence and runtime health
+before activating the directory. CI must produce each platform runtime; a Windows
+package cannot update a Linux or macOS installation.
+
+The opt-in deployed integration test needs Python, OpenSSL, a staged Windows
+package, and the sibling XUpgate release builder:
+
+```powershell
+python tests/update-deployed.py --stage .update-test/final --credential-file C:/private/xupgate-admin.env
+```
+
+The credential file contains `ADMIN_TOKEN=...`. The test creates a separate project,
+exercises manual and automatic updates, rollback and tamper rejection, and disables
+the project on exit. It never publishes to the production CodeOutline channel.

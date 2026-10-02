@@ -54,6 +54,9 @@ assert(git('git -C xnet2lua diff --name-only') == '', 'runtime has uncommitted c
 local binary = platform[1] == 'win32' and 'xnet.exe' or 'xnet'
 copy(options.RUNTIME or root .. '/bin/' .. binary, 'bin/' .. binary)
 copy_lua('scripts/codeoutline')
+copy_lua('scripts/xupgate')
+copy(root .. '/keys/update-public.pem', 'keys/update-public.pem')
+copy(root .. '/keys/update-ca.crt', 'keys/update-ca.crt')
 copy(root .. '/xnet2lua/scripts/core/share/xhttp_codec.lua', 'lib/xhttp_codec.lua')
 copy(root .. '/xnet2lua/LICENSE', 'licenses/xnet2lua.txt')
 copy(root .. '/xnet2lua/3rd/libdeflate/COPYING', 'licenses/libdeflate.txt')
@@ -94,32 +97,18 @@ local manifest = { name = scope .. 'codeoutline-' .. target, version = version, 
     repository = repository, publishConfig = public,
     description = 'CodeOutline native runtime and Lua implementation for ' .. target,
     os = { platform[1] }, cpu = { platform[2], platform[3] }, license = 'BSD-2-Clause',
-    files = { 'bin/', 'lib/', 'scripts/', 'licenses/', 'LICENSE', 'codeoutline', 'codeoutline.cmd', 'build-info.json', '*.md' } }
+    files = { 'bin/', 'lib/', 'keys/', 'scripts/', 'licenses/', 'LICENSE', 'codeoutline', 'codeoutline.cmd', 'build-info.json', '*.md' } }
 if platform[1] == 'linux' then manifest.libc = { 'glibc' } end
 write(output .. '/native/package.json', xutils.json_pack(manifest) .. '\n')
+-- Native launchers pass the same log defaults as launcher/codeoutline.cjs:
+-- warnings and errors on stderr, no log files unless CODEOUTLINE_LOG_DIR is set.
+copy(root .. '/launcher/codeoutline.cmd', 'codeoutline.cmd')
+copy(root .. '/launcher/codeoutline', 'codeoutline')
 write(output .. '/native/build-info.json', xutils.json_pack({ version = version, target = target,
-    runtimeCommit = runtime_commit, lua = jit and jit.version or _VERSION, sourceCommit = git('git rev-parse HEAD'),
+    updateSequence = tonumber(options.UPDATE_SEQUENCE or '3'), runtimeCommit = runtime_commit, lua = jit and jit.version or _VERSION, sourceCommit = git('git rev-parse HEAD'),
     sourceDirty = source_dirty, sha256 = files, releaseReady = release,
     note = release and 'Release build from a clean checkout'
         or 'Preview: stage with RELEASE=1 from a clean, tagged checkout to publish' }) .. '\n')
--- Native launchers pass the same log defaults as launcher/codeoutline.cjs:
--- warnings and errors on stderr, no log files unless CODEOUTLINE_LOG_DIR is set.
-write(output .. '/native/codeoutline.cmd', table.concat({
-    '@echo off',
-    'setlocal',
-    'if not defined CODEOUTLINE_LOG_LEVEL set "CODEOUTLINE_LOG_LEVEL=WARN"',
-    'set "CODEOUTLINE_LOG_OUT=LOG_FILE=0"',
-    'if defined CODEOUTLINE_LOG_DIR set "CODEOUTLINE_LOG_OUT=LOG_DIR=%CODEOUTLINE_LOG_DIR%"',
-    '"%~dp0bin\\xnet.exe" "%~dp0scripts\\codeoutline\\command.lua" LOG_STDERR=1 '
-        .. '"LOG_LEVEL=%CODEOUTLINE_LOG_LEVEL%" "%CODEOUTLINE_LOG_OUT%" %*',
-    'exit /b %errorlevel%', '' }, '\r\n'))
-write(output .. '/native/codeoutline', table.concat({
-    '#!/bin/sh',
-    'set -eu',
-    'base=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)',
-    'if [ -n "${CODEOUTLINE_LOG_DIR:-}" ]; then log_out="LOG_DIR=$CODEOUTLINE_LOG_DIR"; else log_out=LOG_FILE=0; fi',
-    'exec "$base/bin/xnet" "$base/scripts/codeoutline/command.lua" LOG_STDERR=1 '
-        .. '"LOG_LEVEL=${CODEOUTLINE_LOG_LEVEL:-WARN}" "$log_out" "$@"', '' }, '\n'))
 local dependencies = {}
 for name in pairs(targets) do dependencies[scope .. 'codeoutline-' .. name] = version end
 write(output .. '/npm/package.json', xutils.json_pack({ name = 'codeoutline', version = version,

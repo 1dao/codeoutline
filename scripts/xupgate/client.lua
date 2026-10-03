@@ -11,24 +11,45 @@ end
 local function command_ok(command)
     local ok=os.execute(command);return ok==true or ok==0
 end
--- A running process renews its lease; pruning keeps leased versions. A lease
--- left by a crashed process expires.
-local LEASE_TTL,LEASE_RENEW,LEGACY_GRACE=3*86400,600,7*86400
+-- A lease marks an installed version as used by a live process; pruning keeps
+-- leased versions. Windows holds the lease file open, so it cannot be deleted
+-- until the process exits; elsewhere the file names a PID checked with kill -0.
+local windows=package.config:sub(1,1)=='\\'
+local LEGACY_GRACE=7*86400
 local function token()
     return u.sha256_hex(tostring(os.time()) .. tostring(os.clock()) .. tostring({}) .. tostring(math.random())):sub(1,16)
 end
+local function process_id()
+    local pipe=io.popen('echo $PPID');if not pipe then return nil end
+    local pid=pipe:read('a');pipe:close()
+    return tonumber(pid:match('^%s*(%d+)%s*$'))
+end
+-- A lease whose owner has exited is removed and reported free.
+local function lease_alive(path)
+    if windows then return not os.remove(path)end
+    local pid=tonumber((c.read(path,64) or ''):match('^(%d+)'))
+    if pid and pid>1 and command_ok('kill -0 ' .. pid .. ' 2>/dev/null')then return true end
+    os.remove(path);return false
+end
+local leases={}
 -- Returns nil outside an update directory (the initial installation is never pruned).
 function M.lease(files_root)
     local root,identity=files_root:gsub('\\','/'):match('^(.*)/versions/(%x+)/files/?$')
-    if not root or #identity~=64 then return nil end
+    if not root or #identity~=64 or not u.mkdir_p(root .. '/leases') then return nil end
     local path=root .. '/leases/' .. identity .. '-' .. token()
-    local renewed,lease=0,{}
-    function lease.renew(force)
-        local now=os.time()
-        if force or now-renewed>=LEASE_RENEW then renewed=now;pcall(c.write,path,now .. '\n')end
+    local handle
+    if windows then
+        handle=io.open(path,'wb');if not handle then return nil end
+    else
+        local pid=process_id();if not pid or not pcall(c.write,path,pid .. '\n')then return nil end
     end
-    function lease.release()os.remove(path)end
-    lease.renew(true)
+    local lease={}
+    function lease.release()
+        if handle then handle:close();handle=nil end
+        os.remove(path);leases[lease]=nil
+    end
+    -- Referenced here so garbage collection never closes the held handle.
+    leases[lease]=true
     return lease
 end
 function M.open(config)
@@ -73,9 +94,8 @@ function M.open(config)
         for _,entry in ipairs(u.list_dir(root .. '/leases') or {})do
             local path=root .. '/leases/' .. entry.name
             local identity=entry.name:match('^(%x+)%-%x+$')
-            local info=u.stat(path)
-            if identity and info and info.exists and now-(info.mtime or 0)<LEASE_TTL then busy[identity]=true
-            else os.remove(path)end
+            if not identity then os.remove(path)
+            elseif lease_alive(path)then busy[identity]=true end
         end
         for _,entry in ipairs(u.list_dir(root .. '/versions') or {})do
             local removable=entry.dir and not keep[entry.name] and not busy[entry.name]

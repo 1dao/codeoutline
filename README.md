@@ -19,13 +19,25 @@ codeoutline --version
 
 A stdio server is a child process of its client, so every agent session (each Claude Code session, each Cursor window) starts its own copy and builds its own in-memory index. One HTTP service serves all sessions from a single process and a single index.
 
+Register `codeoutline` with no arguments. Started by a client, it runs a small stdio proxy that forwards to the shared service and starts that service in the background when it is not running. Nothing needs to run at login, and after the service installs an update and exits, the next request starts the new version.
+
+**Claude Code** (added globally, available in every project):
+
+```sh
+claude mcp add codeoutline --scope user -- codeoutline
+```
+
+On Windows, use `-- cmd /c codeoutline`. For Cursor, set `"command": "codeoutline"`. The same proxy is `codeoutline connect`, whose `--port` selects a port other than 19876. The service it starts logs to `~/.codeoutline/logs`.
+
+To run the service yourself instead, start it and point clients at its URL:
+
 ```sh
 codeoutline serve --http
 ```
 
 The service listens on `127.0.0.1:19876` and, without `--allow-root`, serves projects anywhere on the machine, so switching between projects on different drives needs no configuration. Only local processes can reach it, and they already have your file access. To restrict it anyway, repeat `--allow-root` for each directory tree to allow; a tree that is unavailable at startup, such as an unmounted drive, is reported and becomes usable once it appears.
 
-**Claude Code** (added globally, available in every project):
+**Claude Code**:
 
 ```sh
 claude mcp add --transport http codeoutline --scope user http://127.0.0.1:19876/mcp
@@ -37,7 +49,7 @@ claude mcp add --transport http codeoutline --scope user http://127.0.0.1:19876/
 { "mcpServers": { "codeoutline": { "url": "http://127.0.0.1:19876/mcp" } } }
 ```
 
-A shared service has no project of its own: it uses the client's roots when the client provides them, and otherwise the agent passes `projectPath`, which the tools ask for when it is missing. Clients do not start an HTTP service, so start it at login (Task Scheduler on Windows, launchd on macOS, a systemd user unit on Linux). On Windows, supervise the native launcher rather than the npm one; see [DISTRIBUTION.md](docs/DISTRIBUTION.md).
+A shared service has no project of its own: it uses the client's roots when the client provides them, and otherwise the agent passes `projectPath`, which the tools ask for when it is missing. Clients do not start an HTTP service they connect to by URL, so start it at login (Task Scheduler on Windows, launchd on macOS, a systemd user unit on Linux). On Windows, supervise the native launcher rather than the npm one; see [DISTRIBUTION.md](docs/DISTRIBUTION.md).
 
 ### Alternative: stdio, one process per session
 

@@ -112,15 +112,21 @@ codeoutline update
 ```
 
 Every command starts the newest verified installed version without requesting the
-network. `serve` then checks for updates in a background thread, so an unreachable
-update server never delays startup or requests; a verified update applies to the
-next launch, and failed checks are reported on stderr.
-Set `CODEOUTLINE_AUTO_UPDATE=0` to disable automatic checks. Manual update still works.
+network. `serve` checks for updates in a background thread at startup and then
+every hour while it runs, so an unreachable update server never delays startup or
+requests; failed checks are reported on stderr. After installing an update, a
+stdio service exits as soon as no request is in flight: MCP clients start it again
+on the next request, now running the new version. An HTTP service started by
+`codeoutline connect` does the same, and the proxy starts it again. An HTTP service
+started any other way keeps running and uses the update at its next start.
+`CODEOUTLINE_EXIT_ON_UPDATE=1` or `0` overrides either default.
+Set `CODEOUTLINE_AUTO_UPDATE=0` to disable automatic checks. Manual update still works;
+a service started by `connect` always checks.
 Only the active update is kept. After installing, the updater deletes other
 installed versions and the runtime cache, except versions a running process
-still uses: each process started from an installed update holds a lease that
-`serve` renews every 10 minutes, and a lease expires 3 days after its last
-renewal (a crashed process). Versions before 0.1.7 hold no lease, so they are
+still uses: each process started from an installed update holds a lease for as
+long as it runs. On Windows the process keeps its lease file open; elsewhere the
+file records its PID. Versions before 0.1.7 hold no lease, so they are
 deleted only 7 days after cleanup first finds them inactive. There is no local
 rollback: to return to the npm (or native) installation, delete
 `~/.codeoutline/updates` and set `CODEOUTLINE_AUTO_UPDATE=0` so `serve` does not

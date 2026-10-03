@@ -145,6 +145,11 @@ function M.start(config, submit, cancel, codec)
                 if now - state.started > (state.dispatched and 125000 or 15000) then conn:close('timeout') end
             end
         end,
+        -- A session waits on a client reply (roots/list) or a queued tool call.
+        busy = function()
+            for _, session in pairs(sessions) do if next(session.pending) then return true end end
+            return false
+        end,
         close = function()
             for sid in pairs(sessions) do remove_session(sid) end
             for conn in pairs(connections) do conn:close('shutdown') end

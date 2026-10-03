@@ -5,9 +5,15 @@ package.path = scripts .. '/?.lua;' .. package.path
 local version = require('codeoutline.version')
 local help = [[CodeOutline - Lua code indexing and MCP
 
+As an MCP server, run codeoutline with no arguments: it connects the client to
+one shared local service and starts that service when needed. For example:
+  claude mcp add codeoutline --scope user -- codeoutline
+(on Windows: -- cmd /c codeoutline).
+
 Usage:
   codeoutline serve --stdio [--project PATH] [--allow-root PATH ...]
   codeoutline serve --http [--host HOST] [--port PORT] [--project PATH] [--allow-root PATH ...]
+  codeoutline connect [--port PORT]
   codeoutline explore --project PATH --query QUERY [--budget BYTES]
   codeoutline status [--project PATH]
   codeoutline rebuild [--project PATH]
@@ -30,7 +36,13 @@ local function parse(args)
         -- are read by xnet itself; the launchers add them before user args.
         if not value:match('^LOG_[A-Z_]+=') then clean[#clean + 1] = value end
     end
-    local command = clean[1] or '--help'
+    -- No command: an MCP client (redirected stdin) gets connect, a terminal
+    -- gets help. Windows consoles are detected by connect's first read.
+    local command = clean[1]
+    if not command then
+        local terminal = package.config:sub(1, 1) ~= '\\' and os.execute('test -t 0')
+        command = (terminal == true or terminal == 0) and '--help' or 'connect'
+    end
     if command == '--help' or command == '-h' or command == '--version' then
         assert(#clean <= 1, 'unexpected arguments after ' .. command)
         return command, {}
@@ -38,6 +50,7 @@ local function parse(args)
     local allowed = {
         serve = { stdio = true, http = true, project = true, host = true, port = true,
             ['allow-root'] = true, ['allow-host'] = true, ['allow-origin'] = true },
+        connect = { port = true },
         explore = { project = true, query = true, budget = true },
         update = { check = true, channel = true },
         status = { project = true }, rebuild = { project = true }, doctor = { project = true },
@@ -129,6 +142,11 @@ local function run()
     if command == 'update' then
         return require('codeoutline.updater').run(options.check and 'check' or 'update', options)
     end
+    if command == 'connect' then
+        -- stdio for the client, one shared local HTTP service behind it.
+        arg = { 'PORT=' .. (options.port or '19876') }
+        return dofile(scripts .. '/codeoutline/connect.lua')
+    end
     if command == 'serve' then
         assert(not not options.stdio ~= not not options.http, 'serve requires exactly one of --stdio or --http')
         arg = { options.stdio and 'STDIO=1' or 'HTTP=1' }
@@ -164,8 +182,7 @@ local ok, result = pcall(run)
 if not ok then io.stderr:write('codeoutline: ', tostring(result), '\n'); result = 1 end
 if type(result) == 'table' then
     if lease then
-        local update, uninit = result.__update, result.__uninit
-        if update then result.__update = function(...) lease.renew(); return update(...) end end
+        local uninit = result.__uninit
         result.__uninit = function(...)
             lease.release()
             if uninit then return uninit(...) end

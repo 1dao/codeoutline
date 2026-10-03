@@ -84,7 +84,11 @@ assert(not u.stat(legacy).exists, 'legacy version kept after its grace period')
 assert(u.stat(leased).exists and #versions() == 2, 'leased version removed')
 assert(not u.stat(state_root .. '/leases/not-a-lease').exists, 'invalid lease kept')
 lease.release()
+-- A lease left by an exited process (an unheld file, a dead PID) does not count.
+local dead = state_root .. '/leases/' .. leased:match('/versions/(%x+)/files$') .. '-0000000000000000'
+c.write(dead, '999999999\n')
 installed = pruned.install(scripts4, bytes4)
+assert(not u.stat(dead).exists, 'dead lease kept')
 assert(c.read(installed.root .. '/bin/runtime') == 'runtime-B', 'pruning lost the reused runtime')
 assert(not u.stat(leased).exists and #versions() == 1, 'unleased versions kept')
 assert(#(u.list_dir(state_root .. '/trash') or {}) == 0 and #(u.list_dir(state_root .. '/retired') or {}) == 0, 'cleanup left files')

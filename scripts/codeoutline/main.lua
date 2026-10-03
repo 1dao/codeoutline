@@ -45,6 +45,12 @@ local jobs, next_id, job_count, worker_ready = {}, 0, 0, false
 local endpoint, stdio, input = nil, nil, ''
 local updating = false
 local startup = xtimer.now_ms()
+-- After installing an update, exit once idle so the next start runs it: MCP
+-- clients restart stdio servers on demand, and connect restarts a shared HTTP
+-- service. A manually started HTTP service keeps running unless asked.
+local exit_on_update = os.getenv('CODEOUTLINE_EXIT_ON_UPDATE')
+if exit_on_update == nil or exit_on_update == '' then exit_on_update = options.STDIO == '1' else exit_on_update = exit_on_update == '1' end
+local installed_update
 
 local function submit(req, done)
     if job_count >= 64 then return nil, 'Request queue is full; retry later' end
@@ -104,11 +110,19 @@ return {
         elseif op == 'update_result' then
             -- Arguments: error, installed version (nil when already current).
             if id then notice('update unavailable: ' .. tostring(id))
-            elseif ok then notice('update ' .. tostring(ok) .. ' installed; restart to use it') end
+            elseif ok then
+                installed_update = ok
+                notice('update ' .. tostring(ok) .. ' installed; ' .. (exit_on_update and 'exiting when idle' or 'restart to use it'))
+            end
         end
     end,
     __update = function()
         if not worker_ready and xtimer.now_ms() - startup > 10000 then error('Index worker failed to start') end
+        if installed_update and exit_on_update and job_count == 0
+            and not (stdio and next(stdio.pending)) and not (endpoint and endpoint.busy()) then
+            notice('exiting to start update ' .. tostring(installed_update))
+            xthread.stop(0); return
+        end
         if stdio then
             local data, err = xutils.read_stdin(65536)
             if not data then

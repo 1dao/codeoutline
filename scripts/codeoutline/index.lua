@@ -32,6 +32,10 @@ end)()
 -- Generated amalgamations (sqlite3.c, minified bundles) cost more to index
 -- than they give back; skip files above this size unless configured.
 M.MAX_FILE_BYTES = 1500000
+-- Caches are deflated: msgpack records shrink to ~1/6. Level 1 is within a
+-- few percent of level 6 at under half the time; inflating is cheap next to
+-- unpacking, and the checksum then covers the smaller compressed bytes.
+M.CACHE_COMPRESSION_LEVEL = 1
 
 local Index = {}
 Index.__index = Index
@@ -102,12 +106,18 @@ end
 
 function Index:load()
     local data = slurp(self.cache_path)
-    if not data or not cmsgpack then return false end
+    if not data or not cmsgpack or not (xcompress and xcompress.inflate) then return false end
     local ok, files = pcall(function()
         local envelope = cmsgpack.unpack(data)
         assert(type(envelope) == 'table' and type(envelope.payload) == 'string')
         assert(envelope.sha256 == xutils.sha256_hex(envelope.payload))
-        local t = cmsgpack.unpack(envelope.payload)
+        -- Older uncompressed caches have no codec and are rebuilt.
+        assert(envelope.codec == 'deflate')
+        local size = envelope.size
+        assert(type(size) == 'number' and size >= 1 and size % 1 == 0)
+        local payload = assert(xcompress.inflate(envelope.payload, size))
+        assert(#payload == size)
+        local t = cmsgpack.unpack(payload)
         assert(t.version == M.VERSION and t.root == paths.key(self.root) and type(t.files) == 'table')
         local records = {}
         for _, rec in ipairs(t.files) do
@@ -151,14 +161,15 @@ function Index:needs_save()
 end
 
 function Index:save()
-    if not (cmsgpack and xutils.temp_file and xutils.replace_file) then
-        return false, 'runtime requires cmsgpack, temp_file and replace_file'
+    if not (cmsgpack and xcompress and xcompress.deflate and xutils.temp_file and xutils.replace_file) then
+        return false, 'runtime requires cmsgpack, xcompress, temp_file and replace_file'
     end
     local list = {}
     for _, rec in pairs(self.files) do list[#list + 1] = rec end
     table.sort(list, function(a, b) return a.path < b.path end)
     local payload = cmsgpack.pack({ version = M.VERSION, root = paths.key(self.root), files = list })
-    local blob = cmsgpack.pack({ sha256 = xutils.sha256_hex(payload), payload = payload })
+    local packed = xcompress.deflate(payload, M.CACHE_COMPRESSION_LEVEL)
+    local blob = cmsgpack.pack({ codec = 'deflate', size = #payload, sha256 = xutils.sha256_hex(packed), payload = packed })
     local d = self.cache_path:match('^(.*)/[^/]*$') or '.'
     local made, err = xutils.mkdir_p(d)
     if not made then return false, err end

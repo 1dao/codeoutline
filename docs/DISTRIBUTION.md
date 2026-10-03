@@ -184,11 +184,20 @@ not require GitHub CLI or npm publishing authentication:
 .\bin\xnet.exe tools/release.lua MODE=update LOG_STDERR=1 LOG_FILE=0
 ```
 
-This mode still commits/pushes the release version and tag; CI runs on the tag but
-the local tool does not wait for or publish its npm/GitHub artifacts. It now sends
-script-only bundles rather than embedding the reused executables. npm read
-access remains necessary for duplicate-version checks. The initial npm launcher
-is only upgraded by full npm publication, not an XUpgate script bundle.
+Every mode first runs the Lua specs (`codeoutline_spec` with the native and pure
+Lua scanners, `stability_spec`, `update_spec`). Runtime and full modes then run
+the Node SDK and package tests; update mode skips them unless `NODE_TESTS=1`,
+because script bundles ship no npm launcher.
+
+Update mode commits the release version locally, builds the signed script
+bundles, installs this machine's bundle through the real updater (including its
+health check) and runs `explore` on a sample project with it. Only then does it
+tag, push, upload and publish. If any of these local steps fail, the release
+commit and output directory are removed; nothing is pushed or uploaded, and the
+same version can be retried. CI runs on the pushed tag, but the local tool does
+not wait for it or publish its npm/GitHub artifacts. npm read access remains
+necessary for duplicate-version checks. The initial npm launcher is only
+upgraded by full npm publication, not an XUpgate script bundle.
 
 For native runtime/executable updates without publishing npm, use `MODE=runtime`:
 

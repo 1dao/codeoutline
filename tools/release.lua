@@ -239,22 +239,54 @@ local function release(project)
         end
         baseline = base
     end
-    step('Verify local behavior...', 'npm test')
-    step('Verify installed packages...', 'npm run test:package')
-    local package_manifest = assert(c.decode_json(c.read(root .. '/package.json')))
-    local lock = assert(c.decode_json(c.read(root .. '/package-lock.json')))
-    package_manifest.version, lock.version, lock.packages[''].version = version, version, version
-    c.write(root .. '/package.json', assert(u.json_pack(package_manifest)) .. '\n')
-    c.write(root .. '/package-lock.json', assert(u.json_pack(lock)) .. '\n')
-    c.write(root .. '/scripts/codeoutline/version.lua', "return '" .. version .. "'\n")
-    c.write(root .. '/scripts/codeoutline/update_sequence.lua', 'return ' .. sequence .. '\n')
-    step('Commit release version...', 'git add -- package.json package-lock.json scripts/codeoutline/version.lua scripts/codeoutline/update_sequence.lua')
-    step('Commit release version...', 'git commit -m ' .. quote('release: ' .. version))
-    local commit = command('git rev-parse HEAD')
+    local function spec(name, env)
+        local text = quote(runtime) .. ' ' .. quote('tests/lua/' .. name .. '.lua') .. ' LOG_STDERR=1 LOG_FILE=0 LOG_LEVEL=ERROR'
+        if env then text = (windows and 'set ' .. quote(env) .. ' && ' or 'env ' .. env .. ' ') .. text end
+        return text
+    end
+    step('Verify Lua behavior...', spec('codeoutline_spec'))
+    step('Verify Lua behavior (pure Lua scanner)...', spec('codeoutline_spec', 'XSCAN_PURE_LUA=1'))
+    step('Verify Lua stability...', spec('stability_spec'))
+    step('Verify update installation...', spec('update_spec'))
+    -- Script updates ship no npm launcher; the SDK checks are opt-in there.
+    if mode ~= 'update' or options.NODE_TESTS == '1' then
+        step('Verify MCP SDK interoperability...', 'npm test')
+        step('Verify installed packages...', 'npm run test:package')
+    end
+    local version_files = 'package.json package-lock.json scripts/codeoutline/version.lua scripts/codeoutline/update_sequence.lua'
+    local previous = command('git rev-parse HEAD')
+    local bundles = output .. '/bundles'
+    local commit
+    -- Script updates are built and installed locally before anything is
+    -- pushed, so a failure here leaves no tag or upload behind.
+    local built, failure = pcall(function()
+        local package_manifest = assert(c.decode_json(c.read(root .. '/package.json')))
+        local lock = assert(c.decode_json(c.read(root .. '/package-lock.json')))
+        package_manifest.version, lock.version, lock.packages[''].version = version, version, version
+        c.write(root .. '/package.json', assert(u.json_pack(package_manifest)) .. '\n')
+        c.write(root .. '/package-lock.json', assert(u.json_pack(lock)) .. '\n')
+        c.write(root .. '/scripts/codeoutline/version.lua', "return '" .. version .. "'\n")
+        c.write(root .. '/scripts/codeoutline/update_sequence.lua', 'return ' .. sequence .. '\n')
+        step('Commit release version...', 'git add -- ' .. version_files)
+        step('Commit release version...', 'git commit -m ' .. quote('release: ' .. version))
+        commit = command('git rev-parse HEAD')
+        assert(u.mkdir_p(output))
+        if mode == 'update' then
+            step('Build signed all-platform updates...', tool('build', bundles, version, sequence,
+                { 'BASE=' .. baseline, 'KEY=' .. key, 'CI=0', 'KIND=scripts' }))
+            step('Install and run the local platform update...', tool('verify', bundles, version, sequence, { 'BASE=' .. baseline }))
+        end
+    end)
+    if not built then
+        -- Nothing left this machine yet; undo the local commit and output.
+        command('git reset --keep ' .. quote(previous), true)
+        command('git checkout -- ' .. version_files, true)
+        if u.stat(output).exists then u.rmtree(output) end
+        error(tostring(failure) .. '\nLocal release commit and output were removed; nothing was pushed or uploaded.', 0)
+    end
     step('Create tag...', 'git tag ' .. quote('v' .. version))
-    step('Push commit and tag...', 'git push --atomic origin main ' .. quote('refs/tags/v' .. version))
-    assert(u.mkdir_p(output))
     c.write(output .. '/release-state.json', assert(u.json_pack({ version = version, sequence = sequence, commit = commit, mode = mode })) .. '\n')
+    step('Push commit and tag...', 'git push --atomic origin main ' .. quote('refs/tags/v' .. version))
     if mode ~= 'update' then
         -- GitHub CLI downloads the tested artifacts for exactly this tag/commit.
         local run_id
@@ -281,10 +313,9 @@ local function release(project)
             local info = assert(c.decode_json(c.read(folder .. '/native/package/build-info.json')))
             assert(info.sourceCommit == commit and info.version == version and info.updateSequence == sequence and info.releaseReady, 'CI artifact identity mismatch')
         end
+        step('Build signed all-platform updates...', tool('build', bundles, version, sequence,
+            { 'BASE=' .. baseline, 'KEY=' .. key, 'CI=1', 'KIND=full' }))
     end
-    local bundles = output .. '/bundles'
-    step('Build signed all-platform updates...', tool('build', bundles, version, sequence,
-        { 'BASE=' .. baseline, 'KEY=' .. key, 'CI=' .. (mode ~= 'update' and '1' or '0'), 'KIND=' .. (mode == 'update' and 'scripts' or 'full') }))
     step('Upload all three drafts...', tool('upload', bundles, version, sequence))
     finish_release(output, version, sequence)
 end

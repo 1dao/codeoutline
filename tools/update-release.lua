@@ -11,7 +11,7 @@ end
 local action = options.ACTION or 'build'
 local kind = options.KIND or 'full'
 assert(kind == 'full' or kind == 'scripts', 'KIND=full|scripts')
-assert(action == 'build' or action == 'upload' or action == 'publish', 'ACTION=build|upload|publish')
+assert(action == 'build' or action == 'verify' or action == 'upload' or action == 'publish', 'ACTION=build|verify|upload|publish')
 local version = assert(options.VERSION, 'VERSION is required')
 local sequence = assert(tonumber(options.SEQUENCE), 'SEQUENCE is required')
 assert(c.version(version) and sequence > 0 and sequence % 1 == 0, 'invalid version/sequence')
@@ -160,8 +160,44 @@ local function build()
         io.write('Built and verified ', artifact_path(target), '\n'); io.stdout:flush()
     end
 end
-if action == 'build' then
-    build()
+-- Install the signed bundle for this machine through the real updater, then
+-- index a small project with it. Other platforms are checked against BASE only.
+local function verify()
+    local base = assert(options.BASE, 'BASE is required'):gsub('\\', '/')
+    local host = package.config:sub(1, 1) == '\\' and 'win32-x64'
+        or git('uname -s') == 'Darwin' and 'darwin-universal' or 'linux-x64'
+    local scratch = output .. '/verify'
+    assert(not u.stat(scratch).exists, 'verification directory exists: ' .. scratch)
+    local artifact, manifest
+    for _, target in ipairs(targets) do
+        local current, m = load_artifact(target)
+        local original = base .. '/codeoutline-' .. target .. '/native/package'
+        for path, hash in pairs(m.runtimeFiles or {}) do
+            assert(u.sha256_hex(read(original .. '/' .. path)) == hash, 'runtime reference differs from BASE: ' .. target .. '/' .. path)
+        end
+        if target == host then artifact, manifest = current, m end
+    end
+    local cfg = require('codeoutline.updater').config()
+    cfg.platform, cfg.channel, cfg.minimumSequence = host, 'verify', 0
+    cfg.directory = scratch .. '/updates'
+    cfg.runtimeDirectory = base .. '/codeoutline-' .. host .. '/native/package'
+    -- install() runs the same health check as clients: the runtime reports this version.
+    local installed = require('xupgate.client').open(cfg).install(artifact.envelope, assert(u.base64_decode(artifact.package)))
+    assert(installed.version == version and installed.sequence == sequence, 'installed version mismatch')
+    local project = scratch .. '/project'
+    c.write(project .. '/app.lua', 'local M = {}\nfunction M.save(x) return M.helper(x) end\nfunction M.helper(x) return x end\nreturn M\n')
+    -- Keep the index cache inside the scratch directory.
+    local env = package.config:sub(1, 1) == '\\' and 'set ' .. quote('USERPROFILE=' .. scratch) .. ' && '
+        or 'env HOME=' .. quote(scratch) .. ' USERPROFILE=' .. quote(scratch) .. ' '
+    local pipe = assert(io.popen(env .. quote(installed.root .. '/' .. installed.runtime) .. ' ' .. quote(installed.root .. '/' .. installed.entry)
+        .. ' LOG_STDERR=1 LOG_FILE=0 LOG_LEVEL=ERROR explore --project ' .. quote(project) .. ' --query M.save 2>&1'))
+    local text = pipe:read('a'); local ok = pipe:close()
+    assert(ok and text:find('calls: helper (app.lua:3)', 1, true), 'installed explore check failed:\n' .. text)
+    assert(u.rmtree(scratch))
+    io.write('Installed ', manifest.platform, ' ', version, ' and explored a sample project\n')
+end
+if action == 'build' or action == 'verify' then
+    if action == 'build' then build() else verify() end
     return { __init = function() xthread.stop(0) end }
 end
 -- Validate all local bundles before making any remote changes.

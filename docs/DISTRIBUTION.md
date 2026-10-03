@@ -116,12 +116,12 @@ network. `serve` checks for updates in a background thread at startup and then
 every hour while it runs, so an unreachable update server never delays startup or
 requests; failed checks are reported on stderr. After installing an update, a
 stdio service exits as soon as no request is in flight: MCP clients start it again
-on the next request, now running the new version. An HTTP service started by
-`codeoutline connect` does the same, and the proxy starts it again. An HTTP service
-started any other way keeps running and uses the update at its next start.
-`CODEOUTLINE_EXIT_ON_UPDATE=1` or `0` overrides either default.
-Set `CODEOUTLINE_AUTO_UPDATE=0` to disable automatic checks. Manual update still works;
-a service started by `connect` always checks.
+on the next request, now running the new version. The background service
+(`codeoutline daemon`) likewise waits until idle, closes its port, starts the new
+version detached from itself and exits, so exactly one service process remains.
+A `serve --http` service keeps running and uses the update at its next start.
+`CODEOUTLINE_EXIT_ON_UPDATE=1` or `0` overrides the stdio and `serve --http` defaults.
+Set `CODEOUTLINE_AUTO_UPDATE=0` to disable automatic checks. Manual update still works.
 Only the active update is kept. After installing, the updater deletes other
 installed versions and the runtime cache, except versions a running process
 still uses: each process started from an installed update holds a lease for as
@@ -153,6 +153,32 @@ the version to the desired channel. The updater
 checks signatures, file hashes, platform, version, sequence and runtime health
 before activating the directory. CI must produce each platform runtime; a Windows
 package cannot update a Linux or macOS installation.
+
+### Background service and login entry
+
+A global npm installation runs `codeoutline install --npm` as its `postinstall`
+script; local installs, `npx` and `--ignore-scripts` skip it, and it never fails the
+installation. `install` registers a login entry for the installation it belongs to
+(launchers pass it as `CODEOUTLINE_INITIAL`; installed updates are deleted when
+unused, the initial installation is not), stops a running service and starts
+`codeoutline daemon` detached. Each login entry runs the daemon once per login:
+
+- Windows: `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\CodeOutline`, run
+  under `conhost.exe --headless` so the console runtime shows no window.
+- macOS: `~/Library/LaunchAgents/io.github.1dao.codeoutline.plist` with
+  `AbandonProcessGroup`, so launchd keeps the replacement the daemon starts.
+- Linux: `~/.config/systemd/user/codeoutline.service` with `KillMode=process`.
+  Without a systemd user manager (WSL, containers) `install` reports that the
+  entry is missing; start `codeoutline daemon` at login another way.
+
+The daemon starts the newest installed version (an installed update, or the
+initial installation when an npm upgrade made it newer) and exits if a service
+already answers on its port: Windows lets a second process bind a port the runtime
+listens on. `codeoutline uninstall` removes the entry and asks the daemon to exit
+by creating `~/.codeoutline/service-<port>.stop`, which it checks every second.
+Services from 0.1.7 and earlier ignore that file; they exit after installing an
+update. `CODEOUTLINE_AUTOSTART=0` skips the login entry; with `--npm` it also skips
+starting the service.
 
 ### Make an all-platform script update with xnet
 

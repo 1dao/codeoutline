@@ -1,19 +1,22 @@
 -- Unified CLI. Launch through codeoutline (npm/native) or xnet with LOG_STDERR=1.
 local source = assert(xutils.realpath(debug.getinfo(1, 'S').source:sub(2))):gsub('\\', '/')
 local scripts = assert(source:match('^(.*)/codeoutline/[^/]+$'))
+local install = assert(scripts:match('^(.*)/scripts$'))
 package.path = scripts .. '/?.lua;' .. package.path
 local version = require('codeoutline.version')
 local help = [[CodeOutline - Lua code indexing and MCP
 
-As an MCP server, run codeoutline with no arguments: it connects the client to
-one shared local service and starts that service when needed. For example:
-  claude mcp add codeoutline --scope user -- codeoutline
-(on Windows: -- cmd /c codeoutline).
+One shared background service serves every MCP client. A global npm install
+starts it and registers it to start at login (codeoutline install does the same
+for other installations); it keeps itself updated. Register its URL once:
+  claude mcp add --transport http codeoutline --scope user http://127.0.0.1:19876/mcp
 
 Usage:
+  codeoutline install [--port PORT]
+  codeoutline uninstall [--port PORT]
+  codeoutline daemon [--port PORT]
   codeoutline serve --stdio [--project PATH] [--allow-root PATH ...]
   codeoutline serve --http [--host HOST] [--port PORT] [--project PATH] [--allow-root PATH ...]
-  codeoutline connect [--port PORT]
   codeoutline explore --project PATH --query QUERY [--budget BYTES]
   codeoutline status [--project PATH]
   codeoutline rebuild [--project PATH]
@@ -22,6 +25,8 @@ Usage:
   codeoutline --version
 
 HTTP options: --allow-host HOST, --allow-origin ORIGIN (repeatable).
+install starts the background service and registers it at login; uninstall
+stops it and removes that entry. daemon is the service itself.
 Remote HTTP requires CODEOUTLINE_TOKEN (at least 16 bytes).
 Local HTTP without --allow-root serves any project; stdio and remote HTTP
 default to --project or the working directory.
@@ -36,12 +41,13 @@ local function parse(args)
         -- are read by xnet itself; the launchers add them before user args.
         if not value:match('^LOG_[A-Z_]+=') then clean[#clean + 1] = value end
     end
-    -- No command: an MCP client (redirected stdin) gets connect, a terminal
-    -- gets help. Windows consoles are detected by connect's first read.
+    -- No command: an MCP client (redirected stdin) gets a stdio service, which
+    -- keeps registrations from 0.1.7 working; a terminal gets help. Windows
+    -- consoles are detected by the stdio service's first read.
     local command = clean[1]
     if not command then
         local terminal = package.config:sub(1, 1) ~= '\\' and os.execute('test -t 0')
-        command = (terminal == true or terminal == 0) and '--help' or 'connect'
+        if terminal == true or terminal == 0 then command = '--help' else return 'serve', { stdio = true } end
     end
     if command == '--help' or command == '-h' or command == '--version' then
         assert(#clean <= 1, 'unexpected arguments after ' .. command)
@@ -50,7 +56,7 @@ local function parse(args)
     local allowed = {
         serve = { stdio = true, http = true, project = true, host = true, port = true,
             ['allow-root'] = true, ['allow-host'] = true, ['allow-origin'] = true },
-        connect = { port = true },
+        daemon = { port = true }, install = { port = true, npm = true }, uninstall = { port = true },
         explore = { project = true, query = true, budget = true },
         update = { check = true, channel = true },
         status = { project = true }, rebuild = { project = true }, doctor = { project = true },
@@ -61,7 +67,7 @@ local function parse(args)
         local name, value = clean[i]:match('^%-%-([%w-]+)=(.*)$')
         if not name then name = clean[i]:match('^%-%-([%w-]+)$') end
         assert(name and (allowed[command][name] or name == 'help'), 'unknown option: ' .. clean[i])
-        local flag = name == 'check' or name == 'stdio' or name == 'http' or name == 'help'
+        local flag = name == 'check' or name == 'stdio' or name == 'http' or name == 'help' or name == 'npm'
         if flag then
             assert(value == nil, '--' .. name .. ' does not take a value')
             value = true
@@ -142,10 +148,70 @@ local function run()
     if command == 'update' then
         return require('codeoutline.updater').run(options.check and 'check' or 'update', options)
     end
-    if command == 'connect' then
-        -- stdio for the client, one shared local HTTP service behind it.
-        arg = { 'PORT=' .. (options.port or '19876') }
-        return dofile(scripts .. '/codeoutline/connect.lua')
+    if command == 'daemon' or command == 'install' or command == 'uninstall' then
+        local daemon = require('codeoutline.daemon')
+        local port = tonumber(options.port or daemon.PORT)
+        assert(port and port % 1 == 0 and port >= 1 and port <= 65535, 'invalid --port')
+        if command == 'daemon' then
+            arg = { 'HTTP=1', 'DAEMON=1', 'PORT=' .. port }
+            return dofile(scripts .. '/codeoutline/main.lua')
+        end
+        -- npm runs install after every installation; only global ones start a
+        -- service, and nothing here may fail the installation.
+        local npm = options.npm
+        if npm and (os.getenv('npm_config_global') ~= 'true' or os.getenv('CODEOUTLINE_AUTOSTART') == '0') then return 0 end
+        local function say(text) io.write(text, '\n'); io.stdout:flush() end
+        local status = 0
+        local function attempt(fn, ...)
+            local ok, err = pcall(fn, ...)
+            if not ok then io.stderr:write('codeoutline: ', tostring(err), '\n'); status = npm and 0 or 1 end
+            return ok and err
+        end
+        -- Launchers name the installation they belong to; unlike an installed
+        -- update, it is never deleted, so the login entry points there.
+        local root = install
+        local initial = os.getenv('CODEOUTLINE_INITIAL')
+        if initial and initial ~= '' then
+            initial = initial:gsub('\\', '/'):gsub('/+$', '')
+            if xutils.stat(initial .. '/scripts/codeoutline/command.lua').exists then root = initial end
+        end
+        local function finish(code) xthread.stop(code) end
+        return {
+            __init = function()
+                assert(xnet.init()); xtimer.init(16)
+                if command == 'uninstall' then
+                    for _, removed in ipairs(attempt(daemon.unregister) or {}) do say('removed login entry ' .. removed) end
+                    daemon.stop(port, 10000, function(stopped)
+                        say(stopped and 'service on port ' .. port .. ' stopped' or 'service on port ' .. port .. ' is still running')
+                        finish(stopped and status or 1)
+                    end)
+                    return
+                end
+                if os.getenv('CODEOUTLINE_AUTOSTART') ~= '0' then
+                    local entry = attempt(function()
+                        -- Only launchers before 0.1.8 leave root inside an update.
+                        assert(not root:match('/versions/%x+/files$'),
+                            'cannot register an installed update; run npm install -g codeoutline, or install from the native launcher')
+                        return daemon.register(root, port)
+                    end)
+                    if entry then say('registered login entry ' .. entry) end
+                end
+                -- Replace a running service so this installation takes effect now.
+                daemon.stop(port, 10000, function()
+                    if not attempt(function() return assert(daemon.spawn(root, port), 'cannot start the service') end) then
+                        finish(status); return
+                    end
+                    daemon.wait(port, 20000, function(listening)
+                        if listening then say('service listening on http://127.0.0.1:' .. port .. '/mcp')
+                        else io.stderr:write('codeoutline: the service did not start; see ', daemon.logs_dir(), '\n')
+                            if not npm then status = 1 end end
+                        finish(status)
+                    end)
+                end)
+            end,
+            __uninit = function() xnet.uninit() end,
+            __thread_handle = function() end,
+        }
     end
     if command == 'serve' then
         assert(not not options.stdio ~= not not options.http, 'serve requires exactly one of --stdio or --http')
@@ -177,7 +243,7 @@ end
 
 -- Lease the installed update this process runs from, so installing a newer
 -- one does not delete files it may still load (language parsers load lazily).
-local lease = require('xupgate.client').lease(assert(scripts:match('^(.*)/scripts$')))
+local lease = require('xupgate.client').lease(install)
 local ok, result = pcall(run)
 if not ok then io.stderr:write('codeoutline: ', tostring(result), '\n'); result = 1 end
 if type(result) == 'table' then

@@ -45,7 +45,10 @@ try {
     const logArgs = ['LOG_STDERR=1', `LOG_LEVEL=${level || 'WARN'}`, logDir ? `LOG_DIR=${logDir}` : 'LOG_FILE=0'];
     // Lua verifies installed versions. Recovery uses the npm-installed updater.
     // Selection reads installed versions only; serve updates in a background thread.
-    const env = { ...process.env, CODEOUTLINE_AUTO_UPDATE: process.env.CODEOUTLINE_AUTO_UPDATE ?? (process.argv[2] === 'serve' ? '1' : '0') };
+    // Services update themselves; CODEOUTLINE_INITIAL names this installation,
+    // which install registers at login because updates are deleted when unused.
+    const service = ['serve', 'daemon', 'install'].includes(process.argv[2]);
+    const env = { ...process.env, CODEOUTLINE_AUTO_UPDATE: process.env.CODEOUTLINE_AUTO_UPDATE ?? (service ? '1' : '0'), CODEOUTLINE_INITIAL: root };
     if (process.argv[2] !== 'update') {
         const selection = spawnSync(executable, [join(root, 'scripts/codeoutline/updater.lua'), ...logArgs, 'ACTION=select'], {
             stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8', windowsHide: true, timeout: 30000, env,

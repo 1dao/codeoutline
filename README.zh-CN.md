@@ -19,11 +19,7 @@ codeoutline --version
 
 stdio 服务是客户端的子进程，每个智能体会话（每个 Claude Code 会话、每个 Cursor 窗口）都会各自启动一份，并各自建一份内存索引。HTTP 服务只用一个进程、一份索引，供所有会话共用。
 
-```sh
-codeoutline serve --http
-```
-
-服务监听 `127.0.0.1:19876`。不传 `--allow-root` 时可访问本机任意位置的项目，在不同盘的项目之间切换无需额外配置；只有本机进程能连到它，而本机进程本来就有你的文件访问权限。仍想限制时，为每个允许的目录树重复一次 `--allow-root`；启动时不可用的目录（如未挂载的盘）只会给出提示，出现后即可使用。
+通过 npm 全局安装时，会在后台启动这个服务，并登记为登录时自动启动：Windows 写入注册表 `Run` 项，macOS 添加 LaunchAgent，Linux 添加 systemd 用户单元；没有 systemd 用户管理器时（WSL、容器），请自行在登录时运行 `codeoutline daemon`。服务会自行安装更新并重启到新版本，因此安装后只需登记一次它的地址。
 
 **Claude Code**（全局添加，在任意项目中可用）：
 
@@ -37,7 +33,11 @@ claude mcp add --transport http codeoutline --scope user http://127.0.0.1:19876/
 { "mcpServers": { "codeoutline": { "url": "http://127.0.0.1:19876/mcp" } } }
 ```
 
-共享服务没有自己的项目：客户端提供 roots 时使用 roots，否则由智能体传入 `projectPath`，缺少时工具会提示需要它。客户端不会启动 HTTP 服务，请让它随登录启动（Windows 用任务计划程序，macOS 用 launchd，Linux 用 systemd 用户单元）。Windows 上请托管原生启动器而不是 npm 启动器，原因见 [DISTRIBUTION.md](docs/DISTRIBUTION.md)。
+原生安装或使用 `--ignore-scripts` 安装后，运行 `codeoutline install` 完成同样的操作；`--port` 可指定 19876 以外的端口。安装时设置 `CODEOUTLINE_AUTOSTART=0` 可不登记自启动。`codeoutline uninstall` 会停止服务并删除自启动项；`npm uninstall -g codeoutline` 不会运行包脚本，请先运行它。服务日志位于 `~/.codeoutline/logs`。
+
+服务监听 `127.0.0.1:19876`，可访问本机任意位置的项目，在不同盘的项目之间切换无需额外配置；只有本机进程能连到它，而本机进程本来就有你的文件访问权限。共享服务没有自己的项目：客户端提供 roots 时使用 roots，否则由智能体传入 `projectPath`，缺少时工具会提示需要它。
+
+如需自行运行 HTTP 服务（例如只允许访问部分目录），启动 `codeoutline serve --http`，并为每个允许的目录树重复一次 `--allow-root`；启动时不可用的目录（如未挂载的盘）只会给出提示，出现后即可使用。这样的服务会安装更新，但在重启前继续运行旧版本；Windows 上请托管原生启动器而不是 npm 启动器，原因见 [DISTRIBUTION.md](docs/DISTRIBUTION.md)。
 
 ### 备选：stdio，每个会话一个进程
 
@@ -47,7 +47,7 @@ claude mcp add --transport http codeoutline --scope user http://127.0.0.1:19876/
 claude mcp add codeoutline --scope user -- codeoutline serve --stdio
 ```
 
-Windows 上 Claude Code 无法直接启动 `codeoutline.cmd`，请改用 `-- cmd /c codeoutline serve --stdio`。Cursor 配置为 `"command": "codeoutline", "args": ["serve", "--stdio"]`。
+Windows 上 Claude Code 无法直接启动 `codeoutline.cmd`，请改用 `-- cmd /c codeoutline serve --stdio`。Cursor 配置为 `"command": "codeoutline", "args": ["serve", "--stdio"]`。客户端不带参数启动 `codeoutline`（0.1.7 推荐的写法）时，得到的也是这个 stdio 服务。
 
 未指定项目时，服务依次使用：调用参数 `projectPath`、启动参数 `--project`、客户端 roots（`roots/list` 返回的第一个目录）、服务启动目录。客户端通常在项目目录中启动 stdio 服务，因此全局配置无需写项目路径。访问范围默认为 `--project` 或启动目录，可用可重复的 `--allow-root` 扩大。
 

@@ -19,25 +19,9 @@ codeoutline --version
 
 A stdio server is a child process of its client, so every agent session (each Claude Code session, each Cursor window) starts its own copy and builds its own in-memory index. One HTTP service serves all sessions from a single process and a single index.
 
-Register `codeoutline` with no arguments. Started by a client, it runs a small stdio proxy that forwards to the shared service and starts that service in the background when it is not running. Nothing needs to run at login, and after the service installs an update and exits, the next request starts the new version.
+A global npm installation starts that service in the background and registers it to start at login: a `Run` registry value on Windows, a LaunchAgent on macOS, and a systemd user unit on Linux; without a systemd user manager (WSL, containers), start `codeoutline daemon` at login yourself. The service installs updates and restarts itself into them, so after installation the only setup is registering its URL once.
 
 **Claude Code** (added globally, available in every project):
-
-```sh
-claude mcp add codeoutline --scope user -- codeoutline
-```
-
-On Windows, use `-- cmd /c codeoutline`. For Cursor, set `"command": "codeoutline"`. The same proxy is `codeoutline connect`, whose `--port` selects a port other than 19876. The service it starts logs to `~/.codeoutline/logs`.
-
-To run the service yourself instead, start it and point clients at its URL:
-
-```sh
-codeoutline serve --http
-```
-
-The service listens on `127.0.0.1:19876` and, without `--allow-root`, serves projects anywhere on the machine, so switching between projects on different drives needs no configuration. Only local processes can reach it, and they already have your file access. To restrict it anyway, repeat `--allow-root` for each directory tree to allow; a tree that is unavailable at startup, such as an unmounted drive, is reported and becomes usable once it appears.
-
-**Claude Code**:
 
 ```sh
 claude mcp add --transport http codeoutline --scope user http://127.0.0.1:19876/mcp
@@ -49,7 +33,11 @@ claude mcp add --transport http codeoutline --scope user http://127.0.0.1:19876/
 { "mcpServers": { "codeoutline": { "url": "http://127.0.0.1:19876/mcp" } } }
 ```
 
-A shared service has no project of its own: it uses the client's roots when the client provides them, and otherwise the agent passes `projectPath`, which the tools ask for when it is missing. Clients do not start an HTTP service they connect to by URL, so start it at login (Task Scheduler on Windows, launchd on macOS, a systemd user unit on Linux). On Windows, supervise the native launcher rather than the npm one; see [DISTRIBUTION.md](docs/DISTRIBUTION.md).
+`codeoutline install` does the same for a native installation, or after installing with `--ignore-scripts`; `--port` selects a port other than 19876. Set `CODEOUTLINE_AUTOSTART=0` when installing to skip the login entry. `codeoutline uninstall` stops the service and removes the entry; run it before `npm uninstall -g codeoutline`, which does not run package scripts. The service logs to `~/.codeoutline/logs`.
+
+The service listens on `127.0.0.1:19876` and serves projects anywhere on the machine, so switching between projects on different drives needs no configuration. Only local processes can reach it, and they already have your file access. A shared service has no project of its own: it uses the client's roots when the client provides them, and otherwise the agent passes `projectPath`, which the tools ask for when it is missing.
+
+To run an HTTP service yourself instead, for example restricted to some directories, start `codeoutline serve --http` and repeat `--allow-root` for each directory tree to allow; a tree that is unavailable at startup, such as an unmounted drive, is reported and becomes usable once it appears. Such a service installs updates but keeps running the old version until restarted; on Windows, supervise the native launcher rather than the npm one; see [DISTRIBUTION.md](docs/DISTRIBUTION.md).
 
 ### Alternative: stdio, one process per session
 
@@ -59,7 +47,7 @@ Use stdio when you do not want a resident service. Each session then starts and 
 claude mcp add codeoutline --scope user -- codeoutline serve --stdio
 ```
 
-On Windows, Claude Code cannot start the `codeoutline.cmd` shim directly; use `-- cmd /c codeoutline serve --stdio`. For Cursor, set `"command": "codeoutline", "args": ["serve", "--stdio"]`.
+On Windows, Claude Code cannot start the `codeoutline.cmd` shim directly; use `-- cmd /c codeoutline serve --stdio`. For Cursor, set `"command": "codeoutline", "args": ["serve", "--stdio"]`. A client that starts `codeoutline` with no arguments, as 0.1.7 recommended, gets the same stdio server.
 
 When no project is specified, the service uses, in order: the `projectPath` argument of the call, the `--project` option, the client's roots (the first directory returned by `roots/list`), and the directory the service was started in. Clients usually start a stdio service in the project directory, so a global configuration needs no project path. Access defaults to `--project` or the start directory; repeat `--allow-root` to allow more.
 

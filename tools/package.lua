@@ -118,6 +118,9 @@ write(output .. '/npm/package.json', xutils.json_pack({ name = 'codeoutline', ve
     repository = repository, homepage = 'https://github.com/1dao/codeoutline#readme', publishConfig = public,
     bugs = { url = 'https://github.com/1dao/codeoutline/issues' },
     bin = { codeoutline = 'launcher/codeoutline.cjs' }, engines = { node = '>=20' },
+    -- A global installation starts the shared service and registers it at
+    -- login (Lua decides; CODEOUTLINE_AUTOSTART=0 opts out). Never fails npm.
+    scripts = { postinstall = 'node launcher/codeoutline.cjs install --npm || exit 0' },
     files = { 'launcher/', 'LICENSE', '*.md' }, optionalDependencies = dependencies }) .. '\n')
 write(output .. '/npm/LICENSE', read(root .. '/LICENSE'))
 write(output .. '/npm/launcher/codeoutline.cjs', read(root .. '/launcher/codeoutline.cjs'))

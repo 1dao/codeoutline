@@ -44,16 +44,16 @@ try:
    p.stdin.close();p.wait(30)
   assert cli('--version')==version
   print('npm launcher verified signed update',version,flush=True)
- assert json.loads(cli('update','--rollback'))['ok'];assert cli('--version')=='0.1.4'
- assert json.loads(cli('update','--rollback'))['ok'];assert cli('--version')=='0.1.5'
+ # Only the active version is kept; 0.1.4 survives while the serve that ran it held a lease.
+ assert len(list((out/'updates/codeoutline/versions').iterdir()))<=2
+ assert 'previous' not in json.loads((out/'updates/codeoutline/current.json').read_text())
  env['CODEOUTLINE_UPDATE_DIR']=str(out/'first-update')
  assert json.loads(cli('update'))['ok'];assert cli('--version')=='0.1.5'
- assert json.loads(cli('update','--rollback'))['ok'];assert cli('--version')=='0.1.3'
  env['CODEOUTLINE_UPDATE_DIR']=str(out/'updates')
  # Damaged installed code is rejected before execution.
  for f in (out/'updates').rglob('scripts/codeoutline/version.lua'):f.write_text("error('tampered')\n")
  assert cli('--version')=='0.1.3'
- print('Rollback and corrupt-install fallback verified',flush=True)
+ print('Pruning and corrupt-install fallback verified',flush=True)
 finally:
  assert req('/api/admin/projects/'+project+'/enabled',{'enabled':False})==200
  print('Isolated test project disabled',flush=True)

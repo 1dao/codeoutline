@@ -109,7 +109,6 @@ to acquire this updater. Updating does not change npm's recorded package version
 ```sh
 codeoutline update --check
 codeoutline update
-codeoutline update --rollback
 ```
 
 Every command starts the newest verified installed version without requesting the
@@ -117,9 +116,15 @@ network. `serve` then checks for updates in a background thread, so an unreachab
 update server never delays startup or requests; a verified update applies to the
 next launch, and failed checks are reported on stderr.
 Set `CODEOUTLINE_AUTO_UPDATE=0` to disable automatic checks. Manual update still works.
-Rollback switches between the two installed versions; after the first update it
-returns to the initial installation. Accepted sequence numbers are retained, so a
-rolled-back release is not immediately reinstalled by automatic checks.
+Only the active update is kept. After installing, the updater deletes other
+installed versions and the runtime cache, except versions a running process
+still uses: each process started from an installed update holds a lease that
+`serve` renews every 10 minutes, and a lease expires 3 days after its last
+renewal (a crashed process). Versions before 0.1.7 hold no lease, so they are
+deleted only 7 days after cleanup first finds them inactive. There is no local
+rollback: to return to the npm (or native) installation, delete
+`~/.codeoutline/updates` and set `CODEOUTLINE_AUTO_UPDATE=0` so `serve` does not
+reinstall the latest release.
 
 The default endpoint is `https://43.133.255.193:51215`, project `codeoutline`,
 channel `stable`. Packages pin the signing public key and the server's TLS CA in
@@ -210,8 +215,7 @@ including the new executables. It requires GitHub CLI but does not publish npm o
 create a GitHub Release. `MODE=full` retains the complete npm/GitHub/XUpgate workflow.
 Both full bundles and script bundles install into immutable version directories;
 active executables are never overwritten. `serve` installs in the background and
-the next launch selects the verified scripts and matching executable. Rollback
-switches the complete local version, including the reused or downloaded runtime.
+the next launch selects the verified scripts and matching executable.
 
 Script bundles use protocol updater version 2. Existing 0.1.4 initial bootstraps
 only understand updater version 1 and safely reject script bundles. They need a
@@ -308,5 +312,5 @@ python tests/update-deployed.py --stage .update-test/final --credential-file C:/
 ```
 
 The credential file contains `ADMIN_TOKEN=...`. The test creates a separate project,
-exercises manual and automatic updates, rollback and tamper rejection, and disables
+exercises manual and automatic updates, pruning and tamper rejection, and disables
 the project on exit. It never publishes to the production CodeOutline channel.

@@ -11,6 +11,26 @@ end
 local function command_ok(command)
     local ok=os.execute(command);return ok==true or ok==0
 end
+-- A running process renews its lease; pruning keeps leased versions. A lease
+-- left by a crashed process expires.
+local LEASE_TTL,LEASE_RENEW,LEGACY_GRACE=3*86400,600,7*86400
+local function token()
+    return u.sha256_hex(tostring(os.time()) .. tostring(os.clock()) .. tostring({}) .. tostring(math.random())):sub(1,16)
+end
+-- Returns nil outside an update directory (the initial installation is never pruned).
+function M.lease(files_root)
+    local root,identity=files_root:gsub('\\','/'):match('^(.*)/versions/(%x+)/files/?$')
+    if not root or #identity~=64 then return nil end
+    local path=root .. '/leases/' .. identity .. '-' .. token()
+    local renewed,lease=0,{}
+    function lease.renew(force)
+        local now=os.time()
+        if force or now-renewed>=LEASE_RENEW then renewed=now;pcall(c.write,path,now .. '\n')end
+    end
+    function lease.release()os.remove(path)end
+    lease.renew(true)
+    return lease
+end
 function M.open(config)
     assert(c.id(config.project) and c.id(config.platform),'invalid project/platform')
     assert(type(config.publicKey)=='string','pinned publicKey required')
@@ -45,6 +65,39 @@ function M.open(config)
         assert(u.rmtree(lock))
         if not ok then error(result) end
         return result
+    end
+    -- Remove versions other than keep that no live process leases, then the
+    -- runtime cache, which only feeds installation.
+    local function prune(keep)
+        local now,busy=os.time(),{}
+        for _,entry in ipairs(u.list_dir(root .. '/leases') or {})do
+            local path=root .. '/leases/' .. entry.name
+            local identity=entry.name:match('^(%x+)%-%x+$')
+            local info=u.stat(path)
+            if identity and info and info.exists and now-(info.mtime or 0)<LEASE_TTL then busy[identity]=true
+            else os.remove(path)end
+        end
+        for _,entry in ipairs(u.list_dir(root .. '/versions') or {})do
+            local removable=entry.dir and not keep[entry.name] and not busy[entry.name]
+            -- Versions predating leases may still run unseen: delete them only
+            -- after a grace period counted from the first prune that saw them.
+            if removable and config.leased and not config.leased(root .. '/versions/' .. entry.name .. '/files') then
+                local marker=root .. '/retired/' .. entry.name
+                local info=u.stat(marker)
+                if not (info and info.exists) then c.write(marker,now .. '\n');removable=false
+                else removable=now-(info.mtime or now)>=(config.legacyGrace or LEGACY_GRACE) end
+            end
+            if removable then
+                -- Moving first keeps a half-deleted tree out of versions/.
+                assert(u.mkdir_p(root .. '/trash'))
+                os.rename(root .. '/versions/' .. entry.name,root .. '/trash/' .. entry.name .. '-' .. token())
+            end
+        end
+        for _,entry in ipairs(u.list_dir(root .. '/trash') or {})do u.rmtree(root .. '/trash/' .. entry.name)end
+        for _,entry in ipairs(u.list_dir(root .. '/retired') or {})do
+            if not u.stat(root .. '/versions/' .. entry.name).exists then os.remove(root .. '/retired/' .. entry.name)end
+        end
+        if u.stat(root .. '/runtime-cache').exists then u.rmtree(root .. '/runtime-cache')end
     end
     local function verified(envelope)
         local m=c.manifest(envelope,config.publicKey)
@@ -125,9 +178,12 @@ function M.open(config)
                 c.atomic(dir .. '/complete','1\n')
             end
             if config.validate then assert(config.validate(dir .. '/files',m),'project health validation failed')end
-            save({schema=1,highSequence=math.max(s.highSequence,m.sequence),previous=s.current,current=identity})
+            local previous=config.keepPrevious~=false and s.current or nil
+            save({schema=1,highSequence=math.max(s.highSequence,m.sequence),previous=previous,current=identity})
             local ok,result=pcall(api.current)
             if not ok then save(s);error(result)end
+            -- Cleanup never fails an installation that is already active.
+            if config.prune then pcall(prune,{[identity]=true,[previous or identity]=true})end
             return result
         end)
     end

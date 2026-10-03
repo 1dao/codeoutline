@@ -59,6 +59,37 @@ assert(api.rollback().version == '1.1.0', 'runtime corruption prevented safe rol
 local orphan = require('xupgate.client').open({ project = 'update-test', platform = 'win32-x64',
     url = 'https://example.invalid', publicKey = key, directory = scratch .. '/orphan' })
 assert(not pcall(orphan.install, scripts2, bytes2), 'script update without a compatible runtime accepted')
-io.write('Signed script updates, runtime reuse/replacement, rollback, replay, tamper and missing-runtime checks passed\n')
+-- Pruning keeps only the active version, leased versions, and legacy versions
+-- inside their grace period.
+local client = require('xupgate.client')
+local pruned = client.open({ project = 'update-test', platform = 'win32-x64', url = 'https://example.invalid',
+    publicKey = key, directory = scratch .. '/pruned', runtimeDirectory = initial,
+    keepPrevious = false, prune = true, legacyGrace = 0,
+    leased = function(files) return c.read(files .. '/main.lua') ~= 'version 1.0.0' end })
+local state_root = scratch .. '/pruned/update-test'
+local function versions()
+    local names = {}
+    for _, entry in ipairs(u.list_dir(state_root .. '/versions') or {}) do names[#names + 1] = entry.name end
+    return names
+end
+local legacy = pruned.install(full1, bytes1).root
+local leased = pruned.install(scripts2, bytes2).root
+assert(c.decode_json(c.read(state_root .. '/current.json')).previous == nil, 'previous version kept')
+assert(not pcall(pruned.rollback), 'rollback without a previous version')
+assert(u.stat(legacy).exists and #versions() == 2, 'legacy version removed before its grace period')
+local lease = assert(client.lease(leased))
+c.write(state_root .. '/leases/not-a-lease', 'x')
+assert(pruned.install(full3, bytes3).version == '1.1.0')
+assert(not u.stat(legacy).exists, 'legacy version kept after its grace period')
+assert(u.stat(leased).exists and #versions() == 2, 'leased version removed')
+assert(not u.stat(state_root .. '/leases/not-a-lease').exists, 'invalid lease kept')
+lease.release()
+installed = pruned.install(scripts4, bytes4)
+assert(c.read(installed.root .. '/bin/runtime') == 'runtime-B', 'pruning lost the reused runtime')
+assert(not u.stat(leased).exists and #versions() == 1, 'unleased versions kept')
+assert(#(u.list_dir(state_root .. '/trash') or {}) == 0 and #(u.list_dir(state_root .. '/retired') or {}) == 0, 'cleanup left files')
+assert(pruned.current().version == '1.1.1')
+assert(client.lease(initial) == nil, 'initial installation leased')
+io.write('Signed script updates, runtime reuse/replacement, rollback, pruning, replay, tamper and missing-runtime checks passed\n')
 os.remove(scratch .. '/private.pem')
 return { __init = function() xthread.stop(0) end }

@@ -12,7 +12,7 @@ Usage:
   codeoutline status [--project PATH]
   codeoutline rebuild [--project PATH]
   codeoutline doctor [--project PATH]
-  codeoutline update [--check | --rollback] [--channel CHANNEL]
+  codeoutline update [--check] [--channel CHANNEL]
   codeoutline --version
 
 HTTP options: --allow-host HOST, --allow-origin ORIGIN (repeatable).
@@ -39,7 +39,7 @@ local function parse(args)
         serve = { stdio = true, http = true, project = true, host = true, port = true,
             ['allow-root'] = true, ['allow-host'] = true, ['allow-origin'] = true },
         explore = { project = true, query = true, budget = true },
-        update = { check = true, rollback = true, channel = true },
+        update = { check = true, channel = true },
         status = { project = true }, rebuild = { project = true }, doctor = { project = true },
     }
     assert(allowed[command], 'unknown command: ' .. command)
@@ -48,7 +48,7 @@ local function parse(args)
         local name, value = clean[i]:match('^%-%-([%w-]+)=(.*)$')
         if not name then name = clean[i]:match('^%-%-([%w-]+)$') end
         assert(name and (allowed[command][name] or name == 'help'), 'unknown option: ' .. clean[i])
-        local flag = name == 'check' or name == 'rollback' or name == 'stdio' or name == 'http' or name == 'help'
+        local flag = name == 'check' or name == 'stdio' or name == 'http' or name == 'help'
         if flag then
             assert(value == nil, '--' .. name .. ' does not take a value')
             value = true
@@ -127,8 +127,7 @@ local function run()
     if command == '--help' or command == '-h' or options.help then io.write(help); return 0 end
     if command == '--version' then io.write(version, '\n'); return 0 end
     if command == 'update' then
-        assert(not (options.check and options.rollback), '--check and --rollback are mutually exclusive')
-        return require('codeoutline.updater').run(options.check and 'check' or options.rollback and 'rollback' or 'update', options)
+        return require('codeoutline.updater').run(options.check and 'check' or 'update', options)
     end
     if command == 'serve' then
         assert(not not options.stdio ~= not not options.http, 'serve requires exactly one of --stdio or --http')
@@ -158,9 +157,23 @@ local function run()
     return 0
 end
 
+-- Lease the installed update this process runs from, so installing a newer
+-- one does not delete files it may still load (language parsers load lazily).
+local lease = require('xupgate.client').lease(assert(scripts:match('^(.*)/scripts$')))
 local ok, result = pcall(run)
 if not ok then io.stderr:write('codeoutline: ', tostring(result), '\n'); result = 1 end
-if type(result) == 'table' then return result end
+if type(result) == 'table' then
+    if lease then
+        local update, uninit = result.__update, result.__uninit
+        if update then result.__update = function(...) lease.renew(); return update(...) end end
+        result.__uninit = function(...)
+            lease.release()
+            if uninit then return uninit(...) end
+        end
+    end
+    return result
+end
+if lease then lease.release() end
 io.stdout:flush()
 -- One-shot commands exchange no thread messages; the empty handler keeps the
 -- runtime from warning that none is set.

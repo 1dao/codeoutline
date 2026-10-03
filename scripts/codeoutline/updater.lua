@@ -20,6 +20,13 @@ function M.config(options)
         minimumSequence=tonumber(os.getenv('CODEOUTLINE_UPDATE_MIN_SEQUENCE')) or build.updateSequence or 0,
         http=require('xupgate.http_client'),
         runtimeDirectory=install,
+        -- Keep only the active version; npm reinstalls are the way back.
+        keepPrevious=false,prune=true,
+        -- Versions before 0.1.7 run without leases.
+        leased=function(files)
+            local sdk=c.read(files .. '/scripts/xupgate/client.lua')
+            return sdk~=nil and sdk:find('function M.lease',1,true)~=nil
+        end,
     }
     cfg.validate=function(root,m)
         local info=c.decode_json(c.read(root .. '/build-info.json'))
@@ -58,10 +65,6 @@ function M.run(action,options)
         assert(xnet.init());xtimer.init(16)
         -- Selection is local only; serve updates in its background thread.
         if action=='select' then finish(nil)
-        elseif action=='rollback' then
-            local ok,result=pcall(api.rollback)
-            if not ok and tostring(result):find('no previous version',1,true)then ok,result=pcall(api.use_initial)end
-            finish(not ok and tostring(result) or nil,ok and result or nil)
         elseif action=='current' then local ok,result=pcall(api.current);finish(not ok and tostring(result) or nil,ok and result or nil)
         elseif action=='check' then api.check(finish)
         else api.update(finish)end

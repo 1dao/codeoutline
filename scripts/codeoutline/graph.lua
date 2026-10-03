@@ -276,6 +276,12 @@ local function score(G, f, src_id, ref_kind, recv, cid, deps, paired, owner)
     return s
 end
 
+local function is_decl(node) return node.kind == 'prototype' or node.decl end
+
+-- Scored candidates of the current resolve_ref call, reused across calls to
+-- keep the hot loop allocation-free; only the first n entries are live.
+local scored_ids, scored_vals = {}, {}
+
 local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired)
     if kind == 'annotation' then return nil end
     local accept = CALLABLE
@@ -287,14 +293,13 @@ local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired)
     -- candidates this call could actually reach. (Asking it over all
     -- same-named nodes let a Python `def work` hide the C prototype of
     -- `work`, after which the Python def was filtered out too.)
-    local function is_decl(node) return node.kind == 'prototype' or node.decl end
     local self_call = kind == 'member_call' and src_id and (recv == 'self' or recv == 'this' or recv == 'cls')
     local owner = (self_call or (kind == 'call' and src_id and G.files[f].language == 'java'))
         and owner_class(G, src_id) or nil
     -- score() rejects an unknown-receiver member call to an unrelated file;
     -- checking placement first skips most candidates of common method names.
     local local_only = kind == 'member_call' and not self_call
-    local scored, has_def = {}, false
+    local n, has_def = 0, false
     for i = 1, math.min(#cands, M.MAX_CANDIDATES) do
         local cid = cands[i]
         local node = G.nodes[cid]
@@ -302,7 +307,8 @@ local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired)
             and (not local_only or (locality(G, f, G.node_file[cid], node, deps, paired) or 0) > 0) then
             local s = score(G, f, src_id, kind, recv, cid, deps, paired, owner)
             if s then
-                scored[#scored + 1] = { cid, s }
+                n = n + 1
+                scored_ids[n], scored_vals[n] = cid, s
                 if not is_decl(node) then has_def = true end
             end
         end
@@ -310,8 +316,8 @@ local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired)
     -- Prefer definitions: drop prototypes / in-class declarations when a
     -- reachable definition exists.
     local best, ties = nil, {}
-    for _, c in ipairs(scored) do
-        local cid, s = c[1], c[2]
+    for i = 1, n do
+        local cid, s = scored_ids[i], scored_vals[i]
         if not (has_def and is_decl(G.nodes[cid])) then
             if not best or s > best then
                 best, ties = s, { cid }

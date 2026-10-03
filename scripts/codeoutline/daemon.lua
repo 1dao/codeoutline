@@ -37,10 +37,12 @@ end
 function M.current_root(install)
     local own = sequence(install)
     if not own then return install end
+    -- active() applies the same rule as launcher selection: this install's
+    -- sequence is the updater's minimum, so an older update is skipped.
     local ok, current = pcall(function()
-        return require('xupgate.client').open(require('codeoutline.updater').config()).current()
+        return require('xupgate.client').open(require('codeoutline.updater').config()).active()
     end)
-    if ok and current and current.sequence >= own then return current.root end
+    if ok and current then return current.root end
     return install
 end
 function M.is_current(install) return same_path(M.current_root(install), install) end

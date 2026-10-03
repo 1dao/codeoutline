@@ -50,7 +50,7 @@ end
 function M.run(action,options)
     local api=require('xupgate.client').open(M.config(options))
     local function selected()
-        local ok,current=pcall(api.current)
+        local ok,current=pcall(api.active)
         if not ok then io.stderr:write('codeoutline: installed update invalid; using initial version\n')end
         return ok and current and current.root or install
     end

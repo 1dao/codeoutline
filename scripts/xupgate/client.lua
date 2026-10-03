@@ -154,6 +154,14 @@ function M.open(config)
         end
         return {version=m.version,sequence=m.sequence,root=dir .. '/files',entry=m.entry,runtime=m.runtime,sha256=m.sha256,kind=m.kind or 'full'}
     end
+    -- The installed update to run, or nil when the initial installation is
+    -- at least as new: reinstalling a newer initial version (an npm upgrade)
+    -- raises minimumSequence, and check() will not fetch anything below it.
+    function api.active()
+        local current=api.current()
+        if current and current.sequence<(config.minimumSequence or 0) then return nil end
+        return current
+    end
     function api.install(envelope,data)
         local m=verified(envelope);local files=c.bundle(data,m)
         local identity=u.sha256_hex(envelope.payload)

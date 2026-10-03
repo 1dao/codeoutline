@@ -93,6 +93,13 @@ assert(c.read(installed.root .. '/bin/runtime') == 'runtime-B', 'pruning lost th
 assert(not u.stat(leased).exists and #versions() == 1, 'unleased versions kept')
 assert(#(u.list_dir(state_root .. '/trash') or {}) == 0 and #(u.list_dir(state_root .. '/retired') or {}) == 0, 'cleanup left files')
 assert(pruned.current().version == '1.1.1')
+-- A newer initial installation (npm upgrade) wins over an older active update.
+local function at_minimum(sequence)
+    return client.open({ project = 'update-test', platform = 'win32-x64', url = 'https://example.invalid',
+        publicKey = key, directory = scratch .. '/pruned', runtimeDirectory = initial, minimumSequence = sequence })
+end
+assert(at_minimum(4).active().version == '1.1.1', 'active update ignored at its own sequence')
+assert(at_minimum(5).active() == nil, 'older active update chosen over a newer initial installation')
 assert(client.lease(initial) == nil, 'initial installation leased')
 io.write('Signed script updates, runtime reuse/replacement, rollback, pruning, replay, tamper and missing-runtime checks passed\n')
 os.remove(scratch .. '/private.pem')

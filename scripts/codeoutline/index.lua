@@ -121,7 +121,17 @@ function Index:load()
                 assert(type(n.name) == 'string' and type(n.qualified) == 'string' and type(n.kind) == 'string')
                 assert(type(n.line) == 'number' and type(n.end_line) == 'number' and n.line >= 1 and n.end_line >= n.line)
             end
-            for _, r in ipairs(rec.refs) do assert(type(r.name) == 'string' and type(r.from) == 'number') end
+            local refs = rec.refs
+            assert(type(refs.name) == 'table' and type(refs.from) == 'table' and type(refs.kind) == 'table'
+                and type(refs.line) == 'table' and type(refs.recv) == 'table')
+            local nrefs = #refs.name
+            assert(#refs.from == nrefs and #refs.kind == nrefs and #refs.line == nrefs and #refs.recv == nrefs)
+            for i = 1, nrefs do
+                assert(type(refs.name[i]) == 'string' and type(refs.from[i]) == 'number'
+                    and type(refs.kind[i]) == 'string' and type(refs.line[i]) == 'number')
+                local recv = refs.recv[i]
+                assert(recv == false or type(recv) == 'string')
+            end
             for _, imp in ipairs(rec.imports) do assert(type(imp.path) == 'string') end
             records[rec.path] = rec
         end

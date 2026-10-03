@@ -329,7 +329,11 @@ function Lang:tokenize(src)
 
     while pos <= len do
         local c = src:byte(pos)
-        if c == 10 then
+        if c == 10 then     -- \n
+            -- Newlines outside tokens are counted here; strings and block
+            -- comments jump past theirs and add them with count_nl. Indent
+            -- mode ends a logical line, but not inside brackets, and blank or
+            -- comment-only lines collapse into the previous 'nl'.
             if indent_mode and depth == 0 and n > 0 and K[n] ~= 'nl' and not skip then
                 push('nl', pos, pos, line)
             end
@@ -337,21 +341,30 @@ function Lang:tokenize(src)
             pos = pos + 1
             bol = true
         elseif c == 32 or c == 9 or c == 13 or c == 12 or c == 11 then
+            -- Space, tab, \r, \f, \v. bol stays set, so indentation and a
+            -- directive '#' are still judged at the first real token; the \r
+            -- of \r\n is skipped here and its \n counted above.
             pos = pos + 1
         elseif indent_mode and c == 92 and (src:byte(pos + 1) == 10
             or (src:byte(pos + 1) == 13 and src:byte(pos + 2) == 10)) then
             -- Python `\` continuation: the next line joins this logical line
+            -- (no 'nl', and bol stays clear so its indentation is ignored).
             pos = pos + (src:byte(pos + 1) == 10 and 2 or 3)
             line = line + 1
         else
+            -- Anything else starts a token, comment or directive. Every token
+            -- except 'nl' is pushed below; each case advances pos past what it
+            -- consumed, and the operator case always consumes at least a byte.
+
             -- Indentation (Python): measured at the first real token of a line.
             if indent_mode and bol and depth == 0 then
                 local col_start = pos
                 while col_start > 1 and src:byte(col_start - 1) ~= 10 do col_start = col_start - 1 end
-                local width = 0
+                local width = 0     -- tabs advance to the next multiple of 8
                 for x = col_start, pos - 1 do
                     width = width + ((src:byte(x) == 9) and (8 - width % 8) or 1)
                 end
+                -- Comment-only lines do not open or close blocks.
                 local is_comment = false
                 for _, lc in ipairs(self.line_comment) do
                     if starts(src, pos, lc) then is_comment = true end
@@ -402,6 +415,9 @@ function Lang:tokenize(src)
             end
             bol = false
 
+            -- The cases below are tried in order; the first match wins.
+            -- Line comment: skipped up to (not including) the newline, which
+            -- the \n branch then handles.
             if not handled then
                 for _, lc in ipairs(self.line_comment) do
                     if starts(src, pos, lc) then
@@ -419,6 +435,7 @@ function Lang:tokenize(src)
                     end
                 end
             end
+            -- Lua long string [==[ ... ]==]: one 'str' token.
             if not handled and long_brackets then
                 local lb = long_open(src, pos)
                 if lb then
@@ -430,11 +447,14 @@ function Lang:tokenize(src)
                     handled = true
                 end
             end
+            -- Block comment: skipped, its newlines still counted. An unclosed
+            -- one runs to the end of the file.
             if not handled then
                 for _, bc in ipairs(self.block_comment) do
                     if starts(src, pos, bc[1]) then
                         local stop
                         if nested_comments then
+                            -- Rust: /* /* */ */ closes at the outer */
                             local nest, p = 1, pos + #bc[1]
                             while p + #bc[2] - 1 <= len do
                                 if starts(src, p, bc[1]) then
@@ -460,6 +480,7 @@ function Lang:tokenize(src)
                     end
                 end
             end
+            -- JS template literal `...${...}...`: one 'str' token, nesting included.
             if not handled and template_literals and c == 96 then
                 local stop = skip_template(src, pos)
                 local l0 = line
@@ -468,6 +489,8 @@ function Lang:tokenize(src)
                 pos = stop + 1
                 handled = true
             end
+            -- JS regex literal: only where an operand may start; when the line
+            -- ends before the closing '/', it falls through as a division.
             if not handled and regex_literals and c == 47 and regex_allowed(src, K, S, E, n, ctrl_close) then
                 local stop = scan_regex(src, pos, id_char)
                 if stop then
@@ -476,6 +499,7 @@ function Lang:tokenize(src)
                     handled = true
                 end
             end
+            -- Rust lifetime 'a: an 'id', so it is not read as an unclosed char.
             if not handled and lifetimes and c == 39 then
                 local stop = scan_lifetime(src, pos, id_start, id_char)
                 if stop then
@@ -484,6 +508,8 @@ function Lang:tokenize(src)
                     handled = true
                 end
             end
+            -- Rust raw string r"..", r#".."#, br"..", cr"..": one 'str' token.
+            -- Otherwise r/b/c fall through to an identifier.
             if not handled and raw_strings and (c == 114 or c == 98 or c == 99) then
                 local stop = scan_raw_string(src, pos, id_char)
                 if stop then
@@ -496,6 +522,9 @@ function Lang:tokenize(src)
             end
             if not handled then
                 -- String, optionally after a prefix (r"", b'', f"""...""").
+                -- A prefix counts only at the start of a word (not the end of
+                -- `abc"`). A single-line string stops at the newline, so a
+                -- stray quote cannot swallow the rest of the file.
                 local q = pos
                 while self.prefixes[src:byte(q)] and q - pos < 2 do q = q + 1 end
                 for _, st in ipairs(self.strings) do
@@ -529,12 +558,16 @@ function Lang:tokenize(src)
                 end
             end
             if not handled then
+                -- Identifier or keyword: the longest run of identifier bytes
+                -- (bytes >= 0x80 included, so UTF-8/GBK names stay whole).
                 if id_start[c] then
                     local p = pos + 1
                     while p <= len and id_char[src:byte(p)] do p = p + 1 end
                     local word = src:sub(pos, p - 1)
                     push(keywords[word] and 'kw' or 'id', pos, p - 1, line)
                     pos = p
+                -- Number: a digit, or '.' then a digit. Takes identifier
+                -- bytes, '.' and the C++14 separator ' (0x1F, 1.5f, 1'000).
                 elseif (c >= 48 and c <= 57) or (c == 46 and (src:byte(pos + 1) or 0) >= 48 and (src:byte(pos + 1) or 0) <= 57) then
                     local p = pos + 1
                     while p <= len do
@@ -551,6 +584,8 @@ function Lang:tokenize(src)
                     push('num', pos, p - 1, line)
                     pos = p
                 else
+                    -- Operator or punctuation: the longest configured operator
+                    -- starting with this byte, else the single byte itself.
                     local w = 1
                     local list = ops[c]
                     if list then
@@ -558,11 +593,15 @@ function Lang:tokenize(src)
                             if starts(src, pos, op) then w = #op; break end
                         end
                     end
+                    -- Bracket depth: indent mode ignores newlines inside brackets,
+                    -- and directives use it to choose which #if arms to keep.
                     if w == 1 and not skip then
                         if OPEN[c] then depth = depth + 1
                         elseif CLOSE[c] and depth > 0 then depth = depth - 1 end
                     end
                     push('op', pos, pos + w - 1, line)
+                    -- Track which ')' closes an if/while/for/with condition:
+                    -- a '/' right after one starts a regex, not a division.
                     if regex_literals and w == 1 and not skip then
                         if c == 40 then
                             local prev = n - 1

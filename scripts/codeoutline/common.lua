@@ -4,13 +4,17 @@
 -- Result: {
 --   path, language,
 --   nodes   = { {kind, name, qualified, line, end_line, sig?, parent?, static?, bases?} },
---   refs    = { {from = node index | 0 (file scope), name, kind, line, recv?} },
+--   refs    = { name = {...}, from = {...}, kind = {...}, line = {...}, recv = {...} },
 --   imports = { {path, line, names?} },
 -- }
 -- Refs are attributed after parsing: a parser only records where each call
 -- sits (token index) and assign_refs() hands it to the innermost node whose
 -- token range contains it. That keeps nested functions/classes correct
 -- without each parser tracking scope for every call site.
+-- finish() then packs refs into parallel columns -- ref i is name[i],
+-- from[i] (node index | 0 for file scope), kind[i], line[i], recv[i]
+-- (false when absent) -- because a large tree holds hundreds of thousands of
+-- refs and a table per ref costs several times the data it carries.
 
 local M = {}
 local text = require('codeoutline.text')
@@ -115,7 +119,11 @@ end
 -- Drop parser-internal fields so the result is plain data.
 function M.finish(r)
     M.assign_refs(r)
-    for _, ref in ipairs(r.refs) do ref.tok, ref.seq = nil, nil end
+    local name, from, kind, line, recv = {}, {}, {}, {}, {}
+    for i, ref in ipairs(r.refs) do
+        name[i], from[i], kind[i], line[i], recv[i] = ref.name, ref.from, ref.kind, ref.line, ref.recv or false
+    end
+    r.refs = { name = name, from = from, kind = kind, line = line, recv = recv }
     for _, n in ipairs(r.nodes) do n.ti, n.tj = nil, nil end
     r.prefix, r.skip_calls = nil, nil
     return r

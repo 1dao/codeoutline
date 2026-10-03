@@ -2,10 +2,15 @@
 -- file dependencies (#include / import), and call edges between nodes.
 --
 --   local G = graph.build(idx)
---   G.nodes[id]        -> { f = file index, node = <node table>, id = id }
+--   G.nodes[id]        -> <node table> (shared with the file record)
+--   G.node_file[id]    -> file index
 --   G.files[f]         -> file record (path, language, nodes, refs, imports)
 --   G.by_name[name]    -> { id, ... }
---   G.out[id], G.inn[id] -> { {id = other, line = call line, kind = ref kind}, ... }
+--   G.out[id], G.inn[id] -> { other, line, kind, other, line, kind, ... }
+--
+-- Edge lists are flat, EDGE values per edge, and nodes carry no wrapper
+-- table: on large trees per-edge and per-node tables cost more than the
+-- data they hold. Walk an edge list with `for i = 1, #list, graph.EDGE`.
 --
 -- Resolution is name-based with locality scoring, the same model CodeGraph
 -- uses for dynamic languages: a call binds to the best-placed definition of
@@ -16,6 +21,7 @@
 local control = require('codeoutline.control')
 local M = {}
 
+M.EDGE = 3
 M.MAX_TIES = 3
 M.MAX_CANDIDATES = 200
 
@@ -42,6 +48,13 @@ local function push(t, k, v)
     local list = t[k]
     if not list then list = {}; t[k] = list end
     list[#list + 1] = v
+end
+
+local function push3(t, k, a, b, c)
+    local list = t[k]
+    if not list then list = {}; t[k] = list end
+    local n = #list
+    list[n + 1], list[n + 2], list[n + 3] = a, b, c
 end
 
 -- Files a file depends on, resolved from its #include / import records.
@@ -175,7 +188,7 @@ local function resolve_deps(G, f)
             if path:sub(-2) == '.*' then
                 for _, g in ipairs(G.pkg_files[path:sub(1, -3)] or {}) do add(g) end
             else
-                for _, id in ipairs(G.by_qualified[path] or {}) do add(G.nodes[id].f) end
+                for _, id in ipairs(G.by_qualified[path] or {}) do add(G.node_file[id]) end
             end
         end
     end
@@ -210,29 +223,29 @@ end
 
 -- Innermost class-like container of a node (for self./this. calls).
 local function owner_class(G, id)
-    local n = G.nodes[id]
-    local rec = G.files[n.f]
-    local p = n.node.parent
+    local f = G.node_file[id]
+    local rec = G.files[f]
+    local p = G.nodes[id].parent
     while p do
         local pn = rec.nodes[p]
         if pn.kind == 'class' or pn.kind == 'record' or pn.kind == 'interface' or pn.kind == 'enum'
             or pn.kind == 'struct' or pn.kind == 'union' then
-            return G.id_of[n.f][p]
+            return G.id_of[f][p]
         end
         p = pn.parent
     end
     return nil
 end
 
-local function score(G, f, src_id, ref, cid, deps, paired)
+local function score(G, f, src_id, ref_kind, recv, cid, deps, paired)
     local c = G.nodes[cid]
-    local cf = c.f
+    local cf = G.node_file[cid]
     local crec, frec = G.files[cf], G.files[f]
     if family(crec.language) ~= family(frec.language) then return nil end
     local s = 0
     if cf == f then
         s = s + 100
-    elseif c.node.static then
+    elseif c.static then
         return nil                      -- C static: invisible outside its file
     elseif deps[cf] then
         s = s + 50
@@ -241,33 +254,33 @@ local function score(G, f, src_id, ref, cid, deps, paired)
     elseif dirname(crec.path) == dirname(frec.path) then
         s = s + 20
     end
-    local kind = c.node.kind
+    local kind = c.kind
     if kind == 'prototype' then s = s - 3 end
-    if ref.kind == 'member_call' and (ref.recv == 'self' or ref.recv == 'this' or ref.recv == 'cls') and src_id then
+    if ref_kind == 'member_call' and (recv == 'self' or recv == 'this' or recv == 'cls') and src_id then
         local owner = owner_class(G, src_id)
-        if owner and G.nodes[cid].node.parent and G.id_of[cf][G.nodes[cid].node.parent] == owner then
+        if owner and c.parent and G.id_of[cf][c.parent] == owner then
             s = s + 80
         elseif kind ~= 'method' then
             s = s - 20
         end
-    elseif ref.kind == 'member_call' and s <= 0 then
+    elseif ref_kind == 'member_call' and s <= 0 then
         -- obj.name() on an unknown receiver: binding it to any same-named
         -- method project-wide (str.format -> some format()) is mostly wrong,
         -- so only local candidates qualify.
         return nil
-    elseif ref.kind == 'call' and frec.language == 'java' and src_id then
+    elseif ref_kind == 'call' and frec.language == 'java' and src_id then
         -- unqualified call inside a class: implicit this
         local owner = owner_class(G, src_id)
-        if owner and c.node.parent and G.id_of[cf][c.node.parent] == owner then s = s + 30 end
+        if owner and c.parent and G.id_of[cf][c.parent] == owner then s = s + 30 end
     end
     return s
 end
 
-local function resolve_ref(G, f, src_id, ref, deps, paired)
-    if ref.kind == 'annotation' then return nil end
+local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired)
+    if kind == 'annotation' then return nil end
     local accept = CALLABLE
-    if ref.kind == 'new' then accept = NEWABLE elseif ref.kind == 'ref' then accept = VALUE end
-    local cands = G.by_name[ref.name]
+    if kind == 'new' then accept = NEWABLE elseif kind == 'ref' then accept = VALUE end
+    local cands = G.by_name[name]
     if not cands then return nil end
     -- Score first: score() rejects other languages and statics of other
     -- files, so "is there a real definition?" is only asked among the
@@ -278,9 +291,9 @@ local function resolve_ref(G, f, src_id, ref, deps, paired)
     local scored, has_def = {}, false
     for i = 1, math.min(#cands, M.MAX_CANDIDATES) do
         local cid = cands[i]
-        local node = G.nodes[cid].node
+        local node = G.nodes[cid]
         if cid ~= src_id and accept[node.kind] then
-            local s = score(G, f, src_id, ref, cid, deps, paired)
+            local s = score(G, f, src_id, kind, recv, cid, deps, paired)
             if s then
                 scored[#scored + 1] = { cid, s }
                 if not is_decl(node) then has_def = true end
@@ -292,7 +305,7 @@ local function resolve_ref(G, f, src_id, ref, deps, paired)
     local best, ties = nil, {}
     for _, c in ipairs(scored) do
         local cid, s = c[1], c[2]
-        if not (has_def and is_decl(G.nodes[cid].node)) then
+        if not (has_def and is_decl(G.nodes[cid])) then
             if not best or s > best then
                 best, ties = s, { cid }
             elseif s == best and #ties < M.MAX_TIES then
@@ -308,7 +321,7 @@ end
 
 function M.build(idx)
     local G = {
-        files = {}, file_index = {}, nodes = {}, id_of = {},
+        files = {}, file_index = {}, nodes = {}, node_file = {}, id_of = {},
         by_name = {}, by_lname = {}, by_qualified = {}, by_base = {}, by_stem = {},
         pkg_files = {}, children = {}, out = {}, inn = {}, deps = {}, dir_files = {}, ns_files = {},
         generation = idx.generation,
@@ -331,7 +344,7 @@ function M.build(idx)
         G.id_of[f] = ids
         for n, node in ipairs(rec.nodes) do
             local id = #G.nodes + 1
-            G.nodes[id] = { id = id, f = f, n = n, node = node }
+            G.nodes[id], G.node_file[id] = node, f
             ids[n] = id
             push(G.by_name, node.name, id)
             push(G.by_lname, node.name:lower(), id)
@@ -353,14 +366,17 @@ function M.build(idx)
         control.check()
         local deps, paired = resolve_deps(G, f)
         G.deps[f] = deps
-        for _, ref in ipairs(rec.refs) do
-            if ref.from and ref.from > 0 then
-                local src = G.id_of[f][ref.from]
-                local targets = resolve_ref(G, f, src, ref, deps, paired)
+        local refs, ids = rec.refs, G.id_of[f]
+        local names, froms, kinds, lines, recvs = refs.name, refs.from, refs.kind, refs.line, refs.recv
+        for i = 1, #names do
+            local from = froms[i]
+            if from > 0 then
+                local src, kind, line = ids[from], kinds[i], lines[i]
+                local targets = resolve_ref(G, f, src, names[i], kind, recvs[i] or nil, deps, paired)
                 if targets then
                     for _, dst in ipairs(targets) do
-                        push(G.out, src, { id = dst, line = ref.line, kind = ref.kind })
-                        push(G.inn, dst, { id = src, line = ref.line, kind = ref.kind })
+                        push3(G.out, src, dst, line, kind)
+                        push3(G.inn, dst, src, line, kind)
                         edges = edges + 1
                     end
                 end
@@ -373,8 +389,7 @@ end
 
 -- Location string for a node: "path:line".
 function M.where(G, id)
-    local n = G.nodes[id]
-    return G.files[n.f].path .. ':' .. n.node.line
+    return G.files[G.node_file[id]].path .. ':' .. G.nodes[id].line
 end
 
 return M

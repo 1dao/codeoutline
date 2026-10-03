@@ -18,9 +18,9 @@ end
 -- refs as "container->name" (container '<file>' for file scope).
 local function refs(r)
     local out = {}
-    for _, ref in ipairs(r.refs) do
-        local from = ref.from > 0 and r.nodes[ref.from].name or '<file>'
-        out[#out + 1] = from .. '->' .. ref.name
+    for i, name in ipairs(r.refs.name) do
+        local from = r.refs.from[i]
+        out[#out + 1] = (from > 0 and r.nodes[from].name or '<file>') .. '->' .. name
     end
     return table.concat(out, ' ')
 end
@@ -492,7 +492,7 @@ spec.describe('review regressions', function()
     local function all_edges(G)
         local es = {}
         for id, list in pairs(G.out) do
-            for _, e in ipairs(list) do es[#es + 1] = G.nodes[id].node.qualified .. '->' .. G.nodes[e.id].node.qualified end
+            for i = 1, #list, graph_mod.EDGE do es[#es + 1] = G.nodes[id].qualified .. '->' .. G.nodes[list[i]].qualified end
         end
         table.sort(es)
         return table.concat(es, ' ')
@@ -598,12 +598,14 @@ write(tmp_root .. '/cc/shape.cpp', '#include "shape.hpp"\n#include "../net.h"\nn
 
 local svc = require('codeoutline.service')
 local explore = require('codeoutline.explore')
+local graph = require('codeoutline.graph')
 
 local function edges_from(G, name)
     local out = {}
     for _, id in ipairs(G.by_name[name] or {}) do
-        for _, e in ipairs(G.out[id] or {}) do
-            out[#out + 1] = G.nodes[e.id].node.name .. '@' .. G.files[G.nodes[e.id].f].path
+        local list = G.out[id] or {}
+        for i = 1, #list, graph.EDGE do
+            out[#out + 1] = G.nodes[list[i]].name .. '@' .. G.files[G.node_file[list[i]]].path
         end
     end
     table.sort(out)

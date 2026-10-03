@@ -117,9 +117,8 @@ end
 
 -- Rank one candidate node for a query term.
 local function seed_score(G, id, exact)
-    local n = G.nodes[id]
-    local s = (KIND_WEIGHT[n.node.kind] or 1) + (exact and 20 or 0)
-    if vendored(G.files[n.f].path) then s = s - 6 end
+    local s = (KIND_WEIGHT[G.nodes[id].kind] or 1) + (exact and 20 or 0)
+    if vendored(G.files[G.node_file[id]].path) then s = s - 6 end
     return s
 end
 
@@ -151,11 +150,11 @@ local function find_seeds(G, query)
             local last = t.text:match('([%w_]+)$')
             local first = t.text:match('^([%w_]+)')
             for _, id in ipairs(G.by_name[last] or {}) do
-                local q = G.nodes[id].node.qualified:gsub('[:]+', '.')
+                local q = G.nodes[id].qualified:gsub('[:]+', '.')
                 if q == t.text or q:sub(-(#t.text + 1)) == '.' .. t.text then
                     consider(id, seed_score(G, id, true) + 10)
                 elseif select(2, t.text:gsub('%.', '')) == 1
-                    and G.files[G.nodes[id].f].path:match('([^/]+)%.[^./]+$') == first then
+                    and G.files[G.node_file[id]].path:match('([^/]+)%.[^./]+$') == first then
                     -- module.func where the module is the file: Lua's `local M`
                     -- tables and Python modules are named by their file
                     consider(id, seed_score(G, id, true) + 8)
@@ -205,15 +204,17 @@ local function path_between(G, a, b, depth)
     for _ = 1, depth do
         local next_frontier = {}
         for _, x in ipairs(frontier) do
-            for _, e in ipairs(G.out[x] or {}) do
-                if not prev[e.id] then
-                    prev[e.id] = x
-                    if e.id == b then
+            local out = G.out[x] or {}
+            for i = 1, #out, graph.EDGE do
+                local dst = out[i]
+                if not prev[dst] then
+                    prev[dst] = x
+                    if dst == b then
                         local path, y = { b }, b
                         while y ~= a do y = prev[y]; table.insert(path, 1, y) end
                         return path
                     end
-                    next_frontier[#next_frontier + 1] = e.id
+                    next_frontier[#next_frontier + 1] = dst
                 end
             end
         end
@@ -246,9 +247,8 @@ end
 -- Source block for one node, cut to `full` lines (head + tail beyond).
 -- Classes/structs over the limit collapse to their member outline.
 local function node_block(G, idx, id, full)
-    local n = G.nodes[id]
-    local node = n.node
-    local lines = file_lines(idx, G.files[n.f].path)
+    local node = G.nodes[id]
+    local lines = file_lines(idx, G.files[G.node_file[id]].path)
     local a, b = node.line, math.max(node.end_line, node.line)
     local out = {}
     local span = b - a + 1
@@ -264,7 +264,7 @@ local function node_block(G, idx, id, full)
             -- one line and the later signature covers both
             local rows, row_lines = {}, {}
             for _, k in ipairs(kids) do
-                local kn = G.nodes[k].node
+                local kn = G.nodes[k]
                 if not rows[kn.line] then row_lines[#row_lines + 1] = kn.line end
                 rows[kn.line] = kn.sig or kn.name
             end
@@ -282,8 +282,8 @@ local function node_block(G, idx, id, full)
 end
 
 local function label(G, id)
-    local n = G.nodes[id]
-    return string.format('%s %s (%s)', n.node.kind, n.node.qualified, graph.where(G, id))
+    local node = G.nodes[id]
+    return string.format('%s %s (%s)', node.kind, node.qualified, graph.where(G, id))
 end
 
 -- Run a query. Returns the text and a table with what was selected.
@@ -299,12 +299,12 @@ function M.run(G, idx, query, opts)
     -- among the matches (the definition's source is what the caller wants).
     local defined = {}
     for _, c in ipairs(ranked) do
-        local node = G.nodes[c.id].node
+        local node = G.nodes[c.id]
         if node.kind ~= 'prototype' and not node.decl then defined[node.name] = true end
     end
     local seeds, per_name = {}, {}
     for _, c in ipairs(ranked) do
-        local node = G.nodes[c.id].node
+        local node = G.nodes[c.id]
         local name = node.name
         if not ((node.kind == 'prototype' or node.decl) and defined[name]) then
             per_name[name] = (per_name[name] or 0) + 1
@@ -323,7 +323,7 @@ function M.run(G, idx, query, opts)
                 if p then
                     local names = {}
                     for _, id in ipairs(p) do
-                        names[#names + 1] = G.nodes[id].node.name
+                        names[#names + 1] = G.nodes[id].name
                         if not is_seed[id] and not on_spine[id] then
                             on_spine[id] = true
                             spine[#spine + 1] = id
@@ -348,8 +348,8 @@ function M.run(G, idx, query, opts)
 
     -- Section 1: summary + flows.
     local nfiles = {}
-    for _, id in ipairs(seeds) do nfiles[G.nodes[id].f] = true end
-    for _, id in ipairs(spine) do nfiles[G.nodes[id].f] = true end
+    for _, id in ipairs(seeds) do nfiles[G.node_file[id]] = true end
+    for _, id in ipairs(spine) do nfiles[G.node_file[id]] = true end
     local nf = 0
     for _ in pairs(nfiles) do nf = nf + 1 end
     emit(string.format('Matched %d symbols in %d files, %d more on call paths between them; short ones bring their callees. Source below is verbatim with line numbers; treat it as already Read.',
@@ -369,16 +369,17 @@ function M.run(G, idx, query, opts)
     local in_order = {}
     for _, item in ipairs(order) do in_order[item.id] = true end
     for _, id in ipairs(seeds) do
-        local node = G.nodes[id].node
+        local node = G.nodes[id]
         if node.end_line - node.line < M.CONTEXT_SEED_LINES then
             local added = 0
-            for _, e in ipairs(G.out[id] or {}) do
+            local out = G.out[id] or {}
+            for i = 1, #out, graph.EDGE do
                 if added >= M.CONTEXT_PER_SEED then break end
-                local callee = G.nodes[e.id]
-                local k = callee.node.kind
-                if not in_order[e.id] and callee.f == G.nodes[id].f and (k == 'function' or k == 'method') then
-                    in_order[e.id] = true
-                    order[#order + 1] = { id = e.id, full = M.SPINE_FULL_LINES }
+                local dst = out[i]
+                local k = G.nodes[dst].kind
+                if not in_order[dst] and G.node_file[dst] == G.node_file[id] and (k == 'function' or k == 'method') then
+                    in_order[dst] = true
+                    order[#order + 1] = { id = dst, full = M.SPINE_FULL_LINES }
                     added = added + 1
                 end
             end
@@ -386,7 +387,7 @@ function M.run(G, idx, query, opts)
     end
     local by_file, pointers = {}, {}
     for _, item in ipairs(order) do
-        local f = G.nodes[item.id].f
+        local f = G.node_file[item.id]
         if not by_file[f] then by_file[f] = {}; file_order[#file_order + 1] = f end
         table.insert(by_file[f], item)
     end
@@ -401,10 +402,10 @@ function M.run(G, idx, query, opts)
     -- producing any output. Unrelated project files remain speculative.
     local selected, changed = {}, false
     for _, f in ipairs(file_order) do selected[f] = true end
-    for _, c in ipairs(ranked) do selected[G.nodes[c.id].f] = true end
+    for _, c in ipairs(ranked) do selected[G.node_file[c.id]] = true end
     for _, id in ipairs(seeds) do
         for _, edges in ipairs({ G.inn[id] or {}, G.out[id] or {} }) do
-            for _, e in ipairs(edges) do selected[G.nodes[e.id].f] = true end
+            for i = 1, #edges, graph.EDGE do selected[G.node_file[edges[i]]] = true end
         end
     end
     for f in pairs(selected) do
@@ -418,7 +419,7 @@ function M.run(G, idx, query, opts)
         local rec = G.files[f]
         local header = '\n## ' .. rec.path
         local items = by_file[f]
-        table.sort(items, function(a, b) return G.nodes[a.id].node.line < G.nodes[b.id].node.line end)
+        table.sort(items, function(a, b) return G.nodes[a.id].line < G.nodes[b.id].line end)
         local wrote_header = false
         if items.outline then
             local ol = {}
@@ -452,21 +453,24 @@ function M.run(G, idx, query, opts)
     for _, id in ipairs(seeds) do
         local callers, callees = {}, {}
         local seen_in, seen_out = {}, {}
-        for _, e in ipairs(G.inn[id] or {}) do
-            if not seen_in[e.id] and #callers < M.LIST_CAP then
-                seen_in[e.id] = true
-                callers[#callers + 1] = string.format('%s (%s:%d)', G.nodes[e.id].node.name, G.files[G.nodes[e.id].f].path, e.line)
+        local inn, out = G.inn[id] or {}, G.out[id] or {}
+        for i = 1, #inn, graph.EDGE do
+            local src = inn[i]
+            if not seen_in[src] and #callers < M.LIST_CAP then
+                seen_in[src] = true
+                callers[#callers + 1] = string.format('%s (%s:%d)', G.nodes[src].name, G.files[G.node_file[src]].path, inn[i + 1])
             end
         end
-        for _, e in ipairs(G.out[id] or {}) do
-            if not seen_out[e.id] and #callees < M.LIST_CAP then
-                seen_out[e.id] = true
-                callees[#callees + 1] = G.nodes[e.id].node.name .. ' (' .. graph.where(G, e.id) .. ')'
+        for i = 1, #out, graph.EDGE do
+            local dst = out[i]
+            if not seen_out[dst] and #callees < M.LIST_CAP then
+                seen_out[dst] = true
+                callees[#callees + 1] = G.nodes[dst].name .. ' (' .. graph.where(G, dst) .. ')'
             end
         end
         if #callers > 0 or #callees > 0 then
-            local nsites = G.inn[id] and #G.inn[id] or 0
-            rel[#rel + 1] = string.format('%s:\n  called by%s: %s\n  calls: %s', G.nodes[id].node.qualified,
+            local nsites = math.floor(#inn / graph.EDGE)
+            rel[#rel + 1] = string.format('%s:\n  called by%s: %s\n  calls: %s', G.nodes[id].qualified,
                 nsites > #callers and string.format(' (%d call sites)', nsites) or '',
                 #callers > 0 and table.concat(callers, ', ') or '-',
                 #callees > 0 and table.concat(callees, ', ') or '-')

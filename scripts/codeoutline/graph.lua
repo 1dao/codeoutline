@@ -237,27 +237,28 @@ local function owner_class(G, id)
     return nil
 end
 
-local function score(G, f, src_id, ref_kind, recv, cid, deps, paired)
+-- Placement of a candidate in file cf relative to the ref's file f: 0 when
+-- unrelated, nil when invisible (a C static of another file).
+local function locality(G, f, cf, c, deps, paired)
+    if cf == f then return 100 end
+    if c.static then return nil end
+    if deps[cf] then return 50 end
+    if paired[cf] then return 40 end
+    if G.file_dir[cf] == G.file_dir[f] then return 20 end
+    return 0
+end
+
+-- owner: the innermost class of src_id, passed in by resolve_ref when the
+-- ref kind needs it (computed once per ref, not per candidate).
+local function score(G, f, src_id, ref_kind, recv, cid, deps, paired, owner)
     local c = G.nodes[cid]
     local cf = G.node_file[cid]
-    local crec, frec = G.files[cf], G.files[f]
-    if family(crec.language) ~= family(frec.language) then return nil end
-    local s = 0
-    if cf == f then
-        s = s + 100
-    elseif c.static then
-        return nil                      -- C static: invisible outside its file
-    elseif deps[cf] then
-        s = s + 50
-    elseif paired[cf] then
-        s = s + 40
-    elseif dirname(crec.path) == dirname(frec.path) then
-        s = s + 20
-    end
+    if family(G.files[cf].language) ~= family(G.files[f].language) then return nil end
+    local s = locality(G, f, cf, c, deps, paired)
+    if not s then return nil end
     local kind = c.kind
     if kind == 'prototype' then s = s - 3 end
     if ref_kind == 'member_call' and (recv == 'self' or recv == 'this' or recv == 'cls') and src_id then
-        local owner = owner_class(G, src_id)
         if owner and c.parent and G.id_of[cf][c.parent] == owner then
             s = s + 80
         elseif kind ~= 'method' then
@@ -268,9 +269,8 @@ local function score(G, f, src_id, ref_kind, recv, cid, deps, paired)
         -- method project-wide (str.format -> some format()) is mostly wrong,
         -- so only local candidates qualify.
         return nil
-    elseif ref_kind == 'call' and frec.language == 'java' and src_id then
+    elseif ref_kind == 'call' and G.files[f].language == 'java' and src_id then
         -- unqualified call inside a class: implicit this
-        local owner = owner_class(G, src_id)
         if owner and c.parent and G.id_of[cf][c.parent] == owner then s = s + 30 end
     end
     return s
@@ -288,12 +288,19 @@ local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired)
     -- same-named nodes let a Python `def work` hide the C prototype of
     -- `work`, after which the Python def was filtered out too.)
     local function is_decl(node) return node.kind == 'prototype' or node.decl end
+    local self_call = kind == 'member_call' and src_id and (recv == 'self' or recv == 'this' or recv == 'cls')
+    local owner = (self_call or (kind == 'call' and src_id and G.files[f].language == 'java'))
+        and owner_class(G, src_id) or nil
+    -- score() rejects an unknown-receiver member call to an unrelated file;
+    -- checking placement first skips most candidates of common method names.
+    local local_only = kind == 'member_call' and not self_call
     local scored, has_def = {}, false
     for i = 1, math.min(#cands, M.MAX_CANDIDATES) do
         local cid = cands[i]
         local node = G.nodes[cid]
-        if cid ~= src_id and accept[node.kind] then
-            local s = score(G, f, src_id, kind, recv, cid, deps, paired)
+        if cid ~= src_id and accept[node.kind]
+            and (not local_only or (locality(G, f, G.node_file[cid], node, deps, paired) or 0) > 0) then
+            local s = score(G, f, src_id, kind, recv, cid, deps, paired, owner)
             if s then
                 scored[#scored + 1] = { cid, s }
                 if not is_decl(node) then has_def = true end
@@ -321,7 +328,7 @@ end
 
 function M.build(idx)
     local G = {
-        files = {}, file_index = {}, nodes = {}, node_file = {}, id_of = {},
+        files = {}, file_index = {}, file_dir = {}, nodes = {}, node_file = {}, id_of = {},
         by_name = {}, by_lname = {}, by_qualified = {}, by_base = {}, by_stem = {},
         pkg_files = {}, children = {}, out = {}, inn = {}, deps = {}, dir_files = {}, ns_files = {},
         generation = idx.generation,
@@ -329,6 +336,9 @@ function M.build(idx)
     local paths = {}
     for rel in pairs(idx.files) do paths[#paths + 1] = rel end
     table.sort(paths)
+    -- Directory ids per file: placement scoring compares numbers instead of
+    -- slicing two paths per candidate.
+    local dir_ids = {}
     -- Checkpoints per file: LuaJIT does not run count hooks inside compiled
     -- loops, so cancellation relies on these (as in Index:refresh).
     for f, rel in ipairs(paths) do
@@ -336,6 +346,10 @@ function M.build(idx)
         local rec = idx.files[rel]
         G.files[f] = rec
         G.file_index[rel] = f
+        local dir = dirname(rel)
+        local did = dir_ids[dir]
+        if not did then did = f; dir_ids[dir] = did end
+        G.file_dir[f] = did
         push(G.by_base, basename(rel), f)
         push(G.by_stem, stem(rel), f)
         push(G.dir_files, dirname(rel), f)

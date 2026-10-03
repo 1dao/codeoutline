@@ -7,8 +7,21 @@ local M = {}
 local projects = {}
 local sequence = 0
 local limits = { max_projects = 8, idle_seconds = 900 }
+-- Long-lived hosts watch resident projects so a query refreshes only what
+-- changed; one-shot commands would pay for a watcher they never read.
+local watch = false
+
+local function drop(key)
+    local p = projects[key]
+    projects[key] = nil
+    if p then p.idx:close() end
+end
 
 function M.configure(opts)
+    if opts.watch ~= nil then
+        assert(type(opts.watch) == 'boolean', 'watch must be a boolean')
+        watch = opts.watch
+    end
     for _, name in ipairs({ 'max_projects', 'idle_seconds' }) do
         local v = opts[name]
         if v ~= nil then
@@ -22,15 +35,17 @@ end
 function M.sweep(now)
     now = now or os.time()
     local count = 0
+    local idle = {}
     for key, p in pairs(projects) do
-        if now - p.used >= limits.idle_seconds then projects[key] = nil else count = count + 1 end
+        if now - p.used >= limits.idle_seconds then idle[#idle + 1] = key else count = count + 1 end
     end
+    for _, key in ipairs(idle) do drop(key) end
     while count > limits.max_projects do
         local oldest
         for key, p in pairs(projects) do
             if not oldest or p.order < projects[oldest].order then oldest = key end
         end
-        projects[oldest] = nil
+        drop(oldest)
         count = count - 1
     end
     return count
@@ -57,6 +72,7 @@ function M.get(root, opts)
         p = { idx = index.open(canonical, opts), opts = {
             cache_path = opts.cache_path, max_file_bytes = opts.max_file_bytes, lister = opts.lister,
         } }
+        if watch then p.idx:watch() end
     end
     local t0 = os.clock()
     local stats = p.idx:refresh()
@@ -116,7 +132,7 @@ end
 function M.forget(root)
     local key = key_for(root)
     local existed = projects[key] ~= nil
-    projects[key] = nil
+    drop(key)
     return existed
 end
 
@@ -128,7 +144,12 @@ function M.rebuild(root, opts)
     config.rebuild = true
     projects[key] = nil
     local ok, result = pcall(M.status, root, config)
-    if not ok then projects[key] = previous; error(result, 2) end
+    if not ok then
+        drop(key)
+        projects[key] = previous
+        error(result, 2)
+    end
+    if previous then previous.idx:close() end
     return result
 end
 

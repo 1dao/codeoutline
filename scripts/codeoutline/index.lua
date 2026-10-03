@@ -5,11 +5,14 @@
 --   local idx = index.open('C:/src/proj')        -- loads the cache if present
 --   local stats = idx:refresh()                   -- reparses only changed files
 --   idx:save()
+--   idx:watch()                                   -- long-lived hosts: later
+--                                                 -- refreshes visit only changes
 --
 -- Change detection trusts an unchanged size + mtime once the file was last
 -- read strictly after that mtime second, skipping the read entirely; otherwise
 -- it reads the file and compares size + CRC-32, which still skips the parse.
--- Tools that restore an older mtime at the same size are not detected.
+-- Tools that restore an older mtime at the same size are not detected by a
+-- full refresh; a watcher reports them.
 
 local ci = require('codeoutline.parse')
 local paths = require('codeoutline.path')
@@ -285,8 +288,9 @@ local function ignored(rules, rel, name, is_dir)
 end
 
 -- Supported files under the root without a subprocess (xutils.list_dir).
+-- Also returns each file's stat fields when the runtime lists them.
 function Index:walk_files()
-    local out = {}
+    local out, meta = {}, {}
     assert(xutils and xutils.list_dir, 'file enumeration unavailable: install rg or use a runtime with list_dir')
     local rules = load_ignore(self.root)
     local dirs = { '' }
@@ -294,7 +298,8 @@ function Index:walk_files()
     while #dirs > 0 do
         control.check()
         local rel_dir = table.remove(dirs)
-        local entries, truncated = xutils.list_dir(rel_dir == '' and self.root or (self.root .. '/' .. rel_dir), M.MAX_WALK_FILES + 1)
+        local entries, truncated = xutils.list_dir(rel_dir == '' and self.root or (self.root .. '/' .. rel_dir),
+            M.MAX_WALK_FILES + 1, true)
         assert(entries, 'cannot enumerate directory: ' .. rel_dir .. ': ' .. tostring(truncated))
         assert(not truncated, 'directory enumeration limit exceeded')
         for _, e in ipairs(entries) do
@@ -302,18 +307,19 @@ function Index:walk_files()
             assert(visited <= M.MAX_WALK_FILES, 'directory enumeration limit exceeded')
             local name = e.name
             local rel = rel_dir == '' and name or (rel_dir .. '/' .. name)
-            local st = xutils.stat(self.root .. '/' .. rel)
+            local st = e.type and e or xutils.stat(self.root .. '/' .. rel)
             if st and st.type ~= 'link' and name:sub(1, 1) ~= '.' and not ignored(rules, rel, name, e.dir) then
                 if e.dir then
                     if not M.WALK_SKIP[name] then dirs[#dirs + 1] = rel end
                 elseif ci.language(name) then
                     out[#out + 1] = rel
+                    meta[rel] = st
                 end
             end
         end
     end
     table.sort(out)
-    return out
+    return out, meta
 end
 
 function Index:list_files()
@@ -347,65 +353,218 @@ function Index:list_files()
     return out
 end
 
--- Bring the index in line with the tree. Returns counts of what changed.
-function Index:refresh()
-    local stats = { parsed = 0, unchanged = 0, removed = 0, skipped = 0, failed = 0 }
-    local seen = {}
-    local has_stat = xutils and xutils.stat
-    for _, rel in ipairs(self:list_files()) do
+local MISSING = { exists = false }
+
+-- Stat fields for every listed file, read one directory at a time:
+-- list_dir reports them per entry, so a tree costs a call per directory
+-- rather than a stat per file. Older runtimes fall back to stat.
+function Index:stat_listing(list)
+    local by_dir = {}
+    for _, rel in ipairs(list) do
+        local dir, name = rel:match('^(.*)/([^/]*)$')
+        if not dir then dir, name = '', rel end
+        local names = by_dir[dir]
+        if not names then names = {}; by_dir[dir] = names end
+        names[#names + 1] = name
+    end
+    local meta = {}
+    for dir, names in pairs(by_dir) do
         control.check()
-        seen[rel] = true
-        local abs = self:abs(rel)
-        local rec = self.files[rel]
-        local st = has_stat and xutils.stat(abs) or nil
-        if st and (st.exists == false or st.type ~= 'file') then
-            seen[rel] = nil
-        elseif st and st.size and st.size > self.max_bytes then
-            stats.skipped = stats.skipped + 1
-            seen[rel] = nil
-        elseif st and rec and st.mtime and rec.size == st.size and rec.mtime == st.mtime
-            and (rec.checked or 0) > st.mtime + 1 then
-            -- (size, mtime) proves "unchanged" only once the content was read
-            -- strictly after that mtime second: an edit within the same second
-            -- keeps both equal forever (the "racy git" problem).
-            stats.unchanged = stats.unchanged + 1
-        else
-            local src = slurp(abs)
-            if not src or #src > self.max_bytes then
-                stats.skipped = stats.skipped + 1
-                seen[rel] = nil
-            else
-                local crc = checksum(src)
-                if rec and rec.size == #src and rec.crc == crc then
-                    rec.mtime = st and st.mtime or rec.mtime
-                    rec.checked = os.time()
-                    stats.unchanged = stats.unchanged + 1
-                else
-                    local ok, r = pcall(ci.parse, rel, src)
-                    control.check()
-                    -- A parser exception must not permanently hide a GBK file.
-                    -- Successful speculative parsing does not scan encoding here.
-                    if not ok or not r then
-                        if xutils.to_utf8 then
-                            local decoded, encoding = xutils.to_utf8(src)
-                            if decoded then
-                                ok, r = pcall(ci.parse, rel, decoded)
-                                if ok and r then r.encoding = encoding end
-                            end
-                        end
-                    end
-                    if ok and r then
-                        r.size, r.crc, r.mtime = #src, crc, st and st.mtime or nil
-                        r.checked = os.time()
-                        self.files[rel] = r
-                        stats.parsed = stats.parsed + 1
-                    else
-                        stats.failed = stats.failed + 1
-                        seen[rel] = nil
-                    end
-                end
+        local entries = xutils.list_dir(dir == '' and self.root or (self.root .. '/' .. dir), nil, true)
+        local by_name
+        if entries and (entries[1] == nil or entries[1].size ~= nil) then
+            by_name = {}
+            for _, e in ipairs(entries) do by_name[e.name] = e end
+        end
+        for _, name in ipairs(names) do
+            local rel = dir == '' and name or (dir .. '/' .. name)
+            meta[rel] = by_name and (by_name[name] or MISSING) or xutils.stat(self:abs(rel))
+        end
+    end
+    return meta
+end
+
+local function new_stats(mode)
+    return { parsed = 0, unchanged = 0, removed = 0, skipped = 0, failed = 0, mode = mode }
+end
+
+-- Bring one listed file in line with the tree, given its stat fields (nil
+-- when the runtime has no stat). Returns false when it no longer belongs in
+-- the index: gone, too large, unreadable or unparsable.
+function Index:sync_file(rel, st, stats)
+    local rec = self.files[rel]
+    if st and (st.exists == false or st.type ~= 'file') then
+        return false
+    elseif st and st.size and st.size > self.max_bytes then
+        stats.skipped = stats.skipped + 1
+        return false
+    elseif st and rec and st.mtime and rec.size == st.size and rec.mtime == st.mtime
+        and (rec.checked or 0) > st.mtime + 1 then
+        -- (size, mtime) proves "unchanged" only once the content was read
+        -- strictly after that mtime second: an edit within the same second
+        -- keeps both equal forever (the "racy git" problem).
+        stats.unchanged = stats.unchanged + 1
+        return true
+    end
+    local src = slurp(self:abs(rel))
+    if not src or #src > self.max_bytes then
+        stats.skipped = stats.skipped + 1
+        return false
+    end
+    local crc = checksum(src)
+    if rec and rec.size == #src and rec.crc == crc then
+        rec.mtime = st and st.mtime or rec.mtime
+        rec.checked = os.time()
+        stats.unchanged = stats.unchanged + 1
+        return true
+    end
+    local ok, r = pcall(ci.parse, rel, src)
+    control.check()
+    -- A parser exception must not permanently hide a GBK file.
+    -- Successful speculative parsing does not scan encoding here.
+    if not ok or not r then
+        if xutils.to_utf8 then
+            local decoded, encoding = xutils.to_utf8(src)
+            if decoded then
+                ok, r = pcall(ci.parse, rel, decoded)
+                if ok and r then r.encoding = encoding end
             end
         end
+    end
+    if not (ok and r) then
+        stats.failed = stats.failed + 1
+        return false
+    end
+    r.size, r.crc, r.mtime = #src, crc, st and st.mtime or nil
+    r.checked = os.time()
+    self.files[rel] = r
+    stats.parsed = stats.parsed + 1
+    return true
+end
+
+-- Start change notification so later refreshes visit only what changed.
+-- Call it before the next refresh: that one stays a full pass, and anything
+-- changing while it runs is reported to the pass after. Returns false when
+-- the runtime or the filesystem cannot watch the root.
+function Index:watch()
+    if not (xwatch and xwatch.open) then return false end
+    self.watching = true
+    return self.watcher ~= nil or self:open_watcher()
+end
+
+-- A root that cannot be watched (inotify limit, network share) stays on full
+-- refreshes; retry now and then rather than paying a failed open per query.
+M.WATCH_RETRY_SECONDS = 300
+
+function Index:open_watcher()
+    local w, err = xwatch.open(self.root, { skip_hidden = true })
+    self.watcher, self.watch_error, self.watch_ready = w, err, false
+    if not w then self.watch_retry = os.time() + M.WATCH_RETRY_SECONDS end
+    return w ~= nil
+end
+
+function Index:close()
+    if self.watcher then self.watcher:close() end
+    self.watcher, self.watch_ready, self.watching = nil, false, false
+end
+
+-- rg reads these anywhere in the tree; a change can admit or hide files.
+local IGNORE_FILES = { ['.gitignore'] = true, ['.ignore'] = true, ['.rgignore'] = true }
+
+-- Changed paths that can matter, or nil when only a full refresh is safe.
+-- Hidden paths are never listed (rg and the walk both skip them).
+local function relevant(paths)
+    local changed = {}
+    for _, rel in ipairs(paths) do
+        if IGNORE_FILES[rel:match('[^/]*$')] then return nil end
+        if rel:sub(1, 1) ~= '.' and not rel:find('/.', 1, true) then changed[rel] = true end
+    end
+    return changed
+end
+
+-- Apply watcher-reported changes. Creations, removals and renames re-run the
+-- listing (only rg decides what .gitignore admits) but still visit only the
+-- files that differ from the index.
+function Index:refresh_changed(changed, structural)
+    local stats = new_stats('changes')
+    if not structural then
+        -- A supported file the index lacks may have shrunk under the size
+        -- limit or been fixed after a failed parse: let the listing decide.
+        for rel in pairs(changed) do
+            if not self.files[rel] and ci.language(rel) then structural = true; break end
+        end
+    end
+    local listed
+    if structural then
+        stats.mode = 'relisted'
+        listed = {}
+        for _, rel in ipairs(self:list_files()) do
+            listed[rel] = true
+            if not self.files[rel] then changed[rel] = true end
+        end
+        for rel in pairs(self.files) do
+            if not listed[rel] then changed[rel] = true end
+        end
+    end
+    local has_stat = xutils and xutils.stat
+    for rel in pairs(changed) do
+        control.check()
+        local known = self.files[rel] ~= nil
+        if listed and listed[rel] or (not listed and known) then
+            if not self:sync_file(rel, has_stat and xutils.stat(self:abs(rel)) or nil, stats) and known then
+                self.files[rel] = nil
+                stats.removed = stats.removed + 1
+            end
+        elseif known then
+            self.files[rel] = nil           -- no longer listed
+            stats.removed = stats.removed + 1
+        end
+    end
+    local total = 0
+    for _ in pairs(self.files) do total = total + 1 end
+    stats.unchanged = total - stats.parsed
+    return stats
+end
+
+-- Bring the index in line with the tree. Returns counts of what changed.
+-- With a watcher (see Index:watch) only reported paths are visited; an
+-- overflow or an ignore-file change falls back to a full pass, and a failed
+-- watcher is reopened before one.
+function Index:refresh()
+    if self.watcher and self.watch_ready then
+        local paths, structural, overflow = self.watcher:read()
+        local changed = paths and not overflow and relevant(paths)
+        if changed then
+            -- Not ready again until this pass completes: the events are
+            -- drained, so a pass that fails midway leaves a full one next.
+            self.watch_ready = false
+            local stats = self:refresh_changed(changed, structural)
+            if stats.parsed > 0 or stats.removed > 0 then self.generation = self.generation + 1 end
+            self.watch_ready = true
+            return stats
+        end
+        if not paths then
+            -- A watcher that worked and then failed (root moved, queue
+            -- error) is reopened right away.
+            self.watcher:close()
+            self.watcher, self.watch_error, self.watch_retry = nil, structural, 0
+        end
+    end
+    if self.watching and not self.watcher and os.time() >= (self.watch_retry or 0) then self:open_watcher() end
+    if self.watcher then self.watch_ready = false end
+    local stats = self:refresh_all()
+    if self.watcher then self.watch_ready = true end
+    return stats
+end
+
+function Index:refresh_all()
+    local stats = new_stats('full')
+    local seen = {}
+    local list, meta = self:list_files()
+    if not meta and xutils and xutils.stat then meta = self:stat_listing(list) end
+    for _, rel in ipairs(list) do
+        control.check()
+        if self:sync_file(rel, meta and meta[rel], stats) then seen[rel] = true end
     end
     for rel in pairs(self.files) do
         if not seen[rel] then

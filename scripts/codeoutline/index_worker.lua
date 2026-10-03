@@ -4,6 +4,7 @@ package.path = scripts .. '/?.lua;' .. package.path
 local service = require('codeoutline.service')
 local paths = require('codeoutline.path')
 local control = require('codeoutline.control')
+service.configure({ watch = true })
 local shared = assert(xshared.dict('codeoutline_control'))
 
 local function execute(req)

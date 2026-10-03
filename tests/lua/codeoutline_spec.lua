@@ -737,6 +737,121 @@ spec.describe('explore', function()
     end)
 end)
 
+spec.describe('watched refresh', function()
+    local index = require('codeoutline.index')
+    local wr = tmp_root .. '_watch'         -- its own tree: the shared one feeds other cases
+    write(wr .. '/a.c', 'int a(void) { return 0; }\n')
+    write(wr .. '/b.c', 'int b(void) { return a(); }\n')
+    local idx = index.open(wr, { cache_path = wr .. '.idx' })
+    -- A scripted stand-in for the native watcher: each read returns q.next.
+    local q = {}
+    idx.watching = true
+    idx.watcher = {
+        read = function()
+            local r = q.next or { {}, false, false }
+            q.next = nil
+            return r[1], r[2], r[3]
+        end,
+        close = function() q.closed = true end,
+    }
+    local listings = 0
+    local list_files = idx.list_files
+    idx.list_files = function(self) listings = listings + 1; return list_files(self) end
+
+    spec.it('starts with a full pass', function()
+        local stats = idx:refresh()
+        spec.equal(stats.mode, 'full'); spec.equal(stats.parsed, 2)
+        spec.equal(idx.watch_ready, true)
+    end)
+    spec.it('skips the listing when nothing changed', function()
+        listings = 0
+        local gen = idx.generation
+        local stats = idx:refresh()
+        spec.equal(stats.mode, 'changes'); spec.equal(stats.parsed, 0); spec.equal(stats.unchanged, 2)
+        spec.equal(listings, 0); spec.equal(idx.generation, gen)
+    end)
+    spec.it('reparses only the reported files', function()
+        listings = 0
+        write(wr .. '/a.c', 'int a(void) { return 1; }\nint a2(void) { return 2; }\n')
+        q.next = { { 'a.c', 'a.c' }, false, false }
+        local stats = idx:refresh()
+        spec.equal(stats.mode, 'changes'); spec.equal(stats.parsed, 1); spec.equal(listings, 0)
+        spec.equal(#idx.files['a.c'].nodes, 2)
+    end)
+    spec.it('relists on creation and drops removed files', function()
+        write(wr .. '/c.c', 'int c(void) { return 0; }\n')
+        q.next = { { 'c.c' }, true, false }
+        local stats = idx:refresh()
+        spec.equal(stats.mode, 'relisted'); spec.equal(stats.parsed, 1)
+        spec.truthy(idx.files['c.c'])
+        os.remove(wr .. '/c.c')
+        q.next = { { 'c.c' }, true, false }
+        stats = idx:refresh()
+        spec.equal(stats.removed, 1); spec.equal(idx.files['c.c'], nil)
+    end)
+    spec.it('relists when a reported supported file is not indexed', function()
+        write(wr .. '/d.c', 'int d(void) { return 0; }\n')
+        q.next = { { 'd.c' }, false, false }
+        local stats = idx:refresh()
+        spec.equal(stats.mode, 'relisted'); spec.truthy(idx.files['d.c'])
+    end)
+    spec.it('ignores hidden paths', function()
+        listings = 0
+        write(wr .. '/.hidden/x.c', 'int x(void) { return 0; }\n')
+        q.next = { { '.hidden/x.c', 'sub/.cache/y.c' }, false, false }
+        local stats = idx:refresh()
+        spec.equal(stats.mode, 'changes'); spec.equal(listings, 0)
+        spec.equal(idx.files['.hidden/x.c'], nil)
+    end)
+    spec.it('falls back to a full pass on overflow or an ignore-file change', function()
+        q.next = { {}, false, true }
+        spec.equal(idx:refresh().mode, 'full')
+        q.next = { { 'sub/.gitignore' }, false, false }
+        spec.equal(idx:refresh().mode, 'full')
+    end)
+    spec.it('replaces a failed watcher and rescans', function()
+        q.next = { nil, 'watch failed' }
+        local stats = idx:refresh()
+        spec.equal(stats.mode, 'full'); spec.equal(q.closed, true)
+        if xwatch and xwatch.open then
+            spec.truthy(idx.watcher and idx.watcher.read ~= nil, 'native watcher reopened')
+        else
+            spec.equal(idx.watch_error, 'watch failed')
+        end
+        idx:close()
+    end)
+
+    if xwatch and xwatch.open then
+        spec.it('applies edits reported by the native watcher', function()
+            local nr = tmp_root .. '_native'
+            write(nr .. '/x.lua', 'function before() end\n')
+            assert(xutils.mkdir_p(nr .. '_idle'))
+            -- Reading a watcher on a directory nobody touches blocks for
+            -- the full timeout: a sleep that works on every platform.
+            local idle = assert(xwatch.open(nr .. '_idle'))
+            local live = index.open(nr, { cache_path = nr .. '.idx' })
+            spec.equal(live:watch(), true)
+            spec.equal(live:refresh().mode, 'full')
+            write(nr .. '/x.lua', 'function after() end\nfunction more() end\n')
+            local stats
+            for _ = 1, 40 do
+                idle:read(50)
+                stats = live:refresh()
+                if stats.parsed > 0 then break end
+            end
+            spec.equal(stats.parsed, 1)
+            spec.truthy(stats.mode ~= 'full', 'refreshed from events, not a full pass')
+            spec.equal(#live.files['x.lua'].nodes, 2)
+            live:close(); idle:close()
+            xutils.rmtree(nr); xutils.rmtree(nr .. '_idle')
+            os.remove(nr .. '.idx')
+        end)
+    end
+
+    os.remove(wr .. '.idx')
+    xutils.rmtree(wr)
+end)
+
 xutils.rmtree(tmp_root)
 os.remove(cache)
 

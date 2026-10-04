@@ -328,7 +328,7 @@ function M.parse(path, src, language, opts)
     local T = M.lang:tokenize(src)
     local r = common.new(path, 'csharp', opts)
     parse_members(T, r, 1, T.n, nil, nil)
-    return common.finish(r), T
+    return common.finish(r, T), T
 end
 
 return M

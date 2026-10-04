@@ -273,7 +273,7 @@ function M.parse(path, src, language, opts)
     parse_items(T, r, 1, T.n, nil, nil, false)
     -- '::' is the path separator: fix qualified names built with '.'
     for _, n in ipairs(r.nodes) do n.qualified = n.qualified:gsub('%.', '::') end
-    return common.finish(r), T
+    return common.finish(r, T), T
 end
 
 return M

@@ -6,10 +6,13 @@ local paths = require('codeoutline.path')
 local control = require('codeoutline.control')
 local documents = require('codeoutline.documents')
 local lsp = require('codeoutline.lsp')
+local navigation = require('codeoutline.navigation')
 service.configure({ watch = true })
 local shared = assert(xshared.dict('codeoutline_control'))
 
 local function execute(req)
+    if navigation.handles(req.method) then return navigation.execute(req) end
+    if req.method == 'lsp_close' then navigation.close(req.session); return true end
     if req.method == 'lsp_symbols' then
         local result = {}
         if req.limit <= 0 then return result end
@@ -69,6 +72,11 @@ return {
     __update = function() service.sweep() end,
     __thread_handle = function(_, op, id, req)
         if op ~= 'run' then return end
+        -- Draft text applies even to a cancelled request: the session counts it as sent.
+        if req.session and req.open then
+            local synced, err = pcall(navigation.sync, req)
+            if not synced then io.stderr:write('[codeoutline lsp] ', tostring(err), '\n') end
+        end
         control.callback = function()
             if shared:get('shutdown') or shared:get('cancel:' .. id) then error(control.cancelled(), 0) end
             if xtimer.now_ms() > req.deadline then error(control.deadline(), 0) end

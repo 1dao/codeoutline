@@ -8,7 +8,8 @@
 --   imports = { {path, line, names?} },
 -- }
 -- Unless ranges=false, nodes store start_byte/end_byte and name_start/name_end as zero-based,
--- half-open byte ranges in the parser input (after BOM removal).
+-- half-open byte ranges in the parser input (after BOM removal), and refs gain
+-- start/stop columns for each name token (false when the token is not the name).
 -- Refs are attributed after parsing: a parser only records where each call
 -- sits (token index) and assign_refs() hands it to the innermost node whose
 -- token range contains it. That keeps nested functions/classes correct
@@ -129,13 +130,18 @@ function M.assign_refs(r)
 end
 
 -- Drop parser-internal fields so the result is plain data.
-function M.finish(r)
+function M.finish(r, T)
     M.assign_refs(r)
     local name, from, kind, line, recv = {}, {}, {}, {}, {}
+    local start, stop = r.ranges and T and {}, r.ranges and T and {}
     for i, ref in ipairs(r.refs) do
         name[i], from[i], kind[i], line[i], recv[i] = ref.name, ref.from, ref.kind, ref.line, ref.recv or false
+        if start then
+            local named = T:text(ref.tok) == ref.name
+            start[i], stop[i] = named and T.s[ref.tok] - 1 or false, named and T.e[ref.tok] or false
+        end
     end
-    r.refs = { name = name, from = from, kind = kind, line = line, recv = recv }
+    r.refs = { name = name, from = from, kind = kind, line = line, recv = recv, start = start or nil, stop = stop or nil }
     for i, n in ipairs(r.nodes) do
         n.ti, n.tj = nil, nil
         if not r.ranges then

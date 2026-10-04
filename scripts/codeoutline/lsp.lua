@@ -54,6 +54,7 @@ function M.reader()
 end
 
 local function kind(node) return kinds[node.kind] or 13 end
+M.symbol_kind = kind
 local function location(doc, node) return { uri = doc.uri, range = doc:range(node.name_start, node.name_end) } end
 
 function M.document_symbols(doc, hierarchical)
@@ -78,10 +79,21 @@ function M.document_symbols(doc, hierarchical)
     return result
 end
 
+-- initializationOptions.features may disable any of these, e.g. in assistant mode
+-- next to another language server; disabled features are not advertised.
+M.FEATURES = { 'documentSymbol', 'workspaceSymbol', 'definition', 'hover', 'references', 'callHierarchy' }
+local feature_of = { ['textDocument/documentSymbol'] = 'documentSymbol', ['workspace/symbol'] = 'workspaceSymbol',
+    ['textDocument/definition'] = 'definition', ['textDocument/hover'] = 'hover',
+    ['textDocument/references'] = 'references', ['textDocument/prepareCallHierarchy'] = 'callHierarchy',
+    ['callHierarchy/incomingCalls'] = 'callHierarchy', ['callHierarchy/outgoingCalls'] = 'callHierarchy' }
+local sessions = 0
+
 function M.new(config, emit, submit, cancel, stop)
     config = config or {}
+    sessions = sessions + 1
     local self = { state = 'new', documents = {}, roots = {}, pending = {}, scans = {}, ready = {},
-        document_bytes = 0, document_count = 0 }
+        document_bytes = 0, document_count = 0, session = config.session or ('lsp-' .. sessions),
+        synced = {}, features = {} }
     local progress, server_pending, next_id, next_poll = {}, {}, 0, 0
     local handlers = {}
     local function error_response(id, code, message)
@@ -188,6 +200,7 @@ function M.new(config, emit, submit, cancel, stop)
         self.state = 'closed'
         for id in pairs(self.pending) do cancel_pending(id) end
         for _, job in pairs(self.scans) do cancel(job.id) end
+        if next(self.synced) then submit({ method = 'lsp_close', session = self.session }, function() end) end
         self.scans, self.documents, self.ready = {}, {}, {}
         progress, server_pending = {}, {}
     end
@@ -207,10 +220,16 @@ function M.new(config, emit, submit, cancel, stop)
         local window = (params.capabilities or {}).window or {}
         self.work_done = window.workDoneProgress == true
         self.hierarchical = td.documentSymbol and td.documentSymbol.hierarchicalDocumentSymbolSupport == true
+        local options = object(params.initializationOptions) and params.initializationOptions.features
+        assert(options == nil or options == false or object(options), 'initializationOptions.features must be an object')
+        for _, name in ipairs(M.FEATURES) do self.features[name] = not options or options[name] ~= false end
         self.state = 'initialized'
+        local f = self.features
         reply(id, { capabilities = { positionEncoding = 'utf-16',
             textDocumentSync = { openClose = true, change = 1, save = { includeText = false } },
-            documentSymbolProvider = true, workspaceSymbolProvider = true,
+            documentSymbolProvider = f.documentSymbol or nil, workspaceSymbolProvider = f.workspaceSymbol or nil,
+            definitionProvider = f.definition or nil, hoverProvider = f.hover or nil,
+            referencesProvider = f.references or nil, callHierarchyProvider = f.callHierarchy or nil,
             workspace = { workspaceFolders = { supported = true, changeNotifications = true } } },
             serverInfo = { name = 'codeoutline', version = require('codeoutline.version') } })
     end
@@ -254,6 +273,7 @@ function M.new(config, emit, submit, cancel, stop)
         if doc then
             self.document_count, self.document_bytes = self.document_count - 1, self.document_bytes - #doc.source
             self.documents[uri] = nil
+            self.synced[uri] = nil
         end
     end
     local function hint(uri)
@@ -278,12 +298,31 @@ function M.new(config, emit, submit, cancel, stop)
         local doc = document(params)
         reply(id, doc and M.document_symbols(doc, self.hierarchical) or array())
     end
-    handlers['workspace/symbol'] = function(id, params)
-        assert(id ~= nil, 'symbol query must be a request')
-        assert(type(params.query) == 'string' and #params.query <= M.MAX_QUERY, 'invalid symbol query')
+    -- One worker job per request; late results of cancelled requests are dropped.
+    local function request(id, req, finish)
         local count = 0
         for _ in pairs(self.pending) do count = count + 1 end
         assert(count < M.MAX_PENDING, 'too many pending requests')
+        local job = {}
+        self.pending[id] = job
+        local job_id, err = submit(req, function(ok, result)
+            if self.pending[id] ~= job then return end
+            self.pending[id] = nil
+            if not ok then
+                if req.changed then self.synced = {} end -- resend drafts with the next request
+                error_response(id, -32603, tostring(result)); return
+            end
+            finish(result)
+        end)
+        job.id = job_id
+        if not job_id and self.pending[id] == job then
+            self.pending[id] = nil; error_response(id, -32603, err)
+        end
+        return job_id ~= nil
+    end
+    handlers['workspace/symbol'] = function(id, params)
+        assert(id ~= nil, 'symbol query must be a request')
+        assert(type(params.query) == 'string' and #params.query <= M.MAX_QUERY, 'invalid symbol query')
         local drafts, exclude, result = {}, {}, array()
         for _, doc in pairs(self.documents) do
             if doc.path and root_for(doc.path) then
@@ -304,21 +343,85 @@ function M.new(config, emit, submit, cancel, stop)
         for _, root in ipairs(self.roots) do
             if not self.ready[root] then reply(id, result); return end
         end
-        local job = {}
-        self.pending[id] = job
-        local job_id, err = submit({ method = 'lsp_symbols', roots = self.roots, exclude = exclude,
-            query = params.query, limit = M.MAX_SYMBOLS - #result }, function(ok, symbols)
-            if self.pending[id] ~= job then return end
-            self.pending[id] = nil
-            if not ok then error_response(id, -32603, tostring(symbols)); return end
+        request(id, { method = 'lsp_symbols', roots = self.roots, exclude = exclude,
+            query = params.query, limit = M.MAX_SYMBOLS - #result }, function(symbols)
             for _, symbol in ipairs(symbols) do result[#result + 1] = symbol end
             reply(id, result)
         end)
-        job.id = job_id
-        if not job_id and self.pending[id] == job then
-            self.pending[id] = nil; error_response(id, -32603, err)
+    end
+    -- Navigation runs in the worker against the session's drafts: every request
+    -- carries the open set and the text of versions the worker has not seen.
+    local function navigate(id, req, finish)
+        assert(id ~= nil, 'navigation must be a request')
+        local open, changed = {}, {}
+        for uri, doc in pairs(self.documents) do
+            if doc.path and root_for(doc.path) then
+                open[uri] = doc.version
+                if self.synced[uri] ~= doc.version then
+                    changed[uri] = { source = doc.source, version = doc.version, language = doc.language }
+                end
+            end
+        end
+        req.session, req.open, req.changed = self.session, open, changed
+        local submitted = request(id, req, function(value)
+            if value.error then error_response(id, -32803, value.error); return end
+            if value.incomplete then
+                emit({ jsonrpc = '2.0', method = 'window/showMessage', params = { type = 2,
+                    message = 'CodeOutline: results were truncated; too many matching references' } })
+            end
+            reply(id, finish(value.result))
+        end)
+        if submitted then
+            for uri, draft in pairs(changed) do self.synced[uri] = draft.version end
         end
     end
+    -- Worker results lose array metatables in transit; empty lists must stay JSON arrays.
+    local function list(value) return array(value or nil) end
+    local function calls(value)
+        local result = array(value or nil)
+        for _, call in ipairs(result) do call.fromRanges = array(call.fromRanges) end
+        return result
+    end
+    -- Position requests outside every workspace root answer empty without a job.
+    local function at(id, params, method, empty, finish, extra)
+        assert(object(params.textDocument) and type(params.textDocument.uri) == 'string', 'document URI required')
+        assert(object(params.position), 'position required')
+        local path = documents.path(params.textDocument.uri)
+        local root = path and root_for(path)
+        if not root then reply(id, empty); return end
+        local req = { method = method, root = root, uri = params.textDocument.uri, position = params.position }
+        for key, value in pairs(extra or {}) do req[key] = value end
+        navigate(id, req, finish)
+    end
+    handlers['textDocument/definition'] = function(id, params)
+        at(id, params, 'lsp_definition', array(), list)
+    end
+    handlers['textDocument/hover'] = function(id, params)
+        at(id, params, 'lsp_hover', nil, function(value) return value or nil end)
+    end
+    handlers['textDocument/references'] = function(id, params)
+        local context = object(params.context) and params.context or {}
+        at(id, params, 'lsp_references', array(), list, { includeDeclaration = context.includeDeclaration == true })
+    end
+    handlers['textDocument/prepareCallHierarchy'] = function(id, params)
+        at(id, params, 'lsp_prepare_calls', nil, function(value) return value and array(value) or nil end)
+    end
+    -- Items carry their root; only this session's roots are accepted.
+    local function hierarchy(method)
+        return function(id, params)
+            local data = object(params.item) and params.item.data
+            local root
+            for _, candidate in ipairs(self.roots) do
+                if object(data) and type(data.root) == 'string' and paths.key(data.root) == paths.key(candidate) then
+                    root = candidate
+                end
+            end
+            if not root then reply(id, array()); return end
+            navigate(id, { method = method, root = root, data = data }, calls)
+        end
+    end
+    handlers['callHierarchy/incomingCalls'] = hierarchy('lsp_incoming')
+    handlers['callHierarchy/outgoingCalls'] = hierarchy('lsp_outgoing')
     local navigation = { ['textDocument/definition'] = true, ['textDocument/hover'] = true,
         ['textDocument/references'] = true, ['textDocument/prepareCallHierarchy'] = true,
         ['callHierarchy/incomingCalls'] = true, ['callHierarchy/outgoingCalls'] = true }
@@ -349,6 +452,7 @@ function M.new(config, emit, submit, cancel, stop)
             end
         end
         local handler = handlers[method]
+        if handler and feature_of[method] and not self.features[feature_of[method]] then handler = nil end
         if handler then handler(id, params)
         elseif id ~= nil then error_response(id, -32601, 'Method not found: ' .. method) end
     end

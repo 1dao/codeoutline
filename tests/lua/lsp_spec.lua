@@ -50,10 +50,36 @@ spec.describe('symbol byte ranges', function()
                     if type(value) ~= 'table' then spec.equal(value, rec.nodes[i][key]) end
                 end
             end
-            for key, column in pairs(rec.refs) do
-                spec.equal(#compact.refs[key], #column)
-                for i, value in ipairs(column) do spec.equal(compact.refs[key][i], value) end
+            spec.equal(compact.refs.start, nil)
+            for key, column in pairs(compact.refs) do
+                spec.equal(#rec.refs[key], #column)
+                for i, value in ipairs(column) do spec.equal(rec.refs[key][i], value) end
             end
+        end)
+    end
+    local calls = {
+        { 'calls.c', 'int f(void) { return g(1) + obj->h(); }', { 'g', 'h' } },
+        { 'calls.cpp', 'int f() { return ns::g(1) + obj.h(); }', { 'g', 'h' } },
+        { 'calls.py', 'def f():\n    return g(1) + self.h()\n', { 'g', 'h' } },
+        { 'calls.java', 'class A { int f() { return g(1) + new B().h(); } }', { 'g', 'B', 'h' } },
+        { 'calls.lua', 'function f() return g(1) + obj:h() + M.k "s" end', { 'g', 'h', 'k' } },
+        { 'calls.go', 'package main\nfunc f() int { return g(1) + obj.H() }', { 'g', 'H' } },
+        { 'calls.ts', 'function f() { return g(1) + this.h(); }', { 'g', 'h' } },
+        { 'calls.cs', 'class A { int f() { return g(1) + this.h(); } }', { 'g', 'h' } },
+        { 'calls.rs', 'fn f() -> i32 { g(1) + obj.h() }', { 'g', 'h' } },
+    }
+    for _, example in ipairs(calls) do
+        spec.it('records exact call name ranges in ' .. example[1], function()
+            local source = example[2]
+            local rec = parse.parse(example[1], source)
+            local names = {}
+            for i, ref_name in ipairs(rec.refs.name) do
+                local a = rec.refs.start[i]
+                spec.truthy(a, 'missing range for ' .. ref_name)
+                spec.equal(source:sub(a + 1, rec.refs.stop[i]), ref_name)
+                names[#names + 1] = ref_name
+            end
+            spec.equal(table.concat(names, ','), table.concat(example[3], ','))
         end)
     end
     spec.it('handles macro directives, anonymous typedefs and operators', function()
@@ -109,6 +135,16 @@ spec.describe('document positions and transport', function()
         spec.equal(doc:position(#'中😀x\r\nnext\r').line, 2)
         spec.equal(doc:position(#source).line, 3)
         spec.equal(pcall(function() doc:position(1) end), false)
+    end)
+    spec.it('converts UTF-16 positions back to byte offsets and clamps past the end', function()
+        local source = '中😀x\r\nnext\rlast'
+        local doc = docs.new('file:///sample.lua', source)
+        for _, offset in ipairs({ 0, #'中', #'中😀', #'中😀x', #'中😀x\r\n' + 2, #'中😀x\r\nnext\r' + 1 }) do
+            spec.equal(doc:offset(doc:position(offset)), offset)
+        end
+        spec.equal(doc:offset({ line = 0, character = 99 }), #'中😀x')
+        spec.equal(doc:offset({ line = 9, character = 0 }), #source)
+        spec.equal(pcall(function() doc:offset({ line = -1, character = 0 }) end), false)
     end)
     spec.it('normalizes BOM offsets for both disk and draft documents', function()
         local source = '\239\187\191function test() end'
@@ -285,7 +321,7 @@ spec.describe('LSP sessions', function()
         send('textDocument/definition', 2); spec.equal(output.error.code, -32803)
         send('textDocument/completion', 3); spec.truthy(output.result.isIncomplete)
         complete(true, true)
-        send('textDocument/definition', 4); spec.equal(output.error.code, -32601)
+        send('textDocument/completion', 4); spec.equal(output.error.code, -32601)
     end)
 
     spec.it('handles progress responses independently from client request IDs', function()
@@ -420,6 +456,278 @@ spec.describe('shared entry and worker lifecycle', function()
 
 end)
 
+local navigation = require('codeoutline.navigation')
+local nav_root = root .. '-nav'
+assert(xutils.mkdir_p(nav_root))
+nav_root = assert(require('codeoutline.path').canonical(nav_root))
+local function nav_write(rel, source) write(nav_root .. '/' .. rel, source) end
+nav_write('util.h', 'int helper(int x);\n')
+nav_write('util.c', '#include "util.h"\nint helper(int x) { return x + 1; }\n')
+nav_write('main.c', '#include "util.h"\nstatic int twice(int v) { return helper(helper(v)); }\n'
+    .. 'int main(void) { return twice(1); }\n')
+nav_write('m.lua', 'local M = {}\nfunction M.go(n)\n  if n > 0 then return M.go(n - 1) end\n  return leaf()\nend\n'
+    .. 'function leaf() return 1 end\nM.go(3)\nreturn M\n')
+nav_write('shape.py', 'class Shape:\n    def area(self):\n        return self.side() * 2\n'
+    .. '    def side(self):\n        return 1\n')
+local nav_uri = function(rel) return docs.uri(nav_root .. '/' .. rel) end
+
+local function nav(req)
+    req.session, req.root = req.session or 'spec', nav_root
+    local out = navigation.execute(req)
+    return out.result, out
+end
+local function range_text(rel, range)
+    local doc = docs.read(nav_root .. '/' .. rel)
+    return doc.source:sub(doc:offset(range.start) + 1, doc:offset(range['end']))
+end
+
+spec.describe('LSP navigation', function()
+    service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+    spec.it('goes to the definition across files and from a prototype to its body', function()
+        local result = nav({ method = 'lsp_definition', uri = nav_uri('main.c'), position = { line = 1, character = 35 } })
+        spec.equal(#result, 1)
+        spec.equal(result[1].uri, nav_uri('util.c'))
+        spec.equal(range_text('util.c', result[1].range), 'helper')
+        local from_decl = nav({ method = 'lsp_definition', uri = nav_uri('util.h'), position = { line = 0, character = 5 } })
+        spec.equal(from_decl[1].uri, nav_uri('util.c'))
+        spec.equal(nav({ method = 'lsp_definition', uri = nav_uri('main.c'), position = { line = 1, character = 1 } }), false)
+    end)
+    spec.it('resolves recursion, file-scope calls and self members', function()
+        local recursion = nav({ method = 'lsp_definition', uri = nav_uri('m.lua'), position = { line = 2, character = 25 } })
+        spec.equal(recursion[1].range.start.line, 1)
+        local top = nav({ method = 'lsp_definition', uri = nav_uri('m.lua'), position = { line = 6, character = 3 } })
+        spec.equal(range_text('m.lua', top[1].range), 'go')
+        local member = nav({ method = 'lsp_definition', uri = nav_uri('shape.py'), position = { line = 2, character = 22 } })
+        spec.equal(member[1].range.start.line, 3)
+    end)
+    spec.it('hovers with the signature and location of the target', function()
+        local hover = nav({ method = 'lsp_hover', uri = nav_uri('main.c'), position = { line = 1, character = 35 } })
+        spec.contains(hover.contents.value, 'int helper(int x)')
+        spec.contains(hover.contents.value, 'util.c:2')
+        spec.equal(hover.contents.kind, 'markdown')
+        spec.equal(range_text('main.c', hover.range), 'helper')
+    end)
+    spec.it('finds references of a function including declarations', function()
+        local refs = nav({ method = 'lsp_references', uri = nav_uri('util.c'), position = { line = 1, character = 5 },
+            includeDeclaration = true })
+        local seen = {}
+        for _, loc in ipairs(refs) do seen[#seen + 1] = loc.uri:match('[^/]*$') .. ':' .. loc.range.start.line end
+        spec.equal(table.concat(seen, ','), 'util.h:0,util.c:1,main.c:1,main.c:1')
+        local only = nav({ method = 'lsp_references', uri = nav_uri('util.c'), position = { line = 1, character = 5 } })
+        spec.equal(#only, 2)
+        local _, refused = nav({ method = 'lsp_references', uri = nav_uri('shape.py'), position = { line = 0, character = 7 } })
+        spec.contains(refused.error, 'functions')
+    end)
+    spec.it('walks incoming and outgoing calls with exact call ranges', function()
+        local items = nav({ method = 'lsp_prepare_calls', uri = nav_uri('util.c'), position = { line = 1, character = 5 } })
+        spec.equal(items[1].name, 'helper')
+        local incoming = nav({ method = 'lsp_incoming', data = items[1].data })
+        spec.equal(#incoming, 1)
+        spec.equal(incoming[1].from.name, 'twice')
+        spec.equal(#incoming[1].fromRanges, 2)
+        spec.equal(range_text('main.c', incoming[1].fromRanges[2]), 'helper')
+        local outgoing = nav({ method = 'lsp_outgoing', data = incoming[1].from.data })
+        spec.equal(#outgoing, 1)
+        spec.equal(outgoing[1].to.name, 'helper')
+        local go = nav({ method = 'lsp_prepare_calls', uri = nav_uri('m.lua'), position = { line = 1, character = 12 } })
+        local callers = nav({ method = 'lsp_incoming', data = go[1].data })
+        local names = {}
+        for _, call in ipairs(callers) do names[#names + 1] = call.from.name .. '/' .. call.from.kind end
+        table.sort(names)
+        spec.equal(table.concat(names, ','), 'go/12,m.lua/1')
+        local file = nil
+        for _, call in ipairs(callers) do if call.from.kind == 1 then file = call.from end end
+        local from_file = nav({ method = 'lsp_outgoing', data = file.data })
+        spec.equal(from_file[1].to.name, 'go')
+        spec.equal(#nav({ method = 'lsp_incoming', data = { path = 'missing.c', index = 1 } }), 0)
+    end)
+    spec.it('lets session drafts hide disk symbols and resolve unsaved files', function()
+        local lua = nav_uri('m.lua')
+        local fresh = nav_uri('fresh.lua')
+        navigation.sync({ session = 'drafts', open = { [lua] = 2, [fresh] = 1 }, changed = {
+            [lua] = { version = 2, language = 'lua', source = 'function M_go() return renamed() + made() end\n'
+                .. 'function renamed() return 1 end\n' },
+            [fresh] = { version = 1, language = 'lua', source = 'function made() return 2 end\n' } } })
+        local renamed = nav({ session = 'drafts', method = 'lsp_definition', uri = lua, position = { line = 0, character = 24 } })
+        spec.equal(renamed[1].range.start.line, 1)
+        local made = nav({ session = 'drafts', method = 'lsp_definition', uri = lua, position = { line = 0, character = 37 } })
+        spec.equal(made[1].uri, fresh)
+        -- Another session still sees the disk file, where leaf exists and renamed does not.
+        local leaf = nav({ method = 'lsp_definition', uri = lua, position = { line = 3, character = 10 } })
+        spec.equal(leaf[1].range.start.line, 5)
+        local gone = nav({ session = 'drafts', method = 'lsp_prepare_calls', uri = nav_uri('m.lua'),
+            position = { line = 0, character = 10 } })
+        spec.equal(gone[1].name, 'M_go')
+        navigation.sync({ session = 'drafts', open = {} })
+        local disk = nav({ session = 'drafts', method = 'lsp_definition', uri = lua, position = { line = 3, character = 10 } })
+        spec.equal(disk[1].range.start.line, 5)
+        navigation.close('drafts')
+    end)
+    spec.it('reads maintained symbol tables without rebuilding or modifying them', function()
+        local idx = service.resident(nav_root)
+        local G = idx:symbols()
+        local before = { G.file_count, G.node_count, #G.file_order, #G.by_name.helper, G.next_node }
+        local build = graph.build
+        graph.build = function() error('navigation must reuse the maintained tables') end
+        local ok, err = pcall(function()
+            local lua = nav_uri('m.lua')
+            navigation.sync({ session = 'readonly', open = { [lua] = 9, [nav_uri('extra.lua')] = 1 }, changed = {
+                [lua] = { version = 9, language = 'lua', source = 'function helper() return helper() end\n' },
+                [nav_uri('extra.lua')] = { version = 1, language = 'lua', source = 'function helper() end\n' } } })
+            nav({ session = 'readonly', method = 'lsp_references', uri = lua, position = { line = 0, character = 10 } })
+            spec.equal(table.concat({ G.file_count, G.node_count, #G.file_order, #G.by_name.helper, G.next_node }, ','),
+                table.concat(before, ','))
+            navigation.close('readonly')
+            nav_write('later.c', 'int later_fn(void) { return helper(1); }\n')
+            service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+            spec.equal(idx:symbols(), G); spec.truthy(G.by_name.later_fn)
+            local def = nav({ method = 'lsp_definition', uri = nav_uri('later.c'), position = { line = 0, character = 30 } })
+            spec.equal(def[1].uri, nav_uri('util.c'))
+        end)
+        graph.build = build
+        os.remove(nav_root .. '/later.c')
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        if not ok then error(err, 0) end
+    end)
+    spec.it('stops reference scans at the time budget and reports truncation', function()
+        local budget = navigation.SCAN_SECONDS
+        navigation.SCAN_SECONDS = -1
+        local refs, out = nav({ method = 'lsp_references', uri = nav_uri('util.c'), position = { line = 1, character = 5 } })
+        navigation.SCAN_SECONDS = budget
+        spec.equal(#refs, 0); spec.truthy(out.incomplete)
+    end)
+    spec.it('relocates call items by name after edits and rejects stale ones', function()
+        local items = nav({ method = 'lsp_prepare_calls', uri = nav_uri('util.c'), position = { line = 1, character = 5 } })
+        local data = items[1].data
+        data.index = 7
+        spec.equal(nav({ method = 'lsp_incoming', data = data })[1].from.name, 'twice')
+        data.qualified, data.name = 'vanished', 'vanished'
+        spec.equal(#nav({ method = 'lsp_incoming', data = data }), 0)
+    end)
+end)
+
+local function session_with(submit, init)
+    local output = {}
+    local session = lsp.new({}, function(msg) output[#output + 1] = msg end, submit, function() end, function() end)
+    local function send(method, params, id)
+        session:accept(xutils.json_pack({ jsonrpc = '2.0', method = method, params = params or {}, id = id }))
+        return output[#output]
+    end
+    local init_params = init or {}
+    init_params.rootUri, init_params.capabilities = docs.uri(nav_root), init_params.capabilities or {}
+    send('initialize', init_params, 1)
+    send('initialized')
+    session.ready[nav_root] = true
+    return session, send, output
+end
+
+spec.describe('LSP navigation requests', function()
+    spec.it('advertises navigation and honours disabled features', function()
+        local _, _, output = session_with(fake_submit)
+        local caps = output[1].result.capabilities
+        spec.truthy(caps.definitionProvider and caps.hoverProvider and caps.referencesProvider and caps.callHierarchyProvider)
+        local session, send, assisted = session_with(fake_submit,
+            { initializationOptions = { features = { definition = false, hover = false, documentSymbol = false } } })
+        caps = assisted[1].result.capabilities
+        spec.equal(caps.definitionProvider, nil); spec.equal(caps.hoverProvider, nil)
+        spec.equal(caps.documentSymbolProvider, nil); spec.truthy(caps.referencesProvider)
+        local reply = send('textDocument/definition', { textDocument = { uri = nav_uri('main.c') },
+            position = { line = 0, character = 0 } }, 2)
+        spec.equal(reply.error.code, -32601)
+        spec.equal(session.state, 'ready')
+    end)
+    spec.it('sends draft text once per version and keeps empty results as arrays', function()
+        local jobs = {}
+        local session, send = session_with(function(req, done)
+            if req.method == 'lsp_refresh' then return 'scan' end
+            jobs[#jobs + 1] = { req = req, done = done }; return tostring(#jobs)
+        end)
+        local uri = nav_uri('m.lua')
+        send('textDocument/didOpen', { textDocument = { uri = uri, languageId = 'lua', version = 1, text = 'x()' } })
+        local position = { textDocument = { uri = uri }, position = { line = 0, character = 0 } }
+        send('textDocument/definition', position, 2)
+        spec.equal(jobs[1].req.method, 'lsp_definition'); spec.equal(jobs[1].req.root, nav_root)
+        spec.equal(jobs[1].req.changed[uri].source, 'x()'); spec.equal(jobs[1].req.open[uri], 1)
+        jobs[1].done(true, { result = {}, incomplete = false })
+        send('textDocument/references', { textDocument = { uri = uri }, position = position.position,
+            context = { includeDeclaration = true } }, 3)
+        spec.equal(next(jobs[2].req.changed), nil); spec.truthy(jobs[2].req.includeDeclaration)
+        send('textDocument/didChange', { textDocument = { uri = uri, version = 2 }, contentChanges = { { text = 'y()' } } })
+        send('textDocument/hover', position, 4)
+        spec.equal(jobs[3].req.changed[uri].version, 2)
+        jobs[3].done(false, 'worker failed')
+        send('textDocument/hover', position, 5)
+        spec.equal(jobs[4].req.changed[uri].version, 2, 'a failed request resends drafts')
+        jobs[4].done(true, { result = false, incomplete = false })
+        jobs[2].done(true, { error = 'References currently support functions only' })
+        send('callHierarchy/incomingCalls', { item = { data = { root = 'C:/elsewhere', path = 'a.c', index = 1 } } }, 6)
+        spec.equal(#jobs, 4)
+        send('callHierarchy/outgoingCalls', { item = { data = { root = nav_root, path = 'main.c', index = 1 } } }, 7)
+        spec.equal(jobs[5].req.method, 'lsp_outgoing')
+        jobs[5].done(true, { result = { { to = { name = 'x' }, fromRanges = {} } }, incomplete = true })
+    end)
+    spec.it('serializes empty navigation results as JSON arrays and null', function()
+        local replies = {}
+        local done_with = {}
+        local session = lsp.new({}, function(msg) replies[#replies + 1] = xutils.json_pack(msg) end,
+            function(req, done) done(true, done_with[req.method]); return 'job' end, function() end, function() end)
+        local function send(method, params, id)
+            session:accept(xutils.json_pack({ jsonrpc = '2.0', method = method, params = params or {}, id = id }))
+            return replies[#replies]
+        end
+        send('initialize', { rootUri = docs.uri(nav_root), capabilities = {} }, 1); send('initialized')
+        session.ready[nav_root] = true
+        local position = { textDocument = { uri = nav_uri('main.c') }, position = { line = 0, character = 0 } }
+        done_with.lsp_definition = { result = {}, incomplete = false }
+        spec.contains(send('textDocument/definition', position, 2), '"result":[]')
+        done_with.lsp_hover = { result = false, incomplete = false }
+        spec.contains(send('textDocument/hover', position, 3), '"result":null')
+        done_with.lsp_outgoing = { result = { { to = { name = 'x' }, fromRanges = {} } }, incomplete = true }
+        local warned = #replies
+        local reply = send('callHierarchy/outgoingCalls', { item = { data = { root = nav_root, path = 'main.c', index = 1 } } }, 4)
+        spec.contains(reply, '"fromRanges":[]')
+        spec.contains(replies[warned + 1], 'window/showMessage')
+        done_with.lsp_references = { error = 'References currently support functions only' }
+        spec.contains(send('textDocument/references', position, 5), '-32803')
+        spec.contains(send('textDocument/definition', { textDocument = { uri = 'file:///outside/x.c' },
+            position = { line = 0, character = 0 } }, 6), '"result":[]')
+    end)
+    spec.it('applies drafts in the worker even when the request is cancelled', function()
+        local saved = { xthread = xthread, xshared = xshared }
+        local ok, err = pcall(function()
+            local results = {}
+            local flags = { ['cancel:nav-cancelled'] = true }
+            xshared = { dict = function() return {
+                get = function(_, key) return flags[key] end,
+                delete = function(_, key) flags[key] = nil end } end }
+            xthread = { post = function(_, _, id, success, result) results[id] = { ok = success, result = result }; return true end }
+            local worker = dofile('scripts/codeoutline/index_worker.lua')
+            local lua = nav_uri('m.lua')
+            local base = { method = 'lsp_definition', session = 'worker', root = nav_root, uri = lua,
+                position = { line = 0, character = 24 }, deadline = xtimer.now_ms() + 10000 }
+            local first = {}
+            for k, v in pairs(base) do first[k] = v end
+            first.open = { [lua] = 2 }
+            first.changed = { [lua] = { version = 2, language = 'lua',
+                source = 'function M_go() return renamed() end\nfunction renamed() return 1 end\n' } }
+            worker.__thread_handle(1, 'run', 'nav-cancelled', first)
+            spec.equal(results['nav-cancelled'].ok, false)
+            base.open, base.changed = { [lua] = 2 }, {}
+            worker.__thread_handle(1, 'run', 'nav-next', base)
+            spec.truthy(results['nav-next'].ok, tostring(results['nav-next'].result))
+            spec.equal(results['nav-next'].result.result[1].range.start.line, 1)
+            worker.__thread_handle(1, 'run', 'nav-close', { method = 'lsp_close', session = 'worker',
+                deadline = xtimer.now_ms() + 10000, projectPath = nav_root, allowedRoots = { nav_root } })
+            spec.truthy(results['nav-close'].ok)
+        end)
+        xthread, xshared = saved.xthread, saved.xshared
+        service.configure({ watch = false, max_projects = 8 })
+        if not ok then error(err, 0) end
+    end)
+end)
+
+service.forget(nav_root)
+assert(xutils.rmtree(nav_root))
 service.forget(root)
 assert(xutils.rmtree(root))
 local failed = spec.finish()

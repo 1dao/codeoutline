@@ -347,7 +347,7 @@ function M.parse(path, src, language, opts)
     local r = common.new(path, 'c', opts)
     r.skip_calls = ATTR
     parse_range(T, r, 1, T.n, nil)
-    return common.finish(r), T
+    return common.finish(r, T), T
 end
 
 -- Exposed for the C++ parser (lang/cpp.lua), which reuses these pieces.

@@ -178,7 +178,7 @@ function M.parse(path, src, language, opts)
     local T = M.lang:tokenize(src)
     local r = common.new(path, 'python', opts)
     parse_block(T, r, 1, T.n, nil, false)
-    return common.finish(r), T
+    return common.finish(r, T), T
 end
 
 return M

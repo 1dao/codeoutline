@@ -104,13 +104,41 @@ function Doc:range(first, last)
     return { start = self:position(first), ['end'] = self:position(last) }
 end
 
+-- Byte offset of an LSP position; lines and characters past the end clamp.
+function Doc:offset(position)
+    assert(type(position) == 'table' and type(position.line) == 'number' and type(position.character) == 'number'
+        and position.line >= 0 and position.character >= 0, 'invalid position')
+    local line = position.line + 1
+    if line > #self.lines then return #self.source end
+    local p = self.lines[line]
+    local stop = self.lines[line + 1] and self.lines[line + 1] - 1 or #self.source
+    local units = 0
+    while p < stop and units < position.character do
+        local b = self.source:byte(p + 1)
+        if b == 10 or b == 13 then break end
+        local width = b < 128 and 1 or b < 224 and 2 or b < 240 and 3 or 4
+        p, units = p + width, units + (width == 4 and 2 or 1)
+    end
+    return p
+end
+
 local extensions = { javascript = 'js', typescript = 'ts', python = 'py', csharp = 'cs', rust = 'rs', cpp = 'cpp' }
+local function parser_name(doc)
+    local name = doc.path or ('document.' .. (extensions[doc.language] or doc.language or 'txt'))
+    if not parse.language(name) and doc.language then name = 'document.' .. (extensions[doc.language] or doc.language) end
+    return name
+end
+
 function Doc:parse()
     if self.parsed then return self.parsed end
-    local name = self.path or ('document.' .. (extensions[self.language] or self.language or 'txt'))
-    if not parse.language(name) and self.language then name = 'document.' .. (extensions[self.language] or self.language) end
-    self.parsed = parse.parse(name, self.source) or { nodes = {} }
+    self.parsed = parse.parse(parser_name(self), self.source) or { nodes = {} }
     return self.parsed
+end
+
+-- Tokens are not retained: only cursor lookups outside indexed refs need them.
+function Doc:tokens()
+    local _, tokens = parse.parse_tokens(parser_name(self), self.source)
+    return tokens
 end
 
 function M.read(path)

@@ -268,7 +268,7 @@ function M.parse(path, src, language, opts)
         end
     end
     parse_members(T, r, i, T.n, nil, nil)
-    return common.finish(r), T
+    return common.finish(r, T), T
 end
 
 return M

@@ -289,10 +289,10 @@ local function is_decl(node) return node.kind == 'prototype' or node.decl end
 -- keep the hot loop allocation-free; only the first n entries are live.
 local scored_ids, scored_vals = {}, {}
 
-local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired)
+-- accept overrides the node kinds the ref kind may bind to (navigation only).
+local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired, accept)
     if kind == 'annotation' then return nil end
-    local accept = CALLABLE
-    if kind == 'new' then accept = NEWABLE elseif kind == 'ref' then accept = VALUE end
+    accept = accept or (kind == 'new' and NEWABLE) or (kind == 'ref' and VALUE) or CALLABLE
     local cands = G.by_name[name]
     if not cands then return nil end
     -- Score first: score() rejects other languages and statics of other
@@ -569,6 +569,14 @@ function M.query(symbols, opts)
     end })
     return Q
 end
+
+-- Navigation reuses the resolver over symbol tables or overlays of them.
+M.CALLABLE = CALLABLE
+M.dependencies = resolve_deps
+M.resolve = resolve_ref
+M.placement = locality
+M.is_decl = is_decl
+M.family = family
 
 -- Location string for a node: "path:line".
 function M.where(G, id)

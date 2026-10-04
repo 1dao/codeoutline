@@ -227,7 +227,7 @@ function M.parse(path, src, language, opts)
             i = i + 1
         end
     end
-    return common.finish(r), T
+    return common.finish(r, T), T
 end
 
 return M

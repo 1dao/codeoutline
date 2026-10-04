@@ -96,9 +96,55 @@ const initialize = async (client, folders) => {
     assert.equal(result.serverInfo.name, 'codeoutline');
     assert.equal(result.capabilities.positionEncoding, 'utf-16');
     assert.equal(result.capabilities.textDocumentSync.change, 1);
-    assert.equal(result.capabilities.definitionProvider, undefined);
+    for (const name of ['definitionProvider', 'hoverProvider', 'referencesProvider', 'callHierarchyProvider']) {
+        assert.equal(result.capabilities[name], true, name);
+    }
     client.notify('initialized');
 };
+
+const indexed = async (client) => {
+    const deadline = Date.now() + 10000;
+    while (!client.notifications.some((msg) => msg.params?.value?.kind === 'end') && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.ok(client.notifications.some((msg) => msg.params?.value?.kind === 'end'), client.logs());
+};
+
+test('LSP stdio navigates definitions, hover, references and calls over drafts', { timeout: 30000 }, async (t) => {
+    const client = await start(t);
+    await writeFile(join(client.project, 'util.h'), 'int helper(int x);\n');
+    await writeFile(join(client.project, 'util.c'), '#include "util.h"\nint helper(int x) { return x + 1; }\n');
+    await writeFile(join(client.project, 'main.c'), '#include "util.h"\nstatic int twice(int v) { return helper(helper(v)); }\n');
+    await initialize(client, [client.project]);
+    await indexed(client);
+    const main = pathToFileURL(join(client.project, 'main.c')).href;
+    const util = pathToFileURL(join(client.project, 'util.c')).href;
+    const at = (uri, line, character) => ({ textDocument: { uri }, position: { line, character } });
+    const definition = await client.request('textDocument/definition', at(main, 1, 35));
+    assert.equal(definition.length, 1);
+    assert.equal(definition[0].uri, util);
+    assert.deepEqual(definition[0].range, { start: { line: 1, character: 4 }, end: { line: 1, character: 10 } });
+    const hover = await client.request('textDocument/hover', at(main, 1, 35));
+    assert.match(hover.contents.value, /int helper\(int x\)/);
+    const references = await client.request('textDocument/references', { ...at(util, 1, 5), context: { includeDeclaration: false } });
+    assert.deepEqual(references.map((loc) => loc.range.start.character), [33, 40]);
+    const [item] = await client.request('textDocument/prepareCallHierarchy', at(util, 1, 5));
+    const incoming = await client.request('callHierarchy/incomingCalls', { item });
+    assert.equal(incoming[0].from.name, 'twice');
+    assert.equal(incoming[0].fromRanges.length, 2);
+    const outgoing = await client.request('callHierarchy/outgoingCalls', { item: incoming[0].from });
+    assert.equal(outgoing[0].to.name, 'helper');
+    assert.deepEqual(await client.request('callHierarchy/outgoingCalls', { item }), []);
+    // An unsaved edit moves the definition; closing restores the disk view.
+    const draft = '#include "util.h"\n\nint helper(int x) { return x; }\n';
+    client.notify('textDocument/didOpen', { textDocument: { uri: util, languageId: 'c', version: 1, text: draft } });
+    assert.equal((await client.request('textDocument/definition', at(main, 1, 35)))[0].range.start.line, 2);
+    client.notify('textDocument/didChange', { textDocument: { uri: util, version: 2 }, contentChanges: [{ text: '\n\n\n' + draft }] });
+    assert.equal((await client.request('textDocument/definition', at(main, 1, 35)))[0].range.start.line, 5);
+    client.notify('textDocument/didClose', { textDocument: { uri: util } });
+    assert.equal((await client.request('textDocument/definition', at(main, 1, 35)))[0].range.start.line, 1);
+    assert.equal(await readFile(join(client.project, 'util.c'), 'utf8'), '#include "util.h"\nint helper(int x) { return x + 1; }\n');
+});
 
 test('LSP stdio handles drafts, UTF-16 ranges, cancellation and close restoration', { timeout: 30000 }, async (t) => {
     const client = await start(t);

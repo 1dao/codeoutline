@@ -527,7 +527,7 @@ function M.parse(path, src, language, opts)
     r.skip_calls = ATTR
     cpp_range(T, r, 1, T.n, nil)
     finalize(r)
-    return common.finish(r), T
+    return common.finish(r, T), T
 end
 
 -- A .h file is C++ when it uses C++-only syntax; otherwise the C parser

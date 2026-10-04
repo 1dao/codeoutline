@@ -215,7 +215,7 @@ function M.parse(path, src, language, opts)
     end
     r.refs = kept
     r.member_ops = nil
-    return common.finish(r), T
+    return common.finish(r, T), T
 end
 
 return M

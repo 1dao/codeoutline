@@ -461,7 +461,7 @@ function M.parse(path, src, language, opts)
         if not defs[ref.tok] then kept[#kept + 1] = ref end
     end
     r.refs = kept
-    return common.finish(r), T
+    return common.finish(r, T), T
 end
 
 return M

@@ -27,6 +27,7 @@ local CALLS = { ['function'] = true, method = true, macro = true, constructor = 
 local MEMBER = { ['.'] = true, ['->'] = true, ['::'] = true, ['?.'] = true }
 local LUA_MEMBER = { ['.'] = true, [':'] = true }
 local SELF = { self = true, this = true, cls = true }
+local PROTOTYPE = { prototype = true }
 
 -- Session drafts arrive with each navigation request: the open set always,
 -- text only for versions this worker has not seen.
@@ -182,6 +183,11 @@ local function resolve_site(V, f, from, name, kind, recv)
     -- The resolver never binds a ref to its enclosing node, which hides recursion.
     if #targets == 0 and src and V.nodes[src].name == name and (kind == 'call' or recursive(V.nodes[src], recv)) then
         targets = { src }
+    end
+    -- Definitions too far apart to choose between: a visible prototype still
+    -- names the function, and going to its definition lists them all.
+    if #targets == 0 and (kind == 'call' or kind == 'ref') then
+        targets = graph.resolve(V, f, src, name, kind, recv or nil, direct, paired, PROTOTYPE) or {}
     end
     return targets
 end

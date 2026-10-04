@@ -74,6 +74,16 @@ local function resolve_deps(G, f)
     for _, imp in ipairs(rec.imports) do
         local path = imp.path
         if C_FAMILY[rec.language] then
+            path = path:gsub('\\', '/')
+            if path:find('^%.%.?/') then
+                -- "../dir/x.h": relative to the including file first
+                local parts = {}
+                for segment in ((here ~= '' and here .. '/' or '') .. path):gmatch('[^/]+') do
+                    if segment == '..' then parts[#parts] = nil
+                    elseif segment ~= '.' then parts[#parts + 1] = segment end
+                end
+                add(G.file_index[table.concat(parts, '/')])
+            end
             -- "dir/x.h": files whose path ends with it, preferring the closest
             for _, g in ipairs(G.by_base[basename(path)] or {}) do
                 local p = G.files[g].path

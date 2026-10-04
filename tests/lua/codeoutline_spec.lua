@@ -505,6 +505,15 @@ spec.describe('review regressions', function()
             ['main.cpp'] = '#include "api.hpp"\nvoid run() { Api::work(); }' })
         spec.equal(all_edges(G), 'run->Api::work')
     end)
+    spec.it('resolves relative C includes against the including file', function()
+        local G = build({ ['3rd/mini.h'] = 'int push(int b) { return b; }',
+            ['other/mini.h'] = 'int push(int b) { return -b; }',
+            ['xlua/net.c'] = '#include "../3rd/mini.h"\nint run(void) { return push(1); }' })
+        local Q = graph_mod.query(G)
+        local out = Q.out[G.by_name.run[1]]
+        spec.equal(#out, graph_mod.EDGE)
+        spec.equal(G.files[G.node_file[out[1]]].path, '3rd/mini.h')
+    end)
     spec.it('file-scope C statics stay file-local', function()
         local G = build({ ['a.c'] = 'static int h(void) { return 0; }',
             ['b.c'] = 'int run(void) { return h(); }' })

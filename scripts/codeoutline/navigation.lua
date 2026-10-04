@@ -528,6 +528,173 @@ local function import_targets(V, f, line, include_paths)
     return result
 end
 
+-- Project-local declarative rules; read per request so configuration edits are live.
+local function definition_rules(root)
+    local file = io.open(root .. '/.codeoutline.json', 'rb')
+    if not file then return {} end
+    local raw = file:read(65537); file:close()
+    assert(#raw <= 65536, '.codeoutline.json exceeds 64 KiB')
+    local ok, config = pcall(xutils.json_unpack, raw)
+    assert(ok and type(config) == 'table', 'invalid .codeoutline.json')
+    local rules = config.definitionRules or {}
+    assert(type(rules) == 'table' and #rules <= 32, 'definitionRules must contain at most 32 rules')
+    for _, rule in ipairs(rules) do
+        assert(type(rule) == 'table' and (rule.language == nil or rule.language == 'lua'),
+            'definitionRules currently support language lua')
+        for _, key in ipairs({ 'call', 'target' }) do
+            assert(type(rule[key]) == 'string' and rule[key]:match('^[%a_][%w_%.:]*$'),
+                'definitionRules.' .. key .. ' must be a qualified function name')
+        end
+        for _, key in ipairs({ 'argument', 'targetArgument' }) do
+            local n = rule[key]
+            assert(type(n) == 'number' and n >= 1 and n <= 32 and n % 1 == 0,
+                'definitionRules.' .. key .. ' must be an integer from 1 to 32')
+        end
+    end
+    return rules
+end
+
+-- Decode literals without running source code. Lua long strings and quoted escapes.
+local function string_value(raw)
+    local eq, body = raw:match('^%[(=*)%[(.*)%]%1%]$')
+    if eq then return body:gsub('^\r?\n', '', 1) end
+    local quote = raw:sub(1, 1)
+    if (quote ~= '"' and quote ~= "'") or raw:sub(-1) ~= quote then return nil end
+    local escaped = { a = '\a', b = '\b', f = '\f', n = '\n', r = '\r', t = '\t', v = '\v',
+        ['\\'] = '\\', ['"'] = '"', ["'"] = "'", ['\n'] = '\n' }
+    local out, i, stop = {}, 2, #raw - 1
+    while i <= stop do
+        local c = raw:sub(i, i)
+        if c ~= '\\' then out[#out + 1] = c; i = i + 1
+        else
+            c = raw:sub(i + 1, i + 1); i = i + 2
+            if escaped[c] then out[#out + 1] = escaped[c]
+            elseif c == 'z' then
+                while i <= stop and raw:sub(i, i):match('%s') do i = i + 1 end
+            elseif c == '\r' then
+                if raw:sub(i, i) == '\n' then i = i + 1 end
+                out[#out + 1] = '\n'
+            elseif c == 'x' then
+                local hex = raw:sub(i, i + 1)
+                if not hex:match('^%x%x$') then return nil end
+                out[#out + 1] = string.char(tonumber(hex, 16)); i = i + 2
+            elseif c:match('%d') then
+                local digits = (c .. raw:sub(i, stop)):match('^%d%d?%d?')
+                local n = tonumber(digits)
+                if n > 255 then return nil end
+                out[#out + 1] = string.char(n); i = i + #digits - 1
+            else return nil end
+        end
+    end
+    return table.concat(out)
+end
+
+local function call_name(T, i)
+    if T.k[i] ~= 'id' or T:text(i + 1) ~= '(' then return nil end
+    local name, first = T:text(i), i
+    while T.k[first - 2] == 'id' and (T:text(first - 1) == '.' or T:text(first - 1) == ':') do
+        name = T:text(first - 2) .. T:text(first - 1) .. name
+        first = first - 2
+    end
+    if T:text(first - 1) == 'function' then return nil end
+    return name
+end
+
+-- Find a single literal argument, skipping nested brackets and anonymous functions.
+local function literal_argument(T, call, argument)
+    local open, number, first = call + 1, 1, call + 2
+    local close = T.m[open]
+    if not close then return nil end
+    local i = first
+    while i <= close do
+        local token = T:text(i)
+        if i == close or token == ',' then
+            if number == argument then
+                if i == first + 1 and T.k[first] == 'str' then
+                    return string_value(T:text(first)), T.s[first] - 1, T.e[first]
+                end
+                return nil
+            end
+            number, first = number + 1, i + 1
+        elseif token == '(' or token == '[' or token == '{' then
+            if not T.m[i] then return nil end
+            i = T.m[i]
+        elseif T.k[i] == 'kw' and token == 'function' then
+            local depth = 1
+            while depth > 0 and i < close do
+                i = i + 1
+                local kw = T.k[i] == 'kw' and T:text(i)
+                if kw == 'function' or kw == 'if' or kw == 'do' or kw == 'repeat' then depth = depth + 1
+                elseif kw == 'end' or kw == 'until' then depth = depth - 1 end
+            end
+            if depth > 0 then return nil end
+        end
+        i = i + 1
+    end
+end
+
+local function configured_definition(V, doc, offset)
+    if doc:parse().language ~= 'lua' then return nil end
+    local rules = definition_rules(V.root)
+    if #rules == 0 then return nil end
+    local tokens = doc:tokens()
+    local matched = {}
+    for i = 1, tokens.n do
+        if i % 128 == 0 then control.check() end
+        local name = call_name(tokens, i)
+        for _, rule in ipairs(rules) do
+            if name == rule.call then
+                local value, first, last = literal_argument(tokens, i, rule.argument)
+                if value and first <= offset and offset < last then matched[#matched + 1] = { rule, value } end
+            end
+        end
+    end
+    if #matched == 0 then return nil end
+    local result, seen, files = {}, {}, {}
+    for _, f in ipairs(V.file_order) do files[#files + 1] = f end
+    for _, f in ipairs(V.new_files) do files[#files + 1] = f end
+    table.sort(files, function(a, b) return V.files[a].path < V.files[b].path end)
+    local deadline = os.clock() + M.SCAN_SECONDS
+    for _, f in ipairs(files) do
+        control.check()
+        if os.clock() > deadline then return result, true end
+        if V.files[f].language == 'lua' then
+            local target = source_doc(V, f)
+            if target then
+                local candidate = false
+                for _, match in ipairs(matched) do
+                    local tail = match[1].target:match('([%w_]+)$')
+                    if target.source:find(tail, 1, true) then candidate = true; break end
+                end
+                if candidate then
+                    local T = target:tokens()
+                    for i = 1, T.n do
+                        if i % 128 == 0 then
+                            control.check()
+                            if os.clock() > deadline then return result, true end
+                        end
+                        local name = call_name(T, i)
+                        for _, match in ipairs(matched) do
+                            if name == match[1].target then
+                                local value, first, last = literal_argument(T, i, match[1].targetArgument)
+                                if value == match[2] then
+                                    local key = target.uri .. ':' .. first
+                                    if not seen[key] then
+                                        seen[key] = true
+                                        result[#result + 1] = { uri = target.uri, range = target:range(first, last) }
+                                        if #result >= M.MAX_RESULTS then return result, true end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return result, false
+end
+
 local function at(req)
     local doc = request_doc(req)
     if not doc then return nil end
@@ -547,6 +714,8 @@ local handlers = {}
 function handlers.lsp_definition(req)
     local V, doc, c, targets, f, offset = at(req)
     if not V then return false end
+    local configured, incomplete = configured_definition(V, doc, offset)
+    if configured then return configured, incomplete end
     local line = doc:position(offset).line + 1
     local importer = false
     if c and not c.decl then

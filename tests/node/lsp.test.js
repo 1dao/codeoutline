@@ -147,6 +147,30 @@ test('LSP stdio navigates definitions, hover, references and calls over drafts',
     assert.equal(await readFile(join(client.project, 'util.c'), 'utf8'), '#include "util.h"\nint helper(int x) { return x + 1; }\n');
 });
 
+test('LSP stdio follows configurable literal arguments and reloads rules', { timeout: 30000 }, async (t) => {
+    const client = await start(t);
+    const config = join(client.project, '.codeoutline.json');
+    await writeFile(config, JSON.stringify({ definitionRules: [{ language: 'lua',
+        call: 'xthread.post', argument: 2, target: 'xthread.register', targetArgument: 1 }] }));
+    const source = "xthread.post(MAIN_ID, 'xmysql_business_done', false)\n";
+    await writeFile(join(client.project, 'send.lua'), source);
+    await writeFile(join(client.project, 'receive.lua'), "xthread.register('xmysql_business_done', function() end)\n");
+    await initialize(client, [client.project]);
+    await indexed(client);
+    const uri = pathToFileURL(join(client.project, 'send.lua')).href;
+    const target = pathToFileURL(join(client.project, 'receive.lua')).href;
+    const params = { textDocument: { uri }, position: { line: 0, character: 25 } };
+    const definition = await client.request('textDocument/definition', params);
+    assert.equal(definition.length, 1);
+    assert.equal(definition[0].uri, target);
+    assert.deepEqual(definition[0].range, { start: { line: 0, character: 17 }, end: { line: 0, character: 39 } });
+    client.notify('textDocument/didOpen', { textDocument: { uri: target, languageId: 'lua', version: 1,
+        text: "\n\nxthread.register('xmysql_business_done', function() end)\n" } });
+    assert.equal((await client.request('textDocument/definition', params))[0].range.start.line, 2);
+    await writeFile(config, '{"definitionRules":[]}');
+    assert.deepEqual(await client.request('textDocument/definition', params), []);
+});
+
 test('LSP stdio completes members, locals and draft edits', { timeout: 30000 }, async (t) => {
     const client = await start(t);
     await writeFile(join(client.project, 'shape.h'), 'struct Shape { int width; struct Shape *next; };\n');

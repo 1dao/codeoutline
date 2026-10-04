@@ -129,6 +129,46 @@ overlay never writes to the resident tables.
 - Target positions come from reparsing the target file; a file edited since
   indexing is matched by name and line, or falls back to the start of the line.
 
+## Configurable definition rules
+
+Create `.codeoutline.json` in the workspace root to map a literal argument in
+one Lua call to a matching literal argument in another call:
+
+```json
+{
+  "definitionRules": [
+    {
+      "language": "lua",
+      "call": "xthread.post",
+      "argument": 2,
+      "target": "xthread.register",
+      "targetArgument": 1
+    }
+  ]
+}
+```
+
+With this rule, Go to Definition on `'xmysql_business_done'` in
+`xthread.post(MAIN_ID, 'xmysql_business_done', ...)` finds
+`xthread.register('xmysql_business_done', ...)` in the same workspace root.
+The destination selects the matching string at the registration site. Multiple
+registrations return multiple locations; thread routing is not inferred.
+
+Argument numbers start at 1 and count explicit arguments in the source, including
+for colon calls. Function names must match the written name exactly. Calls must
+use parentheses, and matching arguments must be single string literals; quoted
+escapes and Lua long strings are compared by value. Variables, computed strings
+and function aliases are not resolved. Nested calls and anonymous functions in
+other arguments do not change argument numbering.
+
+Configuration is read on each definition request, so edits take effect without
+restarting the server. Searches include unsaved documents and unsaved new files.
+Each root has its own configuration, limited to 64 KiB and 32 rules; argument
+numbers are limited to 1 through 32. Invalid configuration fails the definition
+request with a validation message. Searches stop after 1,000 locations or 3 s
+and report truncation through `window/showMessage`. These rules affect definition
+navigation only.
+
 ## Completion
 
 Completion also runs in the worker over the same overlay. It never offers

@@ -483,6 +483,73 @@ end
 
 spec.describe('LSP navigation', function()
     service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+    spec.it('uses configurable literal argument rules and ignores unrelated strings and comments', function()
+        local config = nav_root .. '/.codeoutline.json'
+        nav_write('messages.lua', "xthread.post(nested(1, 2), 'xmysql_business_done', false)\n")
+        nav_write('handlers.lua', 'xthread.register("xmysql_business_done", function(a, b) end)\n'
+            .. '-- xthread.register("xmysql_business_done", function() end)\n'
+            .. 'other.register("xmysql_business_done", function() end)\n')
+        write(config, '{"definitionRules":[{"language":"lua","call":"xthread.post","argument":2,'
+            .. '"target":"xthread.register","targetArgument":1}]}')
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local ok, err = pcall(function()
+            local result = nav({ method = 'lsp_definition', uri = nav_uri('messages.lua'), position = { line = 0, character = 31 } })
+            spec.equal(#result, 1); spec.equal(result[1].uri, nav_uri('handlers.lua'))
+            spec.equal(range_text('handlers.lua', result[1].range), '"xmysql_business_done"')
+            spec.equal(#nav({ method = 'lsp_definition', uri = nav_uri('messages.lua'), position = { line = 0, character = 23 } }), 0)
+        end)
+        os.remove(config)
+        if not ok then error(err, 0) end
+    end)
+    spec.it('supports changed argument positions, long strings and nested anonymous function arguments', function()
+        local config = nav_root .. '/.codeoutline.json'
+        nav_write('custom_send.lua', 'Bus.send(function(a, b) if a then return a, b end end, {1, 2}, [=[事件😀]=])\n')
+        nav_write('custom_target.lua', 'Bus.on(function(a, b) return a, b end, "事件😀")\n')
+        write(config, '{"definitionRules":[{"call":"Bus.send","argument":3,"target":"Bus.on","targetArgument":2}]}')
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local ok, err = pcall(function()
+            local doc = docs.read(nav_root .. '/custom_send.lua')
+            local result = nav({ method = 'lsp_definition', uri = doc.uri,
+                position = doc:position(doc.source:find('事件', 1, true) - 1) })
+            spec.equal(#result, 1); spec.equal(result[1].uri, nav_uri('custom_target.lua'))
+            spec.equal(range_text('custom_target.lua', result[1].range), '"事件😀"')
+            -- Editing configuration takes effect without touching source or index.
+            write(config, '{"definitionRules":[]}')
+            spec.equal(#nav({ method = 'lsp_definition', uri = doc.uri,
+                position = doc:position(doc.source:find('事件', 1, true) - 1) }), 0)
+        end)
+        os.remove(config)
+        if not ok then error(err, 0) end
+    end)
+    spec.it('matches decoded escapes and honors unsaved registration replacements', function()
+        local config = nav_root .. '/.codeoutline.json'
+        nav_write('escaped_send.lua', 'Bus.send("done")\n')
+        nav_write('escaped_target.lua', "Bus.on('d\\111ne', function() end)\n")
+        write(config, '{"definitionRules":[{"call":"Bus.send","argument":1,"target":"Bus.on","targetArgument":1}]}')
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local ok, err = pcall(function()
+            local req = { method = 'lsp_definition', session = 'message-draft', uri = nav_uri('escaped_send.lua'),
+                position = { line = 0, character = 12 } }
+            local result = nav(req)
+            spec.equal(#result, 1); spec.equal(result[1].uri, nav_uri('escaped_target.lua'))
+            local uri = nav_uri('escaped_target.lua')
+            navigation.sync({ session = req.session, open = { [uri] = 1 }, changed = {
+                [uri] = { source = 'Bus.on("different", function() end)', version = 1, language = 'lua' } } })
+            spec.equal(#nav(req), 0, 'draft hides disk registration')
+            navigation.sync({ session = req.session, open = {} })
+            spec.equal(#nav(req), 1, 'closing draft restores disk registration')
+        end)
+        navigation.close('message-draft'); os.remove(config)
+        if not ok then error(err, 0) end
+    end)
+    spec.it('validates rule argument positions', function()
+        local config = nav_root .. '/.codeoutline.json'
+        write(config, '{"definitionRules":[{"call":"Bus.send","argument":0,"target":"Bus.on","targetArgument":1}]}')
+        local ok, err = pcall(nav, { method = 'lsp_definition', uri = nav_uri('escaped_send.lua'),
+            position = { line = 0, character = 12 } })
+        os.remove(config)
+        spec.equal(ok, false); spec.contains(tostring(err), 'argument must be an integer')
+    end)
     spec.it('goes to the definition across files and from a prototype to its body', function()
         local result = nav({ method = 'lsp_definition', uri = nav_uri('main.c'), position = { line = 1, character = 35 } })
         spec.equal(#result, 1)

@@ -305,6 +305,7 @@ function M.run(G, idx, query, opts)
     control.check()
     opts = opts or {}
     local budget = M.validate(query, opts)
+    if G.symbols_only or opts.relationships == 'lazy' then G = graph.query(G, opts) end
     file_cache = {}
     local ranked, named_files = find_seeds(G, query)
 
@@ -412,6 +413,8 @@ function M.run(G, idx, query, opts)
         by_file[f].outline = true
     end
 
+    if G.load_incoming then G:load_incoming(seeds) end
+
     -- Confirm every file whose source or symbol labels this query can emit.
     -- GBK reparsing invalidates node IDs, so rebuild and select again before
     -- producing any output. Unrelated project files remain speculative.
@@ -512,8 +515,13 @@ function M.run(G, idx, query, opts)
         if used + #block <= budget + 400 then emit(block) else omitted = true end
     end
 
+    if G.incomplete then
+        table.insert(parts, 1, 'Call-path expansion limit reached; relationships are incomplete.')
+        omitted = true
+    end
     local result, truncated = text.limit(table.concat(parts, '\n'), budget, omitted or #pointers > 0)
-    return result, { seeds = seeds, spine = spine, shown = shown, flows = flows, truncated = truncated }
+    return result, { seeds = seeds, spine = spine, shown = shown, flows = flows, truncated = truncated,
+        relationships_incomplete = G.incomplete or false, query_stats = G.stats }
 end
 
 return M

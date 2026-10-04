@@ -85,6 +85,37 @@ symbol table is copied to the main thread. TCP LSP, stdio bridging, a single
 multi-protocol daemon, binary discovery and VS Code/Cursor/Zed extensions remain
 subsequent batches. Do not configure the MCP HTTP endpoint as an LSP URL.
 
+## Query-time relationship prototype
+
+Step 3 adds an opt-in Lua path while retaining the eager graph as the default
+and comparison oracle:
+
+```lua
+local output, info = require('codeoutline.service').explore(root, query, {
+    relationships = 'lazy', budget = 16000,
+})
+```
+
+This mode retains symbol/path tables but computes edges per query. Outgoing
+edges are cached only for visited nodes, with a 20,000-node expansion limit;
+truncation is reported in both output and `info.relationships_incomplete`.
+Callers for all selected seeds share one scan of reference names. The prototype
+preserves the existing heuristic resolver, candidate order and encoding repair
+retry. It does not add complete reference semantics or alter LSP capabilities.
+The CLI/MCP default is unchanged; per-file symbol updates, removal of the old
+full graph and transaction replacement remain step 4.
+
+Run the reproducible comparison against a local project (no project files or
+index cache are written):
+
+```powershell
+.\bin\xnet.exe tools/benchmark-relationships.lua ROOT=C:/src/project QUERIES=90
+```
+
+The benchmark checks every incoming/outgoing edge, compares explore output,
+and reports Lua-accounted memory and query timings. These are not process-RSS
+measurements or editor latency guarantees.
+
 ## Verification
 
 ```powershell

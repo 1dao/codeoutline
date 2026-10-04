@@ -659,6 +659,96 @@ spec.describe('graph', function()
     end)
 end)
 
+spec.describe('query-time relationships', function()
+    spec.it('matches every ordered edge and batches all caller names into one scan', function()
+        local idx, eager = svc.get(tmp_root, { cache_path = cache })
+        local symbols = graph.build(idx, { edges = false })
+        local lazy = graph.query(symbols)
+        spec.equal(symbols.out, nil); spec.equal(symbols.inn, nil); spec.equal(symbols.deps, nil)
+        local ids = {}
+        for id = 1, #eager.nodes do ids[#ids + 1] = id end
+        lazy:load_incoming(ids)
+        lazy:load_incoming(ids)
+        spec.equal(lazy.stats.incoming_scans, 1)
+        for _, direction in ipairs({ 'out', 'inn' }) do
+            for _, id in ipairs(ids) do
+                local a, b = eager[direction][id] or {}, lazy[direction][id] or {}
+                spec.equal(#a, #b)
+                for i, value in ipairs(a) do spec.equal(b[i], value) end
+            end
+        end
+        spec.equal(symbols.out, nil)
+        local fresh = graph.query(symbols)
+        spec.equal(next(fresh.out), nil); spec.equal(next(fresh.inn), nil)
+    end)
+    spec.it('preserves resolver results across all parser languages', function()
+        local samples = {
+            ['calls.c'] = 'int target(void) { return 1; } int entry(void) { return target(); }',
+            ['calls.cpp'] = 'struct Box { int target() { return 1; } int entry() { return this->target(); } };',
+            ['calls.py'] = 'def target():\n    return 1\ndef entry():\n    return target()\n',
+            ['calls.lua'] = 'function target() return 1 end function entry() return target() end',
+            ['calls.java'] = 'class Box { int target() { return 1; } int entry() { return target(); } }',
+            ['calls.go'] = 'package main\nfunc target() int { return 1 }\nfunc entry() int { return target() }',
+            ['calls.ts'] = 'function target() { return 1; } function entry() { return target(); }',
+            ['calls.cs'] = 'class Box { int target() { return 1; } int entry() { return this.target(); } }',
+            ['calls.rs'] = 'fn target() -> i32 { 1 } fn entry() -> i32 { target() }',
+        }
+        for path, source in pairs(samples) do
+            local idx = { generation = 1, files = { [path] = ci.parse(path, source) } }
+            local eager, lazy = graph.build(idx), graph.query(graph.build(idx, { edges = false }))
+            spec.truthy(eager.edge_count > 0, path .. ' must exercise resolution')
+            for id = 1, #eager.nodes do
+                for _, direction in ipairs({ 'out', 'inn' }) do
+                    local a, b = eager[direction][id] or {}, lazy[direction][id] or {}
+                    spec.equal(#a, #b, path)
+                    for i, value in ipairs(a) do spec.equal(b[i], value, path) end
+                end
+            end
+        end
+    end)
+    spec.it('invalidates lazy symbols and query caches after an edit', function()
+        local path = tmp_root .. '/lazy_change.lua'
+        write(path, 'function lazy_caller() return previous() end function previous() end')
+        local before = svc.explore(tmp_root, 'lazy_caller previous', { cache_path = cache, relationships = 'lazy' })
+        spec.contains(before, 'lazy_caller -> previous')
+        local _, old = svc.resident(tmp_root)
+        write(path, 'function lazy_caller() return replacement() end function replacement() end')
+        local after = svc.explore(tmp_root, 'lazy_caller replacement', { cache_path = cache, relationships = 'lazy' })
+        spec.contains(after, 'lazy_caller -> replacement')
+        spec.truthy(not after:find('previous', 1, true))
+        local _, current = svc.resident(tmp_root)
+        spec.truthy(current ~= old); spec.equal(current.out, nil)
+        os.remove(path)
+    end)
+    spec.it('matches explore output and rebuilds only symbols in the opt-in service path', function()
+        for _, query in ipairs({ 'run net_send', 'Store.save', 'handle _write', 'go trim',
+            'Shape.scaled area', 'app.c', 'not_a_symbol' }) do
+            local eager = svc.explore(tmp_root, query, { cache_path = cache })
+            local lazy, info = svc.explore(tmp_root, query, { cache_path = cache, relationships = 'lazy' })
+            spec.equal(lazy, eager)
+            if info.query_stats then spec.equal(info.query_stats.incoming_scans, #info.seeds > 0 and 1 or 0) end
+            local _, symbols = svc.resident(tmp_root)
+            spec.truthy(symbols.symbols_only); spec.equal(symbols.out, nil); spec.equal(symbols.inn, nil)
+        end
+    end)
+    spec.it('reports expansion limits and never publishes cancelled caller scans', function()
+        local idx = svc.refresh(tmp_root, { cache_path = cache })
+        local symbols = graph.build(idx, { edges = false })
+        local output, info = explore.run(symbols, idx, 'run net_send', { max_expanded = 1 })
+        spec.truthy(info.relationships_incomplete); spec.truthy(info.truncated)
+        spec.contains(output, 'relationships are incomplete')
+        local lazy = graph.query(symbols)
+        local control = require('codeoutline.control')
+        control.callback = function() error(control.cancelled(), 0) end
+        local ok, err = pcall(lazy.load_incoming, lazy, { symbols.by_name.net_send[1] })
+        control.callback = nil
+        spec.equal(ok, false); spec.truthy(control.is_interrupted(err))
+        spec.equal(next(lazy.inn), nil)
+        lazy:load_incoming({ symbols.by_name.net_send[1] })
+        spec.truthy(#lazy.inn[symbols.by_name.net_send[1]] > 0)
+    end)
+end)
+
 spec.describe('explore', function()
     spec.it('returns source, call paths, and callers for named symbols', function()
         local text = svc.explore(tmp_root, 'run net_send', { cache_path = cache })

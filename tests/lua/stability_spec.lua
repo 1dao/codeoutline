@@ -291,6 +291,16 @@ do
             spec.contains(svc.explore(project, 'abc', opts), '现在是 UTF-8')
             spec.equal(idx.files['gbk.lua'].encoding, 'utf-8')
         end)
+        spec.it('retries GBK repairs with symbol-only tables in lazy explore', function()
+            if not gbk_or_skip() then return end
+            write('lazy_tail.lua', 'function lazy_tail()\n local s = "\129\92"\n return lazy_helper()\nend\nfunction lazy_helper() return 1 end\n')
+            local lazy = svc.explore(project, 'lazy_tail lazy_helper', { cache_path = opts.cache_path,
+                lister = opts.lister, relationships = 'lazy' })
+            spec.contains(lazy, 'lazy_tail -> lazy_helper')
+            local _, symbols = svc.resident(project)
+            spec.truthy(symbols.symbols_only); spec.equal(symbols.out, nil)
+            spec.equal(lazy, svc.explore(project, 'lazy_tail lazy_helper', opts))
+        end)
         spec.it('repairs GBK backslash-tail strings and discovers swallowed calls', function()
             if not gbk_or_skip() then return end
             write('tail.lua', 'function tail()\n local s = "\129\92"\n return helper()\nend\nfunction helper() return 1 end\n')

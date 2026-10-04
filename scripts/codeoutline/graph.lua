@@ -332,7 +332,7 @@ local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired)
     return ties
 end
 
-function M.build(idx)
+function M.build(idx, opts)
     local G = {
         files = {}, file_index = {}, file_dir = {}, nodes = {}, node_file = {}, id_of = {},
         by_name = {}, by_lname = {}, by_qualified = {}, by_base = {}, by_stem = {},
@@ -381,6 +381,12 @@ function M.build(idx)
     G.dir_by_base = {}
     for d in pairs(G.dir_files) do push(G.dir_by_base, basename(d), d) end
     for _, list in pairs(G.dir_by_base) do table.sort(list) end
+    -- Step 3 keeps the eager graph as the oracle; this mode builds symbols only.
+    if opts and opts.edges == false then
+        G.out, G.inn, G.deps = nil, nil, nil
+        G.symbols_only = true
+        return G
+    end
     -- Edges.
     local edges = 0
     for f, rec in ipairs(G.files) do
@@ -407,6 +413,102 @@ function M.build(idx)
     end
     G.edge_count = edges
     return G
+end
+
+-- Query-owned edges: never attach these caches to the resident symbol tables.
+M.MAX_EXPANDED = 20000
+function M.query(symbols, opts)
+    opts = opts or {}
+    local limit = opts.max_expanded or M.MAX_EXPANDED
+    assert(type(limit) == 'number' and limit >= 1 and limit % 1 == 0 and limit < math.huge,
+        'max_expanded must be a positive integer')
+    local Q = setmetatable({ out = {}, inn = {},
+        stats = { expanded = 0, incoming_scans = 0, resolved_refs = 0 }, incomplete = false }, { __index = symbols })
+    local dependencies, references = {}, {}
+    local function deps(f)
+        local entry = dependencies[f]
+        if not entry then
+            local direct, paired = resolve_deps(symbols, f)
+            entry = { direct, paired }; dependencies[f] = entry
+        end
+        return entry[1], entry[2]
+    end
+    local function targets(f, i)
+        local rec, ids = symbols.files[f], symbols.id_of[f]
+        local refs = rec.refs
+        local direct, paired = deps(f)
+        Q.stats.resolved_refs = Q.stats.resolved_refs + 1
+        return resolve_ref(symbols, f, ids[refs.from[i]], refs.name[i], refs.kind[i],
+            refs.recv[i] or nil, direct, paired)
+    end
+    setmetatable(Q.out, { __index = function(cache, id)
+        control.check()
+        if Q.stats.expanded >= limit then Q.incomplete = true; return nil end
+        Q.stats.expanded = Q.stats.expanded + 1
+        local f = assert(symbols.node_file[id], 'unknown symbol')
+        local rec, ids = symbols.files[f], symbols.id_of[f]
+        local grouped = references[f]
+        if not grouped then
+            grouped = {}
+            for i, from in ipairs(rec.refs.from) do
+                if i % 128 == 0 then control.check() end
+                if from > 0 then push(grouped, ids[from], i) end
+            end
+            references[f] = grouped
+        end
+        local edges = {}
+        for _, i in ipairs(grouped[id] or {}) do
+            control.check()
+            for _, dst in ipairs(targets(f, i) or {}) do
+                edges[#edges + 1] = dst
+                edges[#edges + 1] = rec.refs.line[i]
+                edges[#edges + 1] = rec.refs.kind[i]
+            end
+        end
+        rawset(cache, id, edges)
+        return edges
+    end })
+    -- Resolve all requested callers with a single ordered multi-name scan.
+    function Q:load_incoming(ids)
+        local wanted, names, found = {}, {}, false
+        for _, id in ipairs(ids) do
+            if rawget(self.inn, id) == nil then
+                wanted[id], names[symbols.nodes[id].name], found = true, true, true
+            end
+        end
+        if not found then return end
+        local incoming = {}
+        for id in pairs(wanted) do incoming[id] = {} end
+        self.stats.incoming_scans = self.stats.incoming_scans + 1
+        -- Hot loop over every reference: numeric loops, hoisted fields, and the
+        -- selective name test first. Checkpoints run per file and per chunk.
+        local files = symbols.files
+        for f = 1, #files do
+            control.check()
+            local refs = files[f].refs
+            local ref_names, froms = refs.name, refs.from
+            local count = #ref_names
+            for first = 1, count, 4096 do
+                if first > 1 then control.check() end
+                for i = first, math.min(count, first + 4095) do
+                    if names[ref_names[i]] and froms[i] > 0 then
+                        for _, dst in ipairs(targets(f, i) or {}) do
+                            if wanted[dst] then
+                                push3(incoming, dst, symbols.id_of[f][froms[i]], refs.line[i], refs.kind[i])
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        -- Interrupted scans never publish partial caller lists.
+        for id, edges in pairs(incoming) do rawset(self.inn, id, edges) end
+    end
+    setmetatable(Q.inn, { __index = function(cache, id)
+        Q:load_incoming({ id })
+        return rawget(cache, id)
+    end })
+    return Q
 end
 
 -- Location string for a node: "path:line".

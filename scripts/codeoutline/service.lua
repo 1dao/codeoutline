@@ -83,7 +83,10 @@ local function refresh(root, opts, with_graph)
             local stats = p.idx:refresh(refresh_opts)
             local G = p.G
             if with_graph then
-                if not G or G.generation ~= p.idx.generation then G = graph.build(p.idx) end
+                local symbols_only = with_graph == 'symbols'
+                if not G or G.generation ~= p.idx.generation or not not G.symbols_only ~= symbols_only then
+                    G = graph.build(p.idx, symbols_only and { edges = false } or nil)
+                end
             elseif G and G.generation ~= p.idx.generation then
                 G = nil -- Release stale edges; the next graph consumer rebuilds lazily.
             end
@@ -131,7 +134,9 @@ end
 
 function M.explore(root, query, opts)
     explore.validate(query, opts)
-    local idx, G, stats = M.get(root, opts)
+    local mode = opts and opts.relationships or 'eager'
+    assert(mode == 'eager' or mode == 'lazy', 'relationships must be eager or lazy')
+    local idx, G, stats = refresh(root, opts, mode == 'lazy' and 'symbols' or true)
     idx.query_sources = {}
     local ok, result = pcall(function()
         return idx:transaction(function()
@@ -139,7 +144,7 @@ function M.explore(root, query, opts)
                 local output, details = explore.run(G, idx, query, opts)
                 control.check()
                 if not details.encoding_retry then return { text = output, info = details, G = G } end
-                G = graph.build(idx)
+                G = graph.build(idx, mode == 'lazy' and { edges = false } or nil)
             end
         end)
     end)

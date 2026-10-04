@@ -221,10 +221,76 @@ spec.describe('resident state and cancellation', function()
     end)
 end)
 
+local function fake_submit(req, done)
+    done(true, req.method == 'lsp_symbols' and {} or true)
+    return 'test-job'
+end
+
 spec.describe('LSP sessions', function()
+    spec.it('cancels immediately and discards a late result even when an ID is reused', function()
+        local output, jobs, cancelled = {}, {}, {}
+        local session = lsp.new({}, function(msg) output[#output + 1] = msg end,
+            function(req, done) jobs[#jobs + 1] = done; return tostring(#jobs) end,
+            function(id) cancelled[id] = true end, function() end)
+        local function send(method, params, id)
+            session:accept(xutils.json_pack({ jsonrpc = '2.0', method = method, params = params or {}, id = id }))
+        end
+        send('initialize', { capabilities = {} }, 1); send('initialized')
+        send('workspace/symbol', { query = '' }, 2)
+        send('$/cancelRequest', { id = 2 })
+        spec.equal(output[#output].error.code, -32800); spec.truthy(cancelled['1'])
+        send('workspace/symbol', { query = '' }, 2)
+        local before = #output
+        jobs[1](true, { { name = 'late' } })
+        spec.equal(#output, before)
+        jobs[2](true, {})
+        spec.equal(output[#output].id, 2); spec.equal(#output[#output].result, 0)
+    end)
+    spec.it('returns drafts without worker submission when any workspace root is unready', function()
+        local output, jobs = {}, {}
+        local session = lsp.new({}, function(msg) output[#output + 1] = msg end,
+            function(req, done) jobs[#jobs + 1] = { req = req, done = done }; return tostring(#jobs) end,
+            function() end, function() end)
+        local function send(method, params, id)
+            session:accept(xutils.json_pack({ jsonrpc = '2.0', method = method, params = params or {}, id = id }))
+        end
+        local other = root .. '/second-root'
+        assert(xutils.mkdir_p(other))
+        send('initialize', { rootUri = docs.uri(root), capabilities = {} }, 1)
+        send('initialized')
+        send('textDocument/didOpen', { textDocument = { uri = docs.uri(root .. '/draft.lua'),
+            languageId = 'lua', version = 1, text = 'function immediate_draft() end' } })
+        -- A ready root must not cause a query to queue behind another unready root.
+        session.roots = { root, other }; session.ready[root] = true
+        local before = #jobs
+        send('workspace/symbol', { query = 'immediate' }, 2)
+        spec.equal(#jobs, before)
+        spec.equal(output[#output].result[1].name, 'immediate_draft')
+        spec.equal(next(session.pending), nil)
+        session.ready[other] = true
+        send('workspace/symbol', { query = 'immediate' }, 3)
+        spec.equal(#jobs, before + 1); spec.equal(jobs[#jobs].req.method, 'lsp_symbols')
+        jobs[#jobs].done(true, {})
+        spec.equal(output[#output].result[1].name, 'immediate_draft')
+    end)
+    spec.it('reports busy navigation and incomplete completion until initial indexing finishes', function()
+        local output, complete
+        local session = lsp.new({}, function(msg) output = msg end,
+            function(req, done) complete = done; return 'scan' end, function() end, function() end)
+        local function send(method, id)
+            session:accept(xutils.json_pack({ jsonrpc = '2.0', method = method, id = id,
+                params = { rootUri = docs.uri(root), capabilities = {} } }))
+        end
+        send('initialize', 1); send('initialized')
+        send('textDocument/definition', 2); spec.equal(output.error.code, -32803)
+        send('textDocument/completion', 3); spec.truthy(output.result.isIncomplete)
+        complete(true, true)
+        send('textDocument/definition', 4); spec.equal(output.error.code, -32601)
+    end)
+
     spec.it('handles progress responses independently from client request IDs', function()
         local output = {}
-        local session = lsp.new({}, function(msg) output[#output + 1] = msg end, function() end, function() end)
+        local session = lsp.new({}, function(msg) output[#output + 1] = msg end, fake_submit, function() end, function() end)
         local function send(msg) msg.jsonrpc = '2.0'; session:accept(xutils.json_pack(msg)) end
         send({ id = 1, method = 'initialize', params = { rootUri = docs.uri(root), capabilities = { window = { workDoneProgress = true } } } })
         send({ method = 'initialized' })
@@ -242,7 +308,7 @@ spec.describe('LSP sessions', function()
     spec.it('isolates drafts between sessions without changing disk state', function()
         local output = {}
         local function make()
-            return lsp.new({}, function(msg) output[#output + 1] = msg end, function() end, function() end)
+            return lsp.new({}, function(msg) output[#output + 1] = msg end, fake_submit, function() end, function() end)
         end
         local function send(session, method, params, id)
             session:accept(xutils.json_pack({ jsonrpc = '2.0', method = method, params = params, id = id }))
@@ -260,6 +326,96 @@ spec.describe('LSP sessions', function()
         spec.equal(#output[#output].result, 0)
         spec.nil_value(io.open(root .. '/new.lua', 'rb'))
     end)
+end)
+
+spec.describe('shared entry and worker lifecycle', function()
+    spec.it('defers installed-update exit for an LSP connection but retains MCP idle exit', function()
+        local saved = { arg = arg, xthread = xthread, xnet = xnet, xshared = xshared,
+            read = xutils.read_stdin, stdout = io.stdout, stderr = io.stderr, getenv = os.getenv }
+        local ok, err = pcall(function()
+            local input, stopped
+            local shared = { set = function() end }
+            xshared = { create = function() return shared end }
+            xnet = { init = function() return true end, uninit = function() end }
+            xthread = { create_thread = function() return true end, post = function() return true end,
+                stop = function(code) stopped = code end, shutdown_thread = function() end }
+            io.stdout = { write = function() end, flush = function() end }
+            io.stderr = io.stdout
+            os.getenv = function(name)
+                if name == 'CODEOUTLINE_AUTO_UPDATE' then return '0' end
+                if name == 'CODEOUTLINE_EXIT_ON_UPDATE' then return '1' end
+                return saved.getenv(name)
+            end
+            xutils.read_stdin = function() local value = input or ''; input = nil; return value end
+            arg = { 'STDIO=1', 'LSP=1' }
+            local entry = dofile('scripts/codeoutline/main.lua')
+            entry.__init(); entry.__thread_handle(2, 'worker_ready')
+            entry.__thread_handle(3, 'update_result', nil, 'test-update')
+            entry.__update(); spec.equal(stopped, nil)
+            input = lsp.frame({ jsonrpc = '2.0', id = 1, method = 'initialize', params = { capabilities = {} } })
+                .. lsp.frame({ jsonrpc = '2.0', id = 2, method = 'shutdown' })
+            entry.__update(); spec.equal(stopped, nil)
+            input = lsp.frame({ jsonrpc = '2.0', method = 'exit' })
+            entry.__update(); spec.equal(stopped, 0)
+            entry.__uninit()
+            stopped = nil; arg = { 'STDIO=1' }
+            entry = dofile('scripts/codeoutline/main.lua')
+            entry.__init(); entry.__thread_handle(2, 'worker_ready')
+            entry.__thread_handle(3, 'update_result', nil, 'test-update')
+            entry.__update(); spec.equal(stopped, 0)
+            entry.__uninit()
+        end)
+        arg, xthread, xnet, xshared = saved.arg, saved.xthread, saved.xnet, saved.xshared
+        xutils.read_stdin, io.stdout, io.stderr, os.getenv = saved.read, saved.stdout, saved.stderr, saved.getenv
+        if not ok then error(err, 0) end
+    end)
+    spec.it('refreshes and queries LSP without a graph, and executes cancellation directly', function()
+        local saved = { xthread = xthread, xshared = xshared, build = graph.build }
+        local ok, err = pcall(function()
+            local results = {}
+            local flags = { ['cancel:cancelled'] = true }
+            xshared = { dict = function() return {
+                get = function(_, key) return flags[key] end,
+                delete = function(_, key) flags[key] = nil end } end }
+            xthread = { post = function(thread, op, id, success, result)
+                spec.equal(thread, 1); spec.equal(op, 'worker_result')
+                results[id] = { ok = success, result = result }
+                return true
+            end }
+            service.forget(root)
+            graph.build = function() error('LSP must not build a call graph') end
+            local worker = dofile('scripts/codeoutline/index_worker.lua')
+            local function run(id, req)
+                req.projectPath, req.allowedRoots, req.deadline = root, { root }, xtimer.now_ms() + 10000
+                worker.__thread_handle(1, 'run', id, req)
+                spec.truthy(results[id], 'worker must complete directly without a continuation')
+                return results[id]
+            end
+            spec.truthy(run('initial', { method = 'lsp_refresh' }).ok)
+            local _, G = service.resident(root); spec.equal(G, nil)
+            write(root .. '/a.lua', 'function worker_only() end\n')
+            spec.truthy(run('save', { method = 'lsp_refresh', paths = { root .. '/a.lua' } }).ok)
+            local symbols = run('symbols', { method = 'lsp_symbols', roots = { root },
+                query = 'worker_only', exclude = {}, limit = 200 })
+            spec.truthy(symbols.ok); spec.equal(#symbols.result, 1)
+            spec.equal(symbols.result[1].name, 'worker_only')
+            spec.equal(symbols.result[1].location.range.start.character, 9)
+            local cancelled = run('cancelled', { method = 'lsp_refresh' })
+            spec.equal(cancelled.ok, false); spec.contains(cancelled.result, 'cancelled')
+            spec.equal(control.callback, nil)
+            graph.build = saved.build
+            spec.contains(service.explore(root, 'worker_only'), 'worker_only')
+            local _, built = service.resident(root); spec.truthy(built)
+            graph.build = function() error('index-only refresh must invalidate, not rebuild') end
+            write(root .. '/a.lua', 'function after_graph() end\n')
+            spec.truthy(run('changed', { method = 'lsp_refresh', paths = { root .. '/a.lua' } }).ok)
+            local _, stale = service.resident(root); spec.equal(stale, nil)
+        end)
+        xthread, xshared, graph.build = saved.xthread, saved.xshared, saved.build
+        service.configure({ watch = false, max_projects = 8 })
+        if not ok then error(err, 0) end
+    end)
+
 end)
 
 service.forget(root)

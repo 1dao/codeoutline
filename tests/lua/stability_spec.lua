@@ -19,6 +19,25 @@ end
 write(project .. '/中文.lua', 'function original() return "你好" end\n')
 
 spec.describe('service stability', function()
+    spec.it('throttles unwatchable roots and refreshes save hints without enumerating', function()
+        local idx = index.open(project, { cache_path = root .. '/interval.idx', lister = 'walk', rebuild = true })
+        idx:refresh({ full_interval = 45 })
+        local original = idx.list_files
+        idx.list_files = function() error('unexpected full enumeration') end
+        spec.equal(idx:refresh({ full_interval = 45 }).mode, 'idle')
+        write(project .. '/中文.lua', 'function hinted() end\n')
+        local stats = idx:refresh({ paths = { project .. '/中文.lua' } })
+        spec.equal(stats.parsed, 1); spec.equal(idx.files['中文.lua'].nodes[1].name, 'hinted')
+        local ok = pcall(function()
+            idx:transaction(function() error(require('codeoutline.control').cancelled(), 0) end)
+        end)
+        spec.equal(ok, false); spec.equal(idx.next_full, nil)
+        idx.list_files = original
+        spec.equal(idx:refresh({ full_interval = 45 }).mode, 'full')
+        write(project .. '/中文.lua', 'function original() return "你好" end\n')
+        idx:close()
+    end)
+
     spec.it('canonicalizes dot, parent, separators and Windows casing', function()
         local a = service.get(project, opts)
         local b = service.get(project .. '/./../中文 项目/', opts)

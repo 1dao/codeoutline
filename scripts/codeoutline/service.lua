@@ -58,7 +58,7 @@ local function key_for(root)
     return paths.key(canonical), canonical
 end
 
-function M.get(root, opts)
+local function refresh(root, opts, with_graph)
     opts = opts or {}
     local key, canonical = key_for(root)
     M.sweep()
@@ -78,9 +78,15 @@ function M.get(root, opts)
     local t0 = os.clock()
     local ok, updated = pcall(function()
         return p.idx:transaction(function()
-            local stats = p.idx:refresh()
+            local refresh_opts = opts
+            if not projects[key] and opts.paths then refresh_opts = { full_interval = opts.full_interval } end
+            local stats = p.idx:refresh(refresh_opts)
             local G = p.G
-            if not G or G.generation ~= p.idx.generation then G = graph.build(p.idx) end
+            if with_graph then
+                if not G or G.generation ~= p.idx.generation then G = graph.build(p.idx) end
+            elseif G and G.generation ~= p.idx.generation then
+                G = nil -- Release stale edges; the next graph consumer rebuilds lazily.
+            end
             return { stats = stats, G = G }
         end)
     end)
@@ -101,6 +107,26 @@ function M.get(root, opts)
     end
     stats.seconds = os.clock() - t0
     return p.idx, p.G, stats
+end
+
+-- LSP refreshes records without allocating a call graph.
+function M.refresh(root, opts)
+    local idx, _, stats = refresh(root, opts, false)
+    return idx, stats
+end
+
+-- Existing graph consumers retain atomic refresh/build and rollback semantics.
+function M.get(root, opts)
+    return refresh(root, opts, true)
+end
+
+-- Worker-owned resident state; callers must serialize access with get/explore.
+-- This does not create a snapshot or refresh the filesystem.
+function M.resident(root)
+    local key = key_for(root)
+    local p = assert(projects[key], 'Project is indexing; retry when indexing completes')
+    p.used = os.time()
+    return p.idx, p.G
 end
 
 function M.explore(root, query, opts)

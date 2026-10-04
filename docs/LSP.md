@@ -4,10 +4,9 @@ The `xlsp` branch provides an independent Lua stdio language server. This is an
 intermediate implementation, not the shared MCP/LSP backend or a published editor
 extension. Released CodeOutline 0.1.9 does not contain this command.
 
-> **Temporarily unavailable.** The standalone stdio server and its main-thread
-> scheduler have been removed while the LSP moves onto the shared index worker
-> used by MCP. `lsp --stdio` reports an error until that lands; the rest of this
-> page describes the removed preview and will be rewritten with the new design.
+LSP now uses `main.lua` and the same INDEX worker submission/cancellation path
+as MCP. The stdio command is available again. A process still selects either
+MCP or LSP transport; simultaneous HTTP MCP and TCP LSP is a later batch.
 
 ## Launch
 
@@ -42,23 +41,37 @@ depend on the editor's working directory. Runtime logs must go to stderr.
   schema version has changed, so earlier caches rebuild automatically.
 - Multi-root workspaces collapse nested roots within a session and deduplicate
   project results. Open files hide all disk symbols for that file.
-- Initial indexing reports work-done progress when the client supports it.
-  Queries use drafts and published snapshots, returning available or empty results
-  while indexing, rather than waiting for the project index.
-- Background indexing and project queries yield at explicit checkpoints. Document
-  queries have priority over project queries; roots advance round-robin. Cancelled
-  updates roll back record replacements; pure query cancellation retains the index.
-- `didSave` schedules refresh. A five-second background pass drains native watcher
-  changes or performs a full refresh when watching is unavailable. Queries do not
-  initiate refresh. No automatic update/restart loop runs in the LSP process.
+- Initial indexing reports work-done progress when supported. Document symbols
+  remain synchronous on the main thread. If any workspace root is not ready,
+  workspace queries immediately return only matching draft symbols without
+  submitting a worker job. Once all roots are ready, queries combine disk matches
+  from the worker with the request's draft symbols. Navigation
+  requests during initial indexing receive RequestFailed (-32803); completion
+  returns an empty incomplete list. These future capabilities are not advertised.
+- The INDEX worker exclusively owns resident indexes and executes requests
+  directly, without coroutine slices. LSP refreshes only index records and scans
+  those records for workspace symbols; it does not build or retain a call graph.
+  Existing graph consumers build lazily when needed, and an index-only refresh
+  discards a stale graph after file changes. Safe batching with short-job
+  interleaving is deferred until per-file commits are implemented.
+- Cancellation responds immediately with -32800 and discards late results.
+  Shutdown cancels session jobs; exit closes the stdio process with the appropriate
+  exit code. Session close is separate from process stop for future transports.
+- A one-second background poll drains native watcher events. Without a watcher,
+  full refreshes are throttled to 45 seconds. Save and watched-file hints refresh
+  named indexed files without enumerating the root; native watching admits new
+  files and enforces ignore rules. Clients need not register a watcher.
+- Installed updates do not terminate an active LSP connection, including the
+  shutdown-to-exit interval. MCP-only processes retain their idle-exit policy.
 
 ## Limits And Pending Work
 
 The independent server accepts 16 workspace folders, 128 open documents, 32 MiB
 of draft text, 1.5 MB per document, 64 pending symbol requests and 4 MiB per incoming
 wire message. Native parsing, enumeration, decoding and cache compression are bounded
-operations but cannot yield in the middle of a native call. Large files can still
-produce latency spikes; the 10 ms checkpoint budget is not a hard latency bound.
+operations but cannot be interrupted in the middle of a native call. Worker
+requests are serialized, so a request can still wait behind a running refresh
+after initial indexing. Per-file commits and fair batching remain pending.
 
 Workspace symbols re-read matching disk files to produce correctly decoded
 positions. Initial indexing is still encoding-lazy, so GBK identifiers may not
@@ -66,11 +79,11 @@ match until that file has been decoded. This preview does not add a complete
 semantic resolver, rename, references, diagnostics, completion or incremental text
 edits. Hover, definition and call hierarchy are not advertised yet.
 
-MCP retains its existing worker and request queue. Its cancellation now preserves
-consistent resident state, but MCP and LSP do not yet share a scheduler or process.
-TCP LSP, the stdio bridge, shared daemon lifecycle, dynamic watched-file registration,
-periodic watcher reconciliation, binary discovery and VS Code/Cursor/Zed extensions
-remain subsequent batches. Do not configure the MCP HTTP endpoint as an LSP URL.
+The existing graph implementation for MCP and record-replacement transactions remain until
+query-time relationship resolution is integrated and validated. No persistent
+symbol table is copied to the main thread. TCP LSP, stdio bridging, a single
+multi-protocol daemon, binary discovery and VS Code/Cursor/Zed extensions remain
+subsequent batches. Do not configure the MCP HTTP endpoint as an LSP URL.
 
 ## Verification
 

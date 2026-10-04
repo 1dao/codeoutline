@@ -218,7 +218,7 @@ function Index:transaction(fn)
         for rel, rec in pairs(changes) do self.files[rel] = rec or nil end
         self.generation, self.encoding_dirty, self.saved_generation = generation, dirty, saved
         -- Watch events may already have been drained; reconcile on the next pass.
-        self.watch_ready = false
+        self.watch_ready, self.next_full = false, nil
         error(result, 0)
     end
     return result
@@ -572,7 +572,22 @@ end
 -- With a watcher (see Index:watch) only reported paths are visited; an
 -- overflow or an ignore-file change falls back to a full pass, and a failed
 -- watcher is reopened before one.
-function Index:refresh()
+function Index:refresh(opts)
+    opts = opts or {}
+    if opts.paths then
+        local changed = {}
+        for _, path in ipairs(opts.paths) do
+            if paths.contains(self.root, path) then
+                local prefix = self.root:sub(-1) == '/' and self.root or self.root .. '/'
+                local rel = path:sub(#prefix + 1)
+                -- Unindexed/ignored files are admitted by watcher enumeration.
+                if self.files[rel] then changed[rel] = true end
+            end
+        end
+        local stats = self:refresh_changed(changed, false)
+        if stats.parsed > 0 or stats.removed > 0 then self.generation = self.generation + 1 end
+        return stats
+    end
     if self.watcher and self.watch_ready then
         local paths, structural, overflow = self.watcher:read()
         local changed = paths and not overflow and relevant(paths)
@@ -594,7 +609,11 @@ function Index:refresh()
     end
     if self.watching and not self.watcher and os.time() >= (self.watch_retry or 0) then self:open_watcher() end
     if self.watcher then self.watch_ready = false end
+    if not self.watcher and opts.full_interval and self.next_full and os.time() < self.next_full then
+        return new_stats('idle')
+    end
     local stats = self:refresh_all()
+    self.next_full = os.time() + (opts.full_interval or 0)
     if self.watcher then self.watch_ready = true end
     return stats
 end

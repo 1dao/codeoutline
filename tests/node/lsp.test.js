@@ -8,9 +8,6 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { defaultRuntime, root } from './helpers.js';
 
-// Re-enable once `lsp --stdio` runs on the shared index worker; see docs/LSP.md.
-const moving = 'lsp --stdio is moving onto the shared index worker';
-
 const frame = (message) => {
     const body = Buffer.from(JSON.stringify({ jsonrpc: '2.0', ...message }));
     return Buffer.concat([Buffer.from(`Content-Length: ${body.length}\r\n\r\n`), body]);
@@ -103,7 +100,7 @@ const initialize = async (client, folders) => {
     client.notify('initialized');
 };
 
-test('LSP stdio handles drafts, UTF-16 ranges, cancellation and close restoration', { timeout: 30000, skip: moving }, async (t) => {
+test('LSP stdio handles drafts, UTF-16 ranges, cancellation and close restoration', { timeout: 30000 }, async (t) => {
     const client = await start(t);
     const before = await client.rawRequest('workspace/symbol', { query: '' });
     assert.equal(before.error.code, -32002);
@@ -122,6 +119,11 @@ test('LSP stdio handles drafts, UTF-16 ranges, cancellation and close restoratio
     assert.equal((await client.request('textDocument/documentSymbol', { textDocument: { uri } }))[0].name, 'renamed');
     client.notify('textDocument/didChange', { textDocument: { uri, version: 1 }, contentChanges: [{ text: 'function stale() end' }] });
     assert.equal((await client.request('textDocument/documentSymbol', { textDocument: { uri } }))[0].name, 'renamed');
+    const readyDeadline = Date.now() + 10000;
+    while (!client.notifications.some((msg) => msg.params?.value?.kind === 'end') && Date.now() < readyDeadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.ok(client.notifications.some((msg) => msg.params?.value?.kind === 'end'));
     const id = client.id(), cancelled = client.response(id);
     client.child.stdin.write(Buffer.concat([frame({ id, method: 'workspace/symbol', params: { query: 'renamed' } }),
         frame({ method: '$/cancelRequest', params: { id } })]));
@@ -134,7 +136,7 @@ test('LSP stdio handles drafts, UTF-16 ranges, cancellation and close restoratio
     assert.equal((await client.request('workspace/symbol', { query: 'unsaved' }))[0].name, 'unsaved');
 });
 
-test('LSP indexing accepts split frames and deduplicates nested workspace roots', { timeout: 30000, skip: moving }, async (t) => {
+test('LSP indexing accepts split frames and deduplicates nested workspace roots', { timeout: 30000 }, async (t) => {
     const client = await start(t);
     const sub = join(client.project, 'sub');
     await mkdir(sub);
@@ -161,7 +163,7 @@ test('LSP indexing accepts split frames and deduplicates nested workspace roots'
     assert.equal((await client.request('workspace/symbol', { query: 'saved' })).length, 0);
 });
 
-test('LSP returns JSON null for shutdown and ignores late initialized notifications', { timeout: 30000, skip: moving }, async (t) => {
+test('LSP returns JSON null for shutdown and ignores late initialized notifications', { timeout: 30000 }, async (t) => {
     const client = await start(t);
     await initialize(client, [client.project]);
     assert.equal(await client.request('shutdown'), null);
@@ -173,7 +175,7 @@ test('LSP returns JSON null for shutdown and ignores late initialized notificati
     assert.equal((await exit)[0], 0);
 });
 
-test('LSP reports indexing progress and refreshes saved files without a query-triggered scan', { timeout: 30000, skip: moving }, async (t) => {
+test('LSP reports indexing progress and refreshes saved files without a query-triggered scan', { timeout: 30000 }, async (t) => {
     const client = await start(t);
     await initialize(client, [client.project]);
     const deadline = Date.now() + 10000;
@@ -202,11 +204,20 @@ test('LSP reports indexing progress and refreshes saved files without a query-tr
     assert.equal(symbols.length, 1, 'external creation refreshes without a client notification');
 });
 
-test('LSP answers local queries while a real background index is still running', { timeout: 30000, skip: moving }, async (t) => {
+test('LSP answers local queries while a real background index is still running', { timeout: 30000 }, async (t) => {
     const client = await start(t);
     const source = Array.from({ length: 6000 }, (_, i) => `function background_${i}() return ${i} end\n`).join('');
     for (let i = 0; i < 24; i++) await writeFile(join(client.project, `large_${i}.lua`), source);
     await initialize(client, [client.project]);
+    const draftUri = pathToFileURL(join(client.project, 'draft.lua')).href;
+    client.notify('textDocument/didOpen', { textDocument: { uri: draftUri, languageId: 'lua', version: 1,
+        text: 'function immediate_draft() end' } });
+    const workspaceStart = Date.now();
+    const early = await client.request('workspace/symbol', { query: 'immediate_draft' });
+    assert.equal(early[0].name, 'immediate_draft');
+    assert.ok(!client.notifications.some((msg) => msg.params?.value?.kind === 'end'),
+        'workspace symbols must return drafts before the background index finishes');
+    t.diagnostic(`workspace/symbol during indexing: ${Date.now() - workspaceStart}ms`);
     const uri = 'untitled:local-draft';
     client.notify('textDocument/didOpen', { textDocument: { uri, languageId: 'lua', version: 1, text: 'function interactive() end' } });
     const timings = [];
@@ -221,6 +232,24 @@ test('LSP answers local queries while a real background index is still running',
     }
     assert.ok(duringIndex > 0, 'document query completes before project indexing');
     assert.ok(Math.max(...timings) < 2000, 'local queries do not wait for the complete index');
+    const deadline = Date.now() + 10000;
+    while (!client.notifications.some((msg) => msg.params?.value?.kind === 'end') && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    const indexed = await client.request('workspace/symbol', { query: 'background_5999' });
+    assert.equal(indexed.length, 24, 'the background job completes and publishes all files');
+    assert.ok(client.notifications.some((msg) => msg.params?.value?.kind === 'end'));
     timings.sort((a, b) => a - b);
     t.diagnostic(`24 files / 144000 functions: documentSymbol p95=${timings[18]}ms, max=${timings[19]}ms`);
+});
+
+
+test('LSP exit without shutdown fails and truncated frames fail on EOF', { timeout: 30000 }, async (t) => {
+    for (const mode of ['exit', 'partial']) {
+        const client = await start(t);
+        const exit = once(client.child, 'exit');
+        if (mode === 'exit') client.notify('exit');
+        else client.child.stdin.end('Content-Length: 100\r\n\r\n{');
+        assert.equal((await exit)[0], 1);
+    }
 });

@@ -217,7 +217,9 @@ local function run()
     end
     if command == 'lsp' then
         assert(options.stdio, 'lsp requires --stdio')
-        error('lsp is unavailable while it moves onto the shared index worker; see docs/LSP.md', 0)
+        arg = { 'STDIO=1', 'LSP=1' }
+        if options.project then arg[#arg + 1] = 'PROJECT=' .. options.project end
+        return dofile(scripts .. '/codeoutline/main.lua')
     end
     if command == 'serve' then
         assert(not not options.stdio ~= not not options.http, 'serve requires exactly one of --stdio or --http')

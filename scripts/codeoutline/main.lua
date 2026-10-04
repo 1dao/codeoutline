@@ -16,6 +16,10 @@ for _, argument in ipairs(arg or {}) do
     end
 end
 assert((options.STDIO == '1') ~= (options.HTTP == '1'), 'Specify exactly one of STDIO=1 or HTTP=1')
+local lsp_mode = options.LSP == '1'
+assert(not lsp_mode or options.STDIO == '1', 'LSP=1 requires STDIO=1')
+local lsp = lsp_mode and require('codeoutline.lsp')
+local lsp_reader = lsp_mode and lsp.reader()
 local managed = options.DAEMON == '1'
 assert(not managed or options.HTTP == '1', 'DAEMON=1 requires HTTP=1')
 local config = { roots = {}, project = options.PROJECT and assert(paths.canonical(options.PROJECT)),
@@ -74,7 +78,10 @@ local function submit(req, done)
 end
 local function cancel(id) if id and jobs[id] then shared:set('cancel:' .. id, true) end end
 local function send(response)
-    if response then io.stdout:write(xutils.json_pack(response), '\n'); io.stdout:flush() end
+    if response then
+        io.stdout:write(lsp_mode and lsp.frame(response) or (xutils.json_pack(response) .. '\n'))
+        io.stdout:flush()
+    end
 end
 local function listen()
     endpoint = http.start(config, submit, cancel, codec)
@@ -110,7 +117,10 @@ return {
         end
         if options.STDIO == '1' then
             assert(xutils.read_stdin, 'Rebuild runtime for nonblocking stdin support')
-            stdio = mcp.new(config, submit, cancel)
+            if lsp_mode then
+                assert(xutils.stdout_binary and xutils.stdout_binary(), 'Rebuild runtime for binary stdout support')
+                stdio = lsp.new(config, send, submit, cancel, stop)
+            else stdio = mcp.new(config, submit, cancel) end
         else
             -- Packages ship the codec as lib/xhttp_codec.lua; a source checkout
             -- reads it from the xnet2lua submodule.
@@ -135,7 +145,11 @@ return {
     __thread_handle = function(_, op, id, ok, result)
         if op == 'worker_ready' then
             worker_ready = true
-            for job_id, job in pairs(jobs) do
+            local waiting = {}
+            for job_id in pairs(jobs) do waiting[#waiting + 1] = job_id end
+            table.sort(waiting, function(a, b) return tonumber(a) < tonumber(b) end)
+            for _, job_id in ipairs(waiting) do
+                local job = jobs[job_id]
                 local posted, err = xthread.post(2, 'run', job_id, job.request)
                 if not posted then jobs[job_id], job_count = nil, job_count - 1; job.done(false, tostring(err)) end
             end
@@ -155,6 +169,7 @@ return {
         if stopping then return end
         if not worker_ready and xtimer.now_ms() - startup > 10000 then error('Index worker failed to start') end
         if installed_update and exit_on_update and job_count == 0
+            and not (lsp_mode and stdio and stdio.state ~= 'closed')
             and not (stdio and next(stdio.pending)) and not (endpoint and endpoint.busy()) then
             notice('exiting to start update ' .. tostring(installed_update))
             if managed then
@@ -171,11 +186,19 @@ return {
         if stdio then
             local data, err = xutils.read_stdin(65536)
             if not data then
-                local incomplete = err == 'eof' and input:find('%S') ~= nil
-                if incomplete then send(mcp.error(nil, -32700, 'EOF before message newline')) end
+                local incomplete = err == 'eof' and (lsp_mode and not lsp_reader:complete() or (not lsp_mode and input:find('%S') ~= nil))
+                if incomplete then send(mcp.error(nil, -32700, lsp_mode and 'EOF before complete LSP frame' or 'EOF before message newline')) end
                 if err == 'stdio requires redirected stdin' then err = 'run by an MCP client; see codeoutline --help' end
                 if err ~= 'eof' then io.stderr:write(tostring(err) .. '\n') end
                 stdio:close(); shared:set('shutdown', true); xthread.stop(err == 'eof' and not incomplete and 0 or 1); return
+            end
+            if lsp_mode then
+                local ok, why = pcall(lsp_reader.feed, lsp_reader, data, function(body) stdio:accept(body) end)
+                if not ok then
+                    send(mcp.error(nil, -32700, tostring(why))); stdio:close(); stop(1); return
+                end
+                if not stopping then stdio:poll() end
+                return
             end
             input = input .. data
             while true do

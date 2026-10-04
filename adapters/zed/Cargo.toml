@@ -1,0 +1,13 @@
+[package]
+name = "codeoutline-zed"
+version = "0.1.9"
+edition = "2021"
+publish = false
+license = "BSD-2-Clause"
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+zed_extension_api = "0.7.0"

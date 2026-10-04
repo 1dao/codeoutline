@@ -7,6 +7,7 @@ local control = require('codeoutline.control')
 local documents = require('codeoutline.documents')
 local lsp = require('codeoutline.lsp')
 local navigation = require('codeoutline.navigation')
+local pool = require('codeoutline.parse_pool')
 require('codeoutline.completion') -- registers lsp_completion
 service.configure({ watch = true })
 local shared = assert(xshared.dict('codeoutline_control'))
@@ -65,28 +66,62 @@ local function execute(req)
 end
 
 -- Execute serially until per-file commits allow safe short-job interleaving.
+-- Each job runs in a coroutine so a full refresh can wait for the parse
+-- threads; jobs arriving meanwhile queue behind it.
+local queue, active = {}, nil
+
+local function run(id, req)
+    -- Draft text applies even to a cancelled request: the session counts it as sent.
+    if req.session and req.open then
+        local synced, err = pcall(navigation.sync, req)
+        if not synced then io.stderr:write('[codeoutline lsp] ', tostring(err), '\n') end
+    end
+    control.callback = function()
+        if shared:get('shutdown') or shared:get('cancel:' .. id) then error(control.cancelled(), 0) end
+        if xtimer.now_ms() > req.deadline then error(control.deadline(), 0) end
+    end
+    local ok, result = pcall(function() control.check(); return execute(req) end)
+    control.callback = nil
+    if not ok then result = tostring(result) end
+    shared:delete('cancel:' .. id)
+    assert(xthread.post(1, 'worker_result', id, ok, result))
+end
+
+local function resume(...)
+    local ok, err = coroutine.resume(active, ...)
+    if not ok then io.stderr:write('[codeoutline] index job failed: ', tostring(err), '\n') end
+    if coroutine.status(active) == 'dead' then active = nil; pool.bind(nil) end
+end
+
+local function pump()
+    while not active and #queue > 0 do
+        local item = table.remove(queue, 1)
+        active = coroutine.create(run)
+        pool.bind(active)
+        resume(item[1], item[2])
+    end
+end
+
 return {
     __init = function()
         assert(xnet.init())
+        local threads = tonumber(os.getenv('CODEOUTLINE_INDEX_THREADS') or '') or pool.THREADS
+        if threads >= 1 then pool.start(scripts .. '/codeoutline/parse_worker.lua', math.floor(threads)) end
         assert(xthread.post(1, 'worker_ready'))
     end,
-    __update = function() service.sweep() end,
-    __thread_handle = function(_, op, id, req)
-        if op ~= 'run' then return end
-        -- Draft text applies even to a cancelled request: the session counts it as sent.
-        if req.session and req.open then
-            local synced, err = pcall(navigation.sync, req)
-            if not synced then io.stderr:write('[codeoutline lsp] ', tostring(err), '\n') end
+    -- A suspended job still holds its project: sweeping waits for it.
+    __update = function() if not active then service.sweep() end end,
+    __thread_handle = function(_, op, id, req, failure)
+        if op == 'run' then
+            queue[#queue + 1] = { id, req }
+            pump()
+        elseif op == 'parsed' then
+            -- (token, results, failure); stale tokens are dropped by the pool.
+            if active and pool.waiting() then resume(id, req, failure); pump() end
         end
-        control.callback = function()
-            if shared:get('shutdown') or shared:get('cancel:' .. id) then error(control.cancelled(), 0) end
-            if xtimer.now_ms() > req.deadline then error(control.deadline(), 0) end
-        end
-        local ok, result = pcall(function() control.check(); return execute(req) end)
-        control.callback = nil
-        if not ok then result = tostring(result) end
-        shared:delete('cancel:' .. id)
-        assert(xthread.post(1, 'worker_result', id, ok, result))
     end,
-    __uninit = function() xnet.uninit() end,
+    __uninit = function()
+        pool.stop()
+        xnet.uninit()
+    end,
 }

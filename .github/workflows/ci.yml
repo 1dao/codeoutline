@@ -97,6 +97,7 @@ jobs:
           /usr/bin/pgrep -q oahd || sudo softwareupdate --install-rosetta --agree-to-license
           arch -x86_64 ./bin/xnet tests/lua/codeoutline_spec.lua
           arch -x86_64 ./bin/xnet tests/lua/stability_spec.lua
+          arch -x86_64 ./bin/xnet tests/lua/parse_pool_spec.lua
       # A binary runs only on glibc >= the one it was built against, and the
       # hosted runners are newer than CentOS Stream 9 (2.34). Build on
       # manylinux_2_28 (AlmaLinux 8) so EL8/EL9, Debian 10+ and Ubuntu 20.04+ work.

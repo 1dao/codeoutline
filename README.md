@@ -142,6 +142,7 @@ Tests:
 ```powershell
 .\bin\xnet.exe tests/lua/codeoutline_spec.lua
 .\bin\xnet.exe tests/lua/stability_spec.lua
+.\bin\xnet.exe tests/lua/parse_pool_spec.lua
 npm ci
 npm test
 npm run test:package

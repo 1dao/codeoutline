@@ -18,6 +18,7 @@ local ci = require('codeoutline.parse')
 local paths = require('codeoutline.path')
 local control = require('codeoutline.control')
 local graph = require('codeoutline.graph')
+local pool = require('codeoutline.parse_pool')
 
 local M = {}
 local INDEX_PARSE = { ranges = false }
@@ -41,6 +42,12 @@ M.MAX_FILE_BYTES = 1500000
 -- few percent of level 6 at under half the time; inflating is cheap next to
 -- unpacking, and the checksum then covers the smaller compressed bytes.
 M.CACHE_COMPRESSION_LEVEL = 1
+-- Below this many files to read, a full pass parses in place: posting and
+-- unpacking results would cost more than it saves.
+M.PARALLEL_MIN_FILES = 32
+-- Bytes a file costs beyond its size (open, stat, record) when the parse pool
+-- balances threads by size.
+M.FILE_WEIGHT = 4096
 
 local Index = {}
 Index.__index = Index
@@ -425,10 +432,39 @@ local function new_stats(mode)
     return { parsed = 0, unchanged = 0, removed = 0, skipped = 0, failed = 0, mode = mode }
 end
 
--- Bring one listed file in line with the tree, given its stat fields (nil
--- when the runtime has no stat). Returns false when it no longer belongs in
--- the index: gone, too large, unreadable or unparsable.
-function Index:sync_file(rel, st, stats)
+-- Read one file and parse it unless its size and checksum match the known
+-- record. Touches no index state, so a parse thread can run it too. `checked`
+-- is taken before the read: content read after that second is current.
+function M.load_file(abs, rel, max_bytes, old_size, old_crc)
+    local checked = os.time()
+    local src = slurp(abs)
+    if not src or #src > max_bytes then return { status = 'skipped' } end
+    local crc = checksum(src)
+    if old_size == #src and old_crc == crc then
+        return { status = 'unchanged', checked = checked }
+    end
+    local ok, r = pcall(ci.parse, rel, src, INDEX_PARSE)
+    if not ok and control.is_interrupted(r) then error(r, 0) end
+    -- A parser exception must not permanently hide a GBK file.
+    -- Successful speculative parsing does not scan encoding here.
+    if not ok or not r then
+        if xutils.to_utf8 then
+            local decoded, encoding = xutils.to_utf8(src)
+            if decoded then
+                ok, r = pcall(ci.parse, rel, decoded, INDEX_PARSE)
+                if not ok and control.is_interrupted(r) then error(r, 0) end
+                if ok and r then r.encoding = encoding end
+            end
+        end
+    end
+    if not (ok and r) then return { status = 'failed' } end
+    r.size, r.crc, r.checked = #src, crc, checked
+    return { status = 'parsed', rec = r }
+end
+
+-- Settle one listed file from its stat fields alone (nil when the runtime
+-- has no stat): true or false as sync_file returns, nil when it must be read.
+function Index:check_stat(rel, st, stats)
     local rec = self.files[rel]
     if st and (st.exists == false or st.type ~= 'file') then
         return false
@@ -443,42 +479,45 @@ function Index:sync_file(rel, st, stats)
         stats.unchanged = stats.unchanged + 1
         return true
     end
-    local src = slurp(self:abs(rel))
-    if not src or #src > self.max_bytes then
+    return nil
+end
+
+-- Commit what load_file found. Returns sync_file's answer.
+function Index:apply_load(rel, st, res, stats)
+    if res.status == 'skipped' then
         stats.skipped = stats.skipped + 1
         return false
-    end
-    local crc = checksum(src)
-    if rec and rec.size == #src and rec.crc == crc then
+    elseif res.status == 'failed' then
+        stats.failed = stats.failed + 1
+        return false
+    elseif res.status == 'unchanged' then
+        local rec = self.files[rel]
         rec.mtime = st and st.mtime or rec.mtime
-        rec.checked = os.time()
+        rec.checked = res.checked
         stats.unchanged = stats.unchanged + 1
         return true
     end
-    local ok, r = pcall(ci.parse, rel, src, INDEX_PARSE)
-    if not ok and control.is_interrupted(r) then error(r, 0) end
-    control.check()
-    -- A parser exception must not permanently hide a GBK file.
-    -- Successful speculative parsing does not scan encoding here.
-    if not ok or not r then
-        if xutils.to_utf8 then
-            local decoded, encoding = xutils.to_utf8(src)
-            if decoded then
-                ok, r = pcall(ci.parse, rel, decoded, INDEX_PARSE)
-                if not ok and control.is_interrupted(r) then error(r, 0) end
-                if ok and r then r.encoding = encoding end
-            end
-        end
-    end
-    if not (ok and r) then
-        stats.failed = stats.failed + 1
-        return false
-    end
-    r.size, r.crc, r.mtime = #src, crc, st and st.mtime or nil
-    r.checked = os.time()
+    local r = res.rec
+    r.mtime = st and st.mtime or nil
     self:commit(rel, r)
     stats.parsed = stats.parsed + 1
     return true
+end
+
+function Index:read_file(rel, st, stats)
+    local rec = self.files[rel]
+    local res = M.load_file(self:abs(rel), rel, self.max_bytes, rec and rec.size, rec and rec.crc)
+    control.check()
+    return self:apply_load(rel, st, res, stats)
+end
+
+-- Bring one listed file in line with the tree, given its stat fields (nil
+-- when the runtime has no stat). Returns false when it no longer belongs in
+-- the index: gone, too large, unreadable or unparsable.
+function Index:sync_file(rel, st, stats)
+    local settled = self:check_stat(rel, st, stats)
+    if settled ~= nil then return settled end
+    return self:read_file(rel, st, stats)
 end
 
 -- Start change notification so later refreshes visit only what changed.
@@ -614,15 +653,37 @@ end
 
 -- Files commit one at a time. An interrupted pass leaves next_full unset
 -- (and a watcher not ready), so the next refresh is a full pass again.
+-- Files a stat cannot settle are read and parsed by the parse pool when the
+-- host started one and this pass may wait for it; otherwise serially.
 function Index:refresh_all()
     local stats = new_stats('full')
     self.next_full = nil
     local seen = {}
     local list, meta = self:list_files()
     if not meta and xutils and xutils.stat then meta = self:stat_listing(list) end
+    local reads = {}
     for _, rel in ipairs(list) do
         control.check()
-        if self:sync_file(rel, meta and meta[rel], stats) then seen[rel] = true end
+        local settled = self:check_stat(rel, meta and meta[rel], stats)
+        if settled == nil then reads[#reads + 1] = rel
+        elseif settled then seen[rel] = true end
+    end
+    if #reads >= M.PARALLEL_MIN_FILES and pool.ready() then
+        local jobs = {}
+        for i, rel in ipairs(reads) do
+            local rec, st = self.files[rel], meta and meta[rel]
+            jobs[i] = { rel = rel, abs = self:abs(rel), size = rec and rec.size, crc = rec and rec.crc,
+                weight = (st and st.size or rec and rec.size or 0) + M.FILE_WEIGHT }
+        end
+        pool.run(jobs, self.max_bytes, function(rel, res)
+            control.check()
+            if self:apply_load(rel, meta and meta[rel], res, stats) then seen[rel] = true end
+        end)
+    else
+        for _, rel in ipairs(reads) do
+            control.check()
+            if self:read_file(rel, meta and meta[rel], stats) then seen[rel] = true end
+        end
     end
     local gone = {}
     for rel in pairs(self.files) do

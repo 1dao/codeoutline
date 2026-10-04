@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { LanguageClient, LanguageClientOptions, ServerOptions } from 'vscode-languageclient/node';
 
-const featureNames = ['documentSymbol', 'workspaceSymbol', 'definition', 'hover', 'references', 'callHierarchy', 'completion'] as const;
+const featureNames = ['documentSymbol', 'workspaceSymbol', 'definition', 'hover', 'references', 'callHierarchy', 'completion', 'signatureHelp'] as const;
 let client: LanguageClient | undefined;
 let output: vscode.OutputChannel;
 let pending: Promise<void> = Promise.resolve();

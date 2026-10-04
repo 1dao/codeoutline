@@ -742,6 +742,74 @@ function handlers.lsp_definition(req)
     return result
 end
 
+-- Follow unmatched delimiters up to the cursor. Commas in nested calls,
+-- literals and indexing expressions do not advance the enclosing argument.
+function handlers.lsp_signature(req)
+    local doc = request_doc(req)
+    if not doc then return false end
+    local T, offset = doc:tokens(), doc:offset(req.position)
+    if not T then return false end
+    local stack = {}
+    local close = { [')'] = '(', [']'] = '[', ['}'] = '{' }
+    for i = 1, T.n do
+        if T.s[i] - 1 >= offset then break end
+        if i % 128 == 0 then control.check() end
+        if T.k[i] == 'op' then
+            local s = T:text(i)
+            if s == '(' or s == '[' or s == '{' then
+                stack[#stack + 1] = { token = i, delimiter = s, argument = 0 }
+            elseif close[s] then
+                if stack[#stack] and stack[#stack].delimiter == close[s] then table.remove(stack) end
+            elseif s == ',' and stack[#stack] then
+                stack[#stack].argument = stack[#stack].argument + 1
+            end
+        end
+    end
+    local call
+    for i = #stack, 1, -1 do
+        local entry = stack[i]
+        if entry.delimiter == '(' and T.k[entry.token - 1] == 'id' then call = entry; break end
+    end
+    if not call then return false end
+    local name_token = call.token - 1
+    local query = {}
+    for key, value in pairs(req) do query[key] = value end
+    query.position = doc:position(T.s[name_token] - 1)
+    local V, _, c, targets = at(query)
+    if not V or not c or c.decl then return false end
+    local signatures, seen = {}, {}
+    for _, id in ipairs(targets) do
+        local node = V.nodes[id]
+        local label = node.sig
+        if REFERENCE[node.kind] and label and not seen[label] then
+            local sig_doc = documents.new(uri_of(V, V.node_file[id]), label, 0)
+            local S = sig_doc:tokens()
+            local opening
+            for i = 1, S and S.n - 1 or 0 do
+                if S:text(i) == node.name and S:text(i + 1) == '(' then opening = i + 1; break end
+            end
+            local ending = opening and S.m[opening]
+            if ending then
+                local parameters, start, i = {}, S.e[opening] + 1, opening + 1
+                while i <= ending do
+                    local s = S:text(i)
+                    if i == ending or s == ',' then
+                        local parameter = label:sub(start, S.s[i] - 1):match('^%s*(.-)%s*$')
+                        if parameter ~= '' and parameter ~= 'void' then parameters[#parameters + 1] = { label = parameter } end
+                        start = S.e[i] + 1
+                    elseif S.m[i] and S.m[i] > i then i = S.m[i] end
+                    i = i + 1
+                end
+                signatures[#signatures + 1] = { label = label, parameters = parameters,
+                    activeParameter = #parameters > 0 and math.min(call.argument, #parameters - 1) or nil }
+                seen[label] = true
+            end
+        end
+    end
+    if #signatures == 0 then return false end
+    return { signatures = signatures, activeSignature = 0, activeParameter = signatures[1].activeParameter }
+end
+
 function handlers.lsp_hover(req)
     local V, doc, c, targets = at(req)
     if not V or #targets == 0 then return false end

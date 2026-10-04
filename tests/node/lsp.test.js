@@ -100,6 +100,7 @@ const initialize = async (client, folders) => {
         assert.equal(result.capabilities[name], true, name);
     }
     assert.deepEqual(result.capabilities.completionProvider.triggerCharacters, ['.', ':', '>']);
+    assert.deepEqual(result.capabilities.signatureHelpProvider.triggerCharacters, ['(', ',']);
     client.notify('initialized');
 };
 
@@ -184,7 +185,7 @@ test('LSP stdio completes members, locals and draft edits', { timeout: 30000 }, 
     assert.equal(labels(members), 'next,width');
     assert.equal(members.isIncomplete, false);
     const scope = await client.request('textDocument/completion', { textDocument: { uri }, position: { line: 3, character: 2 } });
-    assert.equal(labels(scope), 'area,local,s,scale');
+    assert.equal(labels(scope), 'Shape,area,local,s,scale');
     const typed = await client.request('textDocument/completion', { textDocument: { uri }, position: { line: 3, character: 9 },
         context: { triggerKind: 2, triggerCharacter: '>' } });
     assert.deepEqual(typed.items, []);
@@ -192,6 +193,105 @@ test('LSP stdio completes members, locals and draft edits', { timeout: 30000 }, 
         text: '#include "shape.h"\nint area(struct Shape *s, int scale) {\n  return s->next->;\n}\n' } });
     const chained = await client.request('textDocument/completion', { textDocument: { uri }, position: { line: 2, character: 18 } });
     assert.equal(labels(chained), 'next,width');
+});
+
+test('LSP completes xhash header functions at the end of xrecord_bind', { timeout: 30000 }, async (t) => {
+    const client = await start(t);
+    for (const name of ['xrecord.c', 'xrecord.h', 'xhash.h', 'xmacro.h']) {
+        await writeFile(join(client.project, name), await readFile(join(root, 'xnet2lua', name)));
+    }
+    await initialize(client, [client.project]);
+    await indexed(client);
+    const source = await readFile(join(client.project, 'xrecord.c'), 'utf8');
+    const functionStart = source.indexOf('xrecord_status xrecord_bind(');
+    const insert = source.indexOf('    return XRECORD_OK;', functionStart);
+    assert.ok(functionStart >= 0 && insert > functionStart);
+    const prefix = source.slice(0, insert) + '    xhash';
+    const uri = pathToFileURL(join(client.project, 'xrecord.c')).href;
+    client.notify('textDocument/didOpen', { textDocument: { uri, languageId: 'c', version: 1,
+        text: prefix + '\n' + source.slice(insert) } });
+    const lines = prefix.split('\n');
+    const result = await client.request('textDocument/completion', { textDocument: { uri },
+        position: { line: lines.length - 1, character: lines.at(-1).length } });
+    const labels = result.items.map(item => item.label);
+    for (const name of ['xhash_create', 'xhash_get_int', 'xhash_set_int', 'xhash_destroy']) {
+        assert.ok(labels.includes(name), `Missing header completion: ${name}`);
+    }
+    const call = prefix + '_get_int(';
+    client.notify('textDocument/didChange', { textDocument: { uri, version: 2 },
+        contentChanges: [{ text: call + '\n' + source.slice(insert) }] });
+    const signature = await client.request('textDocument/signatureHelp', { textDocument: { uri },
+        position: { line: lines.length - 1, character: lines.at(-1).length + '_get_int('.length } });
+    assert.match(signature.signatures[0].label, /xhash_get_int/);
+    assert.equal(signature.signatures[0].parameters.length, 2);
+});
+
+test('LSP C completion includes transitive headers without leaking unrelated files or members', { timeout: 30000 }, async (t) => {
+    const client = await start(t);
+    const unrelated = Array.from({ length: 550 }, (_, i) => `int noise_${i}(void);`).join('\n');
+    await writeFile(join(client.project, 'a.h'), unrelated + '\n#include "z.h"\n');
+    await writeFile(join(client.project, 'z.h'), 'int xhash_visible(int value);\nstruct Detail { int xhash_field; };\n');
+    await writeFile(join(client.project, 'z.c'), 'static int xhash_private(void) { return 0; }\n');
+    await writeFile(join(client.project, 'other.h'), 'int xhash_unrelated(void);\n');
+    await writeFile(join(client.project, 'main.c'), '#include "a.h"\nvoid run(void) { xhash\n}\n');
+    await initialize(client, [client.project]);
+    await indexed(client);
+    const uri = pathToFileURL(join(client.project, 'main.c')).href;
+    const result = await client.request('textDocument/completion', { textDocument: { uri },
+        position: { line: 1, character: 'void run(void) { xhash'.length } });
+    const names = result.items.map(item => item.label);
+    assert.ok(names.includes('xhash_visible'));
+    for (const name of ['xhash_field', 'xhash_private', 'xhash_unrelated']) assert.ok(!names.includes(name), name);
+    assert.equal(result.isIncomplete, true);
+    const header = pathToFileURL(join(client.project, 'z.h')).href;
+    client.notify('textDocument/didOpen', { textDocument: { uri: header, languageId: 'c', version: 1,
+        text: 'int xhash_updated(int value);\n' } });
+    const draft = await client.request('textDocument/completion', { textDocument: { uri },
+        position: { line: 1, character: 'void run(void) { xhash'.length } });
+    assert.ok(draft.items.some(item => item.label === 'xhash_updated'));
+    assert.ok(!draft.items.some(item => item.label === 'xhash_visible'));
+});
+
+test('LSP signature help reads C declarations through headers', { timeout: 30000 }, async (t) => {
+    const client = await start(t);
+    await writeFile(join(client.project, 'rpc.h'), 'int test_rpc_target(const char *name, void (*callback)(int, int));\n');
+    await writeFile(join(client.project, 'rpc.c'), '#include "rpc.h"\nvoid run(void) { test_rpc_target(');
+    await initialize(client, [client.project]);
+    await indexed(client);
+    const result = await client.request('textDocument/signatureHelp', {
+        textDocument: { uri: pathToFileURL(join(client.project, 'rpc.c')).href },
+        position: { line: 1, character: 33 } });
+    assert.equal(result.signatures[0].parameters.length, 2);
+    assert.match(result.signatures[0].parameters[1].label, /callback/);
+});
+
+test('LSP signature help follows incomplete calls and draft signatures', { timeout: 30000 }, async (t) => {
+    const client = await start(t);
+    const declaration = 'local function test_rpc_target(name, payload, callback) end\n';
+    await writeFile(join(client.project, 'rpc.lua'), declaration);
+    await initialize(client, [client.project]);
+    await indexed(client);
+    const uri = pathToFileURL(join(client.project, 'rpc.lua')).href;
+    let version = 0;
+    async function signature(call, header = declaration) {
+        const text = header + call;
+        if (++version === 1) client.notify('textDocument/didOpen', { textDocument: { uri, languageId: 'lua', version, text } });
+        else client.notify('textDocument/didChange', { textDocument: { uri, version }, contentChanges: [{ text }] });
+        return client.request('textDocument/signatureHelp', { textDocument: { uri },
+            position: { line: 1, character: call.length }, context: { triggerKind: 2, triggerCharacter: '(' } });
+    }
+    const first = await signature('test_rpc_target(');
+    assert.match(first.signatures[0].label, /test_rpc_target\(name, payload, callback\)/);
+    assert.deepEqual(first.signatures[0].parameters.map(p => p.label), ['name', 'payload', 'callback']);
+    assert.equal(first.activeParameter, 0);
+    assert.equal((await signature('test_rpc_target("a,b", {1, 2}, ')).activeParameter, 2);
+    assert.equal((await signature('test_rpc_target(inner(1, 2), ')).activeParameter, 1);
+    assert.equal(await signature('test_rpc_target()'), null);
+    assert.equal(await signature('unknown('), null);
+    const changed = await signature('test_rpc_target(', 'local function test_rpc_target(updated) end\n');
+    assert.deepEqual(changed.signatures[0].parameters, [{ label: 'updated' }]);
+    const empty = await signature('test_rpc_target(', 'local function test_rpc_target() end\n');
+    assert.deepEqual(empty.signatures[0].parameters, []);
 });
 
 test('LSP stdio handles drafts, UTF-16 ranges, cancellation and close restoration', { timeout: 30000 }, async (t) => {

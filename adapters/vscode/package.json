@@ -171,6 +171,9 @@
             },
             "completion": {
               "type": "boolean"
+            },
+            "signatureHelp": {
+              "type": "boolean"
             }
           },
           "description": "Override individual server capabilities. For custom definition rules alongside another server, enable definition here."

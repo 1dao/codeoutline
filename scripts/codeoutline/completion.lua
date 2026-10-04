@@ -1,7 +1,7 @@
 -- completion.lua — LSP completion inside the INDEX worker.
 --
--- No global names: without a member operator the items are the current
--- file's locals, parameters, definitions and imports, plus members of the
+-- Without a member operator the items are the current file's locals,
+-- parameters, definitions and imports, C/C++ included declarations, plus members of the
 -- enclosing class. After `.`, `->`, `::`, `?.` or Lua `:` the receiver chain
 -- is typed from `self`/`this`, declared types of locals, parameters, fields
 -- and return types (read from signatures), initializers (`new T`, `T(`,
@@ -858,10 +858,40 @@ function M.complete(req)
                 entries[#entries + 1] = { name = node.name, kind = node.kind, node = node, file = f }
             end
         end
+        if self.language == 'c' or self.language == 'cpp' then
+            -- Use actual includes (including transitive headers), not paired
+            -- implementation files, whose private symbols are not visible here.
+            local included = navigation.deps(V, f)
+            local files = {}
+            for g in pairs(included) do files[#files + 1] = g end
+            table.sort(files, function(a, b) return V.files[a].path < V.files[b].path end)
+            for _, g in ipairs(files) do
+                if self:expired() then break end
+                for _, node in ipairs(V.files[g].nodes) do
+                    if not node.parent and not node.qualified:find('[%.:]') then
+                        entries[#entries + 1] = { name = node.name, kind = node.kind, node = node, file = g }
+                    end
+                end
+            end
+        end
         if self.owner or self.fn then
             local ids = self:self_types()
             for _, entry in ipairs(self:members(ids)) do entries[#entries + 1] = entry end
         end
+    end
+    -- Preserve editor-side fuzzy filtering, but keep prefix matches ahead of
+    -- unrelated items when a large include tree exceeds the response limit.
+    local prefix = t and T.k[t] == 'id' and T.e[t] >= offset
+        and doc.source:sub(T.s[t], offset):lower() or ''
+    if prefix ~= '' and #entries > M.MAX_ITEMS then
+        local ordered = {}
+        for _, entry in ipairs(entries) do
+            if entry.name:sub(1, #prefix):lower() == prefix then ordered[#ordered + 1] = entry end
+        end
+        for _, entry in ipairs(entries) do
+            if entry.name:sub(1, #prefix):lower() ~= prefix then ordered[#ordered + 1] = entry end
+        end
+        entries = ordered
     end
     local items, seen = {}, {}
     for _, entry in ipairs(entries) do

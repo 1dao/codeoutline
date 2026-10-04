@@ -1010,6 +1010,19 @@ local function comp_session(extra)
 end
 
 spec.describe('LSP completion requests', function()
+    spec.it('advertises and dispatches signature help with an independent feature switch', function()
+        local session, output = comp_session()
+        local provider = output[1].result.capabilities.signatureHelpProvider
+        spec.equal(table.concat(provider.triggerCharacters, ''), '(,')
+        session:accept(xutils.json_pack({ jsonrpc = '2.0', id = 2, method = 'textDocument/signatureHelp', params = {
+            textDocument = { uri = docs.uri(comp_root .. '/p.c') }, position = { line = 3, character = 12 } } }))
+        spec.equal(output.request.method, 'lsp_signature')
+        local disabled, messages = comp_session({ features = { signatureHelp = false } })
+        spec.equal(messages[1].result.capabilities.signatureHelpProvider, nil)
+        disabled:accept(xutils.json_pack({ jsonrpc = '2.0', id = 2, method = 'textDocument/signatureHelp', params = {
+            textDocument = { uri = docs.uri(comp_root .. '/p.c') }, position = { line = 3, character = 12 } } }))
+        spec.equal(messages[#messages].error.code, -32601)
+    end)
     spec.it('advertises member trigger characters and passes trigger context to the worker', function()
         local session, output = comp_session()
         local provider = output[1].result.capabilities.completionProvider

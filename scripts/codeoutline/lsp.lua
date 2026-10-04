@@ -81,12 +81,12 @@ end
 
 -- initializationOptions.features may disable any of these, e.g. in assistant mode
 -- next to another language server; disabled features are not advertised.
-M.FEATURES = { 'documentSymbol', 'workspaceSymbol', 'definition', 'hover', 'references', 'callHierarchy', 'completion' }
+M.FEATURES = { 'documentSymbol', 'workspaceSymbol', 'definition', 'hover', 'references', 'callHierarchy', 'completion', 'signatureHelp' }
 local feature_of = { ['textDocument/documentSymbol'] = 'documentSymbol', ['workspace/symbol'] = 'workspaceSymbol',
     ['textDocument/definition'] = 'definition', ['textDocument/hover'] = 'hover',
     ['textDocument/references'] = 'references', ['textDocument/prepareCallHierarchy'] = 'callHierarchy',
     ['callHierarchy/incomingCalls'] = 'callHierarchy', ['callHierarchy/outgoingCalls'] = 'callHierarchy',
-    ['textDocument/completion'] = 'completion' }
+    ['textDocument/completion'] = 'completion', ['textDocument/signatureHelp'] = 'signatureHelp' }
 local sessions = 0
 
 function M.new(config, emit, submit, cancel, stop)
@@ -241,6 +241,7 @@ function M.new(config, emit, submit, cancel, stop)
             definitionProvider = f.definition or nil, hoverProvider = f.hover or nil,
             referencesProvider = f.references or nil, callHierarchyProvider = f.callHierarchy or nil,
             completionProvider = f.completion and { triggerCharacters = { '.', ':', '>' }, resolveProvider = false } or nil,
+            signatureHelpProvider = f.signatureHelp and { triggerCharacters = { '(', ',' }, retriggerCharacters = { ')' } } or nil,
             workspace = { workspaceFolders = { supported = true, changeNotifications = true } } },
             serverInfo = { name = 'codeoutline', version = require('codeoutline.version') } })
     end
@@ -411,6 +412,14 @@ function M.new(config, emit, submit, cancel, stop)
     handlers['textDocument/hover'] = function(id, params)
         at(id, params, 'lsp_hover', nil, function(value) return value or nil end)
     end
+    handlers['textDocument/signatureHelp'] = function(id, params)
+        at(id, params, 'lsp_signature', nil, function(value)
+            if not value then return nil end
+            value.signatures = array(value.signatures)
+            for _, signature in ipairs(value.signatures) do signature.parameters = array(signature.parameters) end
+            return value
+        end)
+    end
     handlers['textDocument/references'] = function(id, params)
         local context = object(params.context) and params.context or {}
         at(id, params, 'lsp_references', array(), list, { includeDeclaration = context.includeDeclaration == true })
@@ -443,7 +452,7 @@ function M.new(config, emit, submit, cancel, stop)
     end
     handlers['callHierarchy/incomingCalls'] = hierarchy('lsp_incoming')
     handlers['callHierarchy/outgoingCalls'] = hierarchy('lsp_outgoing')
-    local navigation = { ['textDocument/definition'] = true, ['textDocument/hover'] = true,
+    local navigation = { ['textDocument/definition'] = true, ['textDocument/hover'] = true, ['textDocument/signatureHelp'] = true,
         ['textDocument/references'] = true, ['textDocument/prepareCallHierarchy'] = true,
         ['callHierarchy/incomingCalls'] = true, ['callHierarchy/outgoingCalls'] = true }
     local function dispatch(msg)

@@ -88,9 +88,12 @@ codeoutline doctor [--project PATH]
 
 `status`, `rebuild`, and `doctor` print JSON; a failed diagnostic exits nonzero. One-shot commands default to the current directory as the project.
 
-The `xlsp` branch also has an independent stdio LSP development preview with file
-and workspace symbols; see [LSP.md](docs/LSP.md). It is not part of the published
-0.1.9 release or the shared HTTP service yet.
+The source checkout also has a stdio LSP development preview with symbols,
+definition, hover, references, call hierarchy and completion; see
+[LSP.md](docs/LSP.md). Thin clients are available for
+[VS Code/Cursor](adapters/vscode/README.md) and [Zed](adapters/zed/README.md).
+The LSP command is not part of the published 0.1.9 release or the shared HTTP
+service yet; configure a built source checkout for these previews.
 
 The runtime logs only warnings and errors, to stderr, and writes no log files, so starting it in a project leaves nothing behind. For troubleshooting, set `CODEOUTLINE_LOG_LEVEL` (`DEBUG`, `INFO`, `WARN`, `ERROR`, ...) and `CODEOUTLINE_LOG_DIR` to write log files to that directory.
 

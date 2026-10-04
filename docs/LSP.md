@@ -1,8 +1,12 @@
 # LSP Development Preview
 
-The `xlsp` branch provides an independent Lua stdio language server. This is an
-intermediate implementation, not the shared MCP/LSP backend or a published editor
-extension. Released CodeOutline 0.1.9 does not contain this command.
+The source checkout provides a Lua stdio language server. Released CodeOutline
+0.1.9 does not contain this command; editor clients currently launch the built
+source checkout.
+
+Development clients are available for [VS Code/Cursor](../adapters/vscode/README.md)
+and [Zed](../adapters/zed/README.md). The VS Code/Cursor client uses one common
+VSIX and supports capability selection, server configuration, restart and logs.
 
 LSP now uses `main.lua` and the same INDEX worker submission/cancellation path
 as MCP. The stdio command is available again. A process still selects either

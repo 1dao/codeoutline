@@ -1,0 +1,199 @@
+{
+  "name": "codeoutline",
+  "displayName": "CodeOutline",
+  "description": "Index-backed code navigation with the Lua CodeOutline language server.",
+  "version": "0.1.9",
+  "publisher": "1dao",
+  "codeoutlineInstallationDefaults": {
+    "platform": "win32",
+    "serverPath": "C:/source/ops/codeoutline/bin/xnet.exe",
+    "serverArguments": [
+      "C:/source/ops/codeoutline/scripts/codeoutline/command.lua",
+      "LOG_STDERR=1", "LOG_FILE=0", "lsp", "--stdio"
+    ],
+    "mode": "navigation"
+  },
+  "license": "BSD-2-Clause",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/1dao/codeoutline.git"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "extensionKind": [
+    "workspace"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false
+    }
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "build": "npm run check && esbuild src/extension.ts --bundle --platform=node --format=cjs --external:vscode --outfile=out/extension.js",
+    "vscode:prepublish": "npm run build",
+    "package": "vsce package --out codeoutline.vsix",
+    "build:test": "esbuild test/smoke.ts --bundle --platform=node --format=cjs --external:vscode --outfile=out/smoke.js",
+    "test:editor": "npm run build:test && node test/run.mjs"
+  },
+  "dependencies": {
+    "vscode-languageclient": "9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "1.85.0",
+    "@vscode/test-electron": "^2.5.2",
+    "@vscode/vsce": "^4.0.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.9.0"
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "codeoutline.restart",
+        "title": "CodeOutline: Restart Language Server"
+      },
+      {
+        "command": "codeoutline.showLog",
+        "title": "CodeOutline: Show Language Server Log"
+      }
+    ],
+    "configuration": {
+      "title": "CodeOutline",
+      "properties": {
+        "codeoutline.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable the CodeOutline language client."
+        },
+        "codeoutline.serverPath": {
+          "type": "string",
+          "default": "codeoutline",
+          "scope": "machine-overridable",
+          "description": "Server executable or command on PATH. For a source checkout, use an absolute path to bin/xnet.exe (bin/xnet on Unix)."
+        },
+        "codeoutline.serverArguments": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "lsp",
+            "--stdio"
+          ],
+          "scope": "machine-overridable",
+          "description": "Arguments passed directly to the executable, without a shell."
+        },
+        "codeoutline.serverEnvironment": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "scope": "machine-overridable",
+          "description": "Additional environment variables for the server."
+        },
+        "codeoutline.languages": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "c",
+              "cpp",
+              "csharp",
+              "go",
+              "java",
+              "javascript",
+              "javascriptreact",
+              "lua",
+              "python",
+              "rust",
+              "typescript",
+              "typescriptreact"
+            ]
+          },
+          "default": [
+            "c",
+            "cpp",
+            "csharp",
+            "go",
+            "java",
+            "javascript",
+            "javascriptreact",
+            "lua",
+            "python",
+            "rust",
+            "typescript",
+            "typescriptreact"
+          ],
+          "description": "Language IDs served by CodeOutline."
+        },
+        "codeoutline.mode": {
+          "type": "string",
+          "enum": [
+            "auxiliary",
+            "navigation"
+          ],
+          "default": "auxiliary",
+          "description": "Auxiliary enables workspace symbols only alongside existing language servers. Navigation enables all supported capabilities. Override individual capabilities with features."
+        },
+        "codeoutline.features": {
+          "type": "object",
+          "additionalProperties": false,
+          "default": {},
+          "properties": {
+            "documentSymbol": {
+              "type": "boolean"
+            },
+            "workspaceSymbol": {
+              "type": "boolean"
+            },
+            "definition": {
+              "type": "boolean"
+            },
+            "hover": {
+              "type": "boolean"
+            },
+            "references": {
+              "type": "boolean"
+            },
+            "callHierarchy": {
+              "type": "boolean"
+            },
+            "completion": {
+              "type": "boolean"
+            }
+          },
+          "description": "Override individual server capabilities. For custom definition rules alongside another server, enable definition here."
+        },
+        "codeoutline.includePaths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Additional absolute C/C++ header directories."
+        },
+        "codeoutline.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Trace language server protocol traffic."
+        }
+      }
+    }
+  }
+}

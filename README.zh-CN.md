@@ -88,7 +88,7 @@ codeoutline doctor [--project PATH]
 
 `status`、`rebuild`、`doctor` 输出 JSON；诊断失败返回非零退出码。一次性命令的项目默认为当前目录。
 
-`xlsp` 分支已提供独立 stdio LSP 开发预览，支持文件符号和项目符号，详见 [LSP.md](docs/LSP.md)。它尚未包含在已发布的 0.1.9 中，也尚未接入共享 HTTP 后台。
+源码已提供 stdio LSP 开发预览，支持符号、定义跳转、悬停、引用、调用层级和补全，详见 [LSP.md](docs/LSP.md)。已有 [VS Code/Cursor](adapters/vscode/README.md) 共用 VSIX 和 [Zed](adapters/zed/README.md) 客户端。LSP 命令尚未包含在已发布的 0.1.9 中，也尚未接入共享 HTTP 后台；预览客户端需要配置已构建的源码路径。
 
 运行时只把警告和错误输出到 stderr，不写日志文件，在项目中启动不会留下任何文件。排查问题时可设置 `CODEOUTLINE_LOG_LEVEL`（`DEBUG`、`INFO`、`WARN`、`ERROR` 等）调整级别，设置 `CODEOUTLINE_LOG_DIR` 将日志文件写到该目录。
 

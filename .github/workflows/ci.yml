@@ -9,6 +9,33 @@ permissions:
   contents: read
 
 jobs:
+  vscode-client:
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: adapters/vscode
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: adapters/vscode/package-lock.json
+      - run: npm ci
+      - run: npm run check
+      - run: npm run package
+      - name: Build Lua runtime for editor smoke test
+        working-directory: .
+        run: sh tools/build-runtime.sh
+      - name: Run packaged extension in VS Code
+        run: xvfb-run -a npm run test:editor
+      - uses: actions/upload-artifact@v4
+        with:
+          name: codeoutline-vscode
+          path: adapters/vscode/codeoutline.vsix
+          if-no-files-found: error
   validate:
     strategy:
       fail-fast: false

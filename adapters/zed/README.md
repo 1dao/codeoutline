@@ -42,6 +42,10 @@ To keep another server for definitions and hover, disable those features here:
 Features: `documentSymbol`, `workspaceSymbol`, `definition`, `hover`, `references`,
 `callHierarchy`, `completion`.
 
+`#include <...>` headers outside the project are found through the compiler or
+Windows Kits/MSVC; add other directories with
+`"initialization_options": { "includePaths": ["C:/sdk/include"] }`.
+
 ## Development
 
 Install Rust through rustup, then in Zed run `zed: install dev extension` and select

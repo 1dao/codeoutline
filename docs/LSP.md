@@ -108,6 +108,15 @@ overlay never writes to the resident tables.
   never across languages; ties return several targets. Recursive calls resolve
   to their enclosing function. From a C/C++ prototype, definition goes to the
   bodies.
+- On an import line (`require`/`dofile` strings or names, `#include`, JS/TS module
+  strings, Python/Go/Java/Rust imports), definition goes to the loaded file,
+  resolved by the same dependency rules as explore. C/C++ headers not in the
+  project are searched in `initializationOptions.includePaths`, then INCLUDE/CPATH
+  variables, then the compiler's list (`cc -E -v`) or, on Windows, the newest
+  Windows Kits and the MSVC found by vswhere (probed once). Symbols inside system
+  headers are not indexed. Relative `#include "../x.h"` resolves against the
+  including file. When definitions are too far apart to choose between, a visible
+  prototype is the target.
 - Hover shows the target's signature, kind, qualified name and location.
 - References support functions, methods, constructors, destructors and macros;
   types, fields and variables get RequestFailed rather than incomplete results.

@@ -224,6 +224,15 @@ function M.new(config, emit, submit, cancel, stop)
         local options = object(params.initializationOptions) and params.initializationOptions.features
         assert(options == nil or options == false or object(options), 'initializationOptions.features must be an object')
         for _, name in ipairs(M.FEATURES) do self.features[name] = not options or options[name] ~= false end
+        -- Extra C/C++ include directories searched before the detected system ones.
+        local includes = object(params.initializationOptions) and params.initializationOptions.includePaths or nil
+        assert(includes == nil or (type(includes) == 'table' and #includes <= M.MAX_ROOTS * 4),
+            'initializationOptions.includePaths must be an array')
+        self.include_paths = {}
+        for _, dir in ipairs(includes or {}) do
+            assert(type(dir) == 'string' and dir ~= '' and not dir:find('%z'), 'include paths must be strings')
+            self.include_paths[#self.include_paths + 1] = dir
+        end
         self.state = 'initialized'
         local f = self.features
         reply(id, { capabilities = { positionEncoding = 'utf-16',
@@ -365,6 +374,7 @@ function M.new(config, emit, submit, cancel, stop)
             end
         end
         req.session, req.open, req.changed = self.session, open, changed
+        req.includePaths = self.include_paths
         local submitted = request(id, req, function(value)
             if value.error then error_response(id, -32803, value.error); return end
             if value.incomplete then

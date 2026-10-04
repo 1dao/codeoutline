@@ -490,7 +490,65 @@ spec.describe('LSP navigation', function()
         spec.equal(range_text('util.c', result[1].range), 'helper')
         local from_decl = nav({ method = 'lsp_definition', uri = nav_uri('util.h'), position = { line = 0, character = 5 } })
         spec.equal(from_decl[1].uri, nav_uri('util.c'))
-        spec.equal(nav({ method = 'lsp_definition', uri = nav_uri('main.c'), position = { line = 1, character = 1 } }), false)
+        spec.equal(#nav({ method = 'lsp_definition', uri = nav_uri('main.c'), position = { line = 1, character = 1 } }), 0)
+    end)
+    spec.it('goes from import lines to the files they load', function()
+        for _, dir in ipairs({ 'mods/core', 'pyp', 'web', 'csrc', 'sysinc/sys' }) do assert(xutils.mkdir_p(nav_root .. '/' .. dir)) end
+        nav_write('mods/core/util.lua', 'local M = {}\nreturn M\n')
+        nav_write('mods/main.lua', 'local util = require("mods.core.util")\nlocal again = dofile("mods/core/util.lua")\n'
+            .. 'local function dofile() end\n')
+        nav_write('pyp/__init__.py', '')
+        nav_write('pyp/store.py', 'class Store:\n    pass\n')
+        nav_write('pyp/api.py', 'from . import store\n')
+        nav_write('web/lib.ts', 'export function lib() {}\n')
+        nav_write('web/app.ts', "import { lib } from './lib';\n")
+        nav_write('csrc/local.h', 'int local_fn(void);\n')
+        nav_write('csrc/main.c', '#include "local.h"\n#include <sys/codeoutline_test.h>\n#include <codeoutline_absent.h>\n')
+        local system = nav_root .. '/sysinc'
+        nav_write('sysinc/sys/codeoutline_test.h', '/* system header */\n')
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local ok, err = pcall(function()
+            local function jump(rel, line, character, extra)
+                local req = { method = 'lsp_definition', uri = nav_uri(rel), position = { line = line, character = character } }
+                for k, v in pairs(extra or {}) do req[k] = v end
+                local result = nav(req)
+                local out = {}
+                for _, loc in ipairs(result) do out[#out + 1] = loc.uri .. '#' .. loc.range.start.line end
+                return table.concat(out, ' ')
+            end
+            local util = nav_uri('mods/core/util.lua') .. '#0'
+            spec.equal(jump('mods/main.lua', 0, 28), util, 'require string')
+            spec.equal(jump('mods/main.lua', 0, 15), util, 'require call name')
+            spec.equal(jump('mods/main.lua', 1, 15), util, 'dofile beats a same-named project function')
+            spec.equal(jump('mods/main.lua', 1, 25), util, 'dofile path')
+            spec.equal(jump('pyp/api.py', 0, 16), nav_uri('pyp/store.py') .. '#0', 'python relative module')
+            spec.equal(jump('web/app.ts', 0, 24), nav_uri('web/lib.ts') .. '#0', 'typescript module string')
+            spec.equal(jump('csrc/main.c', 0, 12), nav_uri('csrc/local.h') .. '#0', 'quoted include')
+            spec.equal(jump('csrc/main.c', 1, 12, { includePaths = { system } }),
+                docs.uri(system .. '/sys/codeoutline_test.h') .. '#0', 'system include from includePaths')
+            spec.equal(jump('csrc/main.c', 2, 12, { includePaths = { system } }), '', 'missing system header')
+        end)
+        assert(xutils.rmtree(nav_root .. '/mods')); assert(xutils.rmtree(nav_root .. '/pyp'))
+        assert(xutils.rmtree(nav_root .. '/web')); assert(xutils.rmtree(nav_root .. '/csrc')); assert(xutils.rmtree(system))
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        if not ok then error(err, 0) end
+    end)
+    spec.it('validates includePaths and passes them with navigation requests', function()
+        local jobs = {}
+        local session = lsp.new({}, function() end, function(req, done)
+            jobs[#jobs + 1] = req; return 'job' end, function() end, function() end)
+        session:accept(xutils.json_pack({ jsonrpc = '2.0', id = 1, method = 'initialize', params = { rootUri = docs.uri(nav_root),
+            capabilities = {}, initializationOptions = { includePaths = { 'C:/inc', '/usr/include' } } } }))
+        session:accept(xutils.json_pack({ jsonrpc = '2.0', method = 'initialized', params = {} }))
+        session.ready[nav_root] = true
+        session:accept(xutils.json_pack({ jsonrpc = '2.0', id = 2, method = 'textDocument/definition', params = {
+            textDocument = { uri = nav_uri('main.c') }, position = { line = 0, character = 0 } } }))
+        spec.equal(table.concat(jobs[#jobs].includePaths, ','), 'C:/inc,/usr/include')
+        local replies = {}
+        local bad = lsp.new({}, function(msg) replies[#replies + 1] = msg end, fake_submit, function() end, function() end)
+        bad:accept(xutils.json_pack({ jsonrpc = '2.0', id = 1, method = 'initialize', params = { capabilities = {},
+            initializationOptions = { includePaths = { 1 } } } }))
+        spec.equal(replies[1].error.code, -32602)
     end)
     spec.it('falls back to a visible prototype when definitions are ambiguous', function()
         for _, dir in ipairs({ 'api', 'impl_a', 'impl_b', 'user' }) do assert(xutils.mkdir_p(nav_root .. '/' .. dir)) end

@@ -427,22 +427,12 @@ end
 -- Files an import resolves to, through the graph's dependency rules.
 local import_files
 function import_files(V, f, alias)
-    local rec = V.files[f]
     if alias.member and alias.path:sub(1, 1) ~= '.' then
         -- `from pkg import mod`: try the submodule first.
         local files = import_files(V, f, { kind = alias.kind, path = alias.path .. '.' .. alias.member })
         if #files > 0 then return files end
     end
-    local fake = { path = rec.language == 'go' and '\0/import.go' or rec.path, language = rec.language,
-        nodes = {}, imports = { { path = alias.path, kind = alias.kind, names = alias.names } } }
-    local key = -1
-    rawset(V.files, key, fake)
-    local ok, direct = pcall(graph.dependencies, V, key)
-    rawset(V.files, key, nil)
-    if not ok then return {} end
-    local files = {}
-    for g in pairs(direct) do files[#files + 1] = g end
-    table.sort(files, function(x, y) return V.files[x].path < V.files[y].path end)
+    local files = navigation.import_files(V, f, { path = alias.path, kind = alias.kind, names = alias.names })
     if alias.member then
         -- `from pkg import name`: a module file named like the import, else a symbol.
         local modules = {}

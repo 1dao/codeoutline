@@ -398,25 +398,142 @@ local function scan(V, targets, name)
     return hits, false
 end
 
+-- Files one import record resolves to, through the graph's dependency
+-- rules: a temporary record holding only that import.
+function M.import_files(V, f, imp)
+    local rec = V.files[f]
+    local fake = { path = rec.language == 'go' and '\0/import.go' or rec.path, language = rec.language,
+        nodes = {}, imports = { imp } }
+    rawset(V.files, -1, fake)
+    local ok, direct = pcall(graph.dependencies, V, -1)
+    rawset(V.files, -1, nil)
+    local files = {}
+    if ok then for g in pairs(direct) do files[#files + 1] = g end end
+    table.sort(files, function(x, y) return V.files[x].path < V.files[y].path end)
+    return files
+end
+
+-- System include directories: client includePaths, INCLUDE/CPATH-style
+-- variables, then the compiler's own list (cc -E -v) or, on Windows, the
+-- newest Windows Kits and the MSVC found by vswhere. Probed once.
+local probed_includes
+local function existing(dir)
+    local st = dir and xutils.stat(dir)
+    return st and st.type == 'directory'
+end
+local function newest(dir)
+    local entries = existing(dir) and xutils.list_dir(dir, nil, true) or {}
+    local best
+    for _, e in ipairs(entries) do
+        local name = e.name or e
+        if name:match('^%d') and (not best or name > best) then best = name end
+    end
+    return best and (dir .. '/' .. best)
+end
+local function probe_includes()
+    if probed_includes then return probed_includes end
+    local dirs = {}
+    local function add(dir)
+        dir = dir and paths.normalize(dir)
+        if existing(dir) then dirs[#dirs + 1] = dir end
+    end
+    local windows = paths.windows
+    for _, name in ipairs({ 'INCLUDE', 'CPATH', 'C_INCLUDE_PATH', 'CPLUS_INCLUDE_PATH' }) do
+        for dir in (os.getenv(name) or ''):gmatch(windows and '[^;]+' or '[^:]+') do add(dir) end
+    end
+    if windows then
+        local kits = newest('C:/Program Files (x86)/Windows Kits/10/Include')
+        if kits then
+            for _, sub in ipairs({ 'ucrt', 'um', 'shared', 'winrt' }) do add(kits .. '/' .. sub) end
+        end
+        local vswhere = 'C:/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe'
+        if xutils.stat(vswhere) and io.popen then
+            -- cmd strips one pair of quotes around a command with `(x86)` in it.
+            local command = '""' .. vswhere:gsub('/', '\\') .. '" -latest -products * -property installationPath 2>nul"'
+            local ok, pipe = pcall(io.popen, command)
+            local install = ok and pipe and pipe:read('*l')
+            if ok and pipe then pipe:close() end
+            local msvc = install and newest(paths.normalize(install) .. '/VC/Tools/MSVC')
+            if msvc then add(msvc .. '/include') end
+        end
+    elseif io.popen then
+        local ok, pipe = pcall(io.popen, 'cc -xc++ -E -v - </dev/null 2>&1')
+        local output = ok and pipe and pipe:read('*a') or ''
+        if ok and pipe then pipe:close() end
+        local list = output:match('#include <%.%.%.> search starts here:(.-)End of search list') or ''
+        for line in list:gmatch('[^\n]+') do add((line:gsub('^%s+', ''):gsub('%s+%(framework directory%)$', ''))) end
+        add('/usr/local/include'); add('/usr/include')
+    end
+    local seen, unique = {}, {}
+    for _, dir in ipairs(dirs) do
+        local key = paths.key(dir)
+        if not seen[key] then seen[key] = true; unique[#unique + 1] = dir end
+    end
+    probed_includes = unique
+    return unique
+end
+
+local C_FAMILY = { c = true, cpp = true }
+
+-- Locations of the files an import on this line names: project files by the
+-- dependency rules, and C/C++ headers found in the include directories.
+local function import_targets(V, f, line, include_paths)
+    local rec, result, seen = V.files[f], {}, {}
+    local function add(uri)
+        if not seen[uri] then seen[uri] = true; result[#result + 1] = { uri = uri, range = line_range(1) } end
+    end
+    for _, imp in ipairs(rec.imports or {}) do
+        if imp.line == line then
+            local files = imp.system and {} or M.import_files(V, f, imp)
+            for _, g in ipairs(files) do add(uri_of(V, g)) end
+            if #files == 0 and C_FAMILY[rec.language] then
+                local dirs = {}
+                if not imp.system then dirs[1] = (V.idx:abs(rec.path):match('^(.*)/[^/]*$')) end
+                for _, dir in ipairs(include_paths or {}) do dirs[#dirs + 1] = paths.normalize(dir) end
+                for _, dir in ipairs(probe_includes()) do dirs[#dirs + 1] = dir end
+                for _, dir in ipairs(dirs) do
+                    local file = dir .. '/' .. imp.path:gsub('\\', '/')
+                    local st = xutils.stat(file)
+                    if st and st.type == 'file' then add(documents.uri(file)); break end
+                end
+            end
+        end
+    end
+    return result
+end
+
 local function at(req)
     local doc = request_doc(req)
     if not doc then return nil end
     local V = view(req.session, req.root)
     local f = V.add(doc)
     if not f then return nil end
-    local c = cursor(doc, doc:offset(req.position))
-    if not c then return nil end
-    local targets
-    if c.decl then targets = { V.id_of[f][c.decl] }
-    else targets = resolve_site(V, f, c.from, c.name, c.kind, c.recv) end
-    return V, doc, c, targets
+    local offset = doc:offset(req.position)
+    local c = cursor(doc, offset)
+    local targets = {}
+    if c and c.decl then targets = { V.id_of[f][c.decl] }
+    elseif c then targets = resolve_site(V, f, c.from, c.name, c.kind, c.recv) end
+    return V, doc, c, targets, f, offset
 end
 
 local handlers = {}
 
 function handlers.lsp_definition(req)
-    local V, _, c, targets = at(req)
+    local V, doc, c, targets, f, offset = at(req)
     if not V then return false end
+    local line = doc:position(offset).line + 1
+    local importer = false
+    if c and not c.decl then
+        -- `require`/`dofile` themselves name the file they load, not a same-named project function.
+        for _, imp in ipairs(V.files[f].imports or {}) do
+            if imp.line == line and imp.kind == c.name then importer = true end
+        end
+    end
+    if #targets == 0 or importer then
+        -- An import line: `require "a.b"`, `dofile("x.lua")`, `#include <x.h>`, `from . import m`.
+        local files = import_targets(V, f, line, req.includePaths)
+        if #files > 0 or #targets == 0 then return files end
+    end
     if c.decl and is_decl(V.nodes[targets[1]]) then
         -- From a declaration, go to its definitions.
         local defs = {}

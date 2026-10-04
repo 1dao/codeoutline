@@ -81,11 +81,12 @@ end
 
 -- initializationOptions.features may disable any of these, e.g. in assistant mode
 -- next to another language server; disabled features are not advertised.
-M.FEATURES = { 'documentSymbol', 'workspaceSymbol', 'definition', 'hover', 'references', 'callHierarchy' }
+M.FEATURES = { 'documentSymbol', 'workspaceSymbol', 'definition', 'hover', 'references', 'callHierarchy', 'completion' }
 local feature_of = { ['textDocument/documentSymbol'] = 'documentSymbol', ['workspace/symbol'] = 'workspaceSymbol',
     ['textDocument/definition'] = 'definition', ['textDocument/hover'] = 'hover',
     ['textDocument/references'] = 'references', ['textDocument/prepareCallHierarchy'] = 'callHierarchy',
-    ['callHierarchy/incomingCalls'] = 'callHierarchy', ['callHierarchy/outgoingCalls'] = 'callHierarchy' }
+    ['callHierarchy/incomingCalls'] = 'callHierarchy', ['callHierarchy/outgoingCalls'] = 'callHierarchy',
+    ['textDocument/completion'] = 'completion' }
 local sessions = 0
 
 function M.new(config, emit, submit, cancel, stop)
@@ -230,6 +231,7 @@ function M.new(config, emit, submit, cancel, stop)
             documentSymbolProvider = f.documentSymbol or nil, workspaceSymbolProvider = f.workspaceSymbol or nil,
             definitionProvider = f.definition or nil, hoverProvider = f.hover or nil,
             referencesProvider = f.references or nil, callHierarchyProvider = f.callHierarchy or nil,
+            completionProvider = f.completion and { triggerCharacters = { '.', ':', '>' }, resolveProvider = false } or nil,
             workspace = { workspaceFolders = { supported = true, changeNotifications = true } } },
             serverInfo = { name = 'codeoutline', version = require('codeoutline.version') } })
     end
@@ -402,6 +404,15 @@ function M.new(config, emit, submit, cancel, stop)
     handlers['textDocument/references'] = function(id, params)
         local context = object(params.context) and params.context or {}
         at(id, params, 'lsp_references', array(), list, { includeDeclaration = context.includeDeclaration == true })
+    end
+    handlers['textDocument/completion'] = function(id, params)
+        local context = object(params.context) and params.context or {}
+        -- Trigger characters complete only after member operators (`a.`, `a->`, `A::`).
+        local trigger = context.triggerKind == 2 and type(context.triggerCharacter) == 'string' or nil
+        at(id, params, 'lsp_completion', { isIncomplete = false, items = array() }, function(value)
+            value = value or {}
+            return { isIncomplete = value.isIncomplete == true, items = array(value.items or nil) }
+        end, { trigger = trigger })
     end
     handlers['textDocument/prepareCallHierarchy'] = function(id, params)
         at(id, params, 'lsp_prepare_calls', nil, function(value) return value and array(value) or nil end)

@@ -99,6 +99,7 @@ const initialize = async (client, folders) => {
     for (const name of ['definitionProvider', 'hoverProvider', 'referencesProvider', 'callHierarchyProvider']) {
         assert.equal(result.capabilities[name], true, name);
     }
+    assert.deepEqual(result.capabilities.completionProvider.triggerCharacters, ['.', ':', '>']);
     client.notify('initialized');
 };
 
@@ -144,6 +145,29 @@ test('LSP stdio navigates definitions, hover, references and calls over drafts',
     client.notify('textDocument/didClose', { textDocument: { uri: util } });
     assert.equal((await client.request('textDocument/definition', at(main, 1, 35)))[0].range.start.line, 1);
     assert.equal(await readFile(join(client.project, 'util.c'), 'utf8'), '#include "util.h"\nint helper(int x) { return x + 1; }\n');
+});
+
+test('LSP stdio completes members, locals and draft edits', { timeout: 30000 }, async (t) => {
+    const client = await start(t);
+    await writeFile(join(client.project, 'shape.h'), 'struct Shape { int width; struct Shape *next; };\n');
+    await writeFile(join(client.project, 'use.c'), '#include "shape.h"\nint area(struct Shape *s, int scale) {\n  int local = 1;\n  return s->;\n}\n');
+    await initialize(client, [client.project]);
+    await indexed(client);
+    const uri = pathToFileURL(join(client.project, 'use.c')).href;
+    const labels = (result) => result.items.map((item) => item.label).sort().join(',');
+    const members = await client.request('textDocument/completion', { textDocument: { uri }, position: { line: 3, character: 12 },
+        context: { triggerKind: 2, triggerCharacter: '>' } });
+    assert.equal(labels(members), 'next,width');
+    assert.equal(members.isIncomplete, false);
+    const scope = await client.request('textDocument/completion', { textDocument: { uri }, position: { line: 3, character: 2 } });
+    assert.equal(labels(scope), 'area,local,s,scale');
+    const typed = await client.request('textDocument/completion', { textDocument: { uri }, position: { line: 3, character: 9 },
+        context: { triggerKind: 2, triggerCharacter: '>' } });
+    assert.deepEqual(typed.items, []);
+    client.notify('textDocument/didOpen', { textDocument: { uri, languageId: 'c', version: 1,
+        text: '#include "shape.h"\nint area(struct Shape *s, int scale) {\n  return s->next->;\n}\n' } });
+    const chained = await client.request('textDocument/completion', { textDocument: { uri }, position: { line: 2, character: 18 } });
+    assert.equal(labels(chained), 'next,width');
 });
 
 test('LSP stdio handles drafts, UTF-16 ranges, cancellation and close restoration', { timeout: 30000 }, async (t) => {

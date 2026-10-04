@@ -321,7 +321,7 @@ spec.describe('LSP sessions', function()
         send('textDocument/definition', 2); spec.equal(output.error.code, -32803)
         send('textDocument/completion', 3); spec.truthy(output.result.isIncomplete)
         complete(true, true)
-        send('textDocument/completion', 4); spec.equal(output.error.code, -32601)
+        send('textDocument/rename', 4); spec.equal(output.error.code, -32601)
     end)
 
     spec.it('handles progress responses independently from client request IDs', function()
@@ -726,6 +726,165 @@ spec.describe('LSP navigation requests', function()
     end)
 end)
 
+local completion = require('codeoutline.completion')
+local comp_root = root .. '-complete'
+assert(xutils.mkdir_p(comp_root .. '/pkg')); assert(xutils.mkdir_p(comp_root .. '/core'))
+comp_root = assert(require('codeoutline.path').canonical(comp_root))
+-- `@@` marks completion positions; marks[path] lists their byte offsets.
+local comp_files = {
+    ['p.h'] = 'struct Q { int depth; };\nstruct P { int x; struct Q *next; };\n',
+    ['p.c'] = '#include "p.h"\nint use(struct P *p, int n) {\n  struct P local;\n  return p->@@ + local.@@ + p->next->@@;\n}\n',
+    ['box.hpp'] = 'class Box { public: int w; Box* next; int name() const; static Box make(int k); };\n',
+    ['box.cpp'] = '#include "box.hpp"\nint Box::name() const { return this->@@; }\nint other() { Box b; return b.next->@@; }\n'
+        .. 'int st() { return Box::@@; }\n',
+    ['Box.java'] = 'class Box { int w; Box next() { return null; } static Box of(int k) { return new Box(); } }\n',
+    ['Use.java'] = 'class Use { void run() { var x = Box.of(1); x.next().@@ } }\n',
+    ['pkg/store.py'] = 'class Store:\n    def __init__(self):\n        self.items = []\n    def save(self, item):\n        return self.@@\n',
+    ['pkg/api.py'] = 'from pkg import store\nfrom .store import Store\ndef handle(req):\n    s = Store()\n    s.@@\n    store.@@\n'
+        .. 'def later():@@\n    return "a.@@"\n',
+    ['core/text.lua'] = 'local M = {}\nM.limit = 10\nfunction M.trim(s) return s end\nfunction M:split() return self.@@ end\nreturn M\n',
+    ['core/main.lua'] = 'local text = require("core.text")\nlocal function go(s, count)\n  local tmp = 1\n  return text.@@ or text:@@\nend\n',
+    ['box.go'] = 'package main\ntype Box struct { W int; Next *Box }\nfunc (b *Box) Area() int { return b.@@ }\n'
+        .. 'func use() { v := &Box{}; v.Next.@@ }\n',
+    ['boxy.rs'] = 'struct Boxy { w: i32, next: Option<Box<Boxy>> }\nimpl Boxy { fn new(k: i32) -> Boxy { Boxy { w: k, next: None } }\n'
+        .. '    fn area(&self) -> i32 { self.@@ } }\nfn f() { let b = Boxy::new(1); b.next.@@ }\n',
+    ['box.ts'] = 'class Box { w: number = 0; next?: Box; area(): number { return this.@@; } }\n'
+        .. 'function f() { const b = new Box(); b.next.@@ }\n',
+    ['Box.cs'] = 'class Box { public int W; public string Name { get; set; } Box Next() => null; void Run() { var b = new Box(); b.Next().@@ } }\n',
+    ['core/registry.lua'] = 'Registry = Registry or {}\nfunction Registry.add(x) end\nfunction Registry:size() return 0 end\n',
+    ['core/script.lua'] = 'local function run()\n  local opts = { depth = 1, mode = "a" }\n  opts.extra = true\n'
+        .. '  Registry.add(1)\n  return Registry.@@, opts.@@\nend\n',
+    ['shape.cpp'] = 'class Shape { public: int sides; };\n',
+    ['shape_ops.cpp'] = 'class Shape;\nint Shape::perimeter() { return 0; }\nint use(Shape *s) { return s->@@; }\n',
+    ['scope.c'] = 'static int counter;\nint helper(int a);\nint work(int alpha, char *beta) {\n  int gamma = 2;\n  @@\n}\n'
+        .. 'int after(void) { int hidden = 1; return hidden; }\n',
+}
+local comp_marks = {}
+for path, source in pairs(comp_files) do
+    local clean, offsets, rest = '', {}, source
+    while true do
+        local at = rest:find('@@', 1, true)
+        if not at then clean = clean .. rest; break end
+        clean = clean .. rest:sub(1, at - 1)
+        offsets[#offsets + 1] = #clean
+        rest = rest:sub(at + 2)
+    end
+    write(comp_root .. '/' .. path, clean)
+    comp_marks[path] = offsets
+end
+
+local function complete(path, mark, extra)
+    local doc = docs.read(comp_root .. '/' .. path)
+    local req = { method = 'lsp_completion', session = 'complete', root = comp_root, uri = docs.uri(comp_root .. '/' .. path),
+        position = doc:position(comp_marks[path][mark]) }
+    for k, v in pairs(extra or {}) do req[k] = v end
+    local result = navigation.execute(req).result
+    local labels = {}
+    for _, item in ipairs(result.items) do labels[#labels + 1] = item.label end
+    table.sort(labels)
+    return table.concat(labels, ','), result
+end
+
+spec.describe('LSP completion', function()
+    service.refresh(comp_root, { cache_path = comp_root .. '/cache.idx', lister = 'walk' })
+    local cases = {
+        { 'p.c', 1, 'next,x', 'C pointer members from a parameter type' },
+        { 'p.c', 2, 'next,x', 'C members of a struct local' },
+        { 'p.c', 3, 'depth', 'C field chains through full-parse field types' },
+        { 'box.cpp', 1, 'make,name,next,w', 'C++ this in an out-of-line method' },
+        { 'box.cpp', 2, 'make,name,next,w', 'C++ pointer field chains' },
+        { 'box.cpp', 3, 'make,name,next,w', 'C++ static access' },
+        { 'Use.java', 1, 'next,of,w', 'Java var initializers and method return types' },
+        { 'pkg/store.py', 1, '__init__,items,save', 'Python self with assigned attributes' },
+        { 'pkg/api.py', 1, '__init__,items,save', 'Python constructor calls' },
+        { 'pkg/api.py', 2, 'Store', 'Python submodule imports' },
+        { 'core/text.lua', 1, 'limit,split,trim', 'Lua self in a table method' },
+        { 'core/main.lua', 1, 'limit,split,trim', 'Lua require aliases' },
+        { 'core/main.lua', 2, 'split,trim', 'Lua colon calls list functions only' },
+        { 'box.go', 1, 'Area,Next,W', 'Go method receivers' },
+        { 'box.go', 2, 'Area,Next,W', 'Go composite literals and pointer fields' },
+        { 'boxy.rs', 1, 'area,new,next,w', 'Rust self inside impl' },
+        { 'boxy.rs', 2, 'area,new,next,w', 'Rust constructors and wrapped field types' },
+        { 'box.ts', 1, 'area,next,w', 'TypeScript this' },
+        { 'box.ts', 2, 'area,next,w', 'TypeScript optional field chains' },
+        { 'Box.cs', 1, 'Name,Next,Run,W', 'C# properties and method returns' },
+        { 'scope.c', 1, 'after,alpha,beta,counter,gamma,helper,work', 'locals, parameters and file definitions' },
+        { 'core/script.lua', 1, 'add,size', 'Lua global tables defined in other files' },
+        { 'core/script.lua', 2, 'depth,extra,mode', 'Lua local table literals and assignments' },
+        { 'shape_ops.cpp', 1, 'perimeter,sides', 'C++ members defined out of line in other files' },
+    }
+    for _, case in ipairs(cases) do
+        spec.it('completes ' .. case[4], function()
+            spec.equal((complete(case[1], case[2])), case[3])
+        end)
+    end
+    spec.it('answers trigger characters only after member operators and never inside strings', function()
+        spec.equal((complete('pkg/api.py', 3, { trigger = true })), '')
+        spec.equal((complete('pkg/api.py', 4)), '')
+        spec.equal((complete('pkg/api.py', 1, { trigger = true })), '__init__,items,save')
+    end)
+    spec.it('completes from session drafts and reports exhausted budgets as incomplete', function()
+        local uri = docs.uri(comp_root .. '/core/text.lua')
+        navigation.sync({ session = 'complete', open = { [uri] = 1 }, changed = { [uri] = { version = 1, language = 'lua',
+            source = 'local M = {}\nfunction M.fresh() end\nfunction M:split() return self. end\nreturn M\n' } } })
+        local labels = complete('core/main.lua', 1)
+        spec.equal(labels, 'fresh,split')
+        local budget = completion.BUDGET_SECONDS
+        completion.BUDGET_SECONDS = -1
+        local _, result = complete('core/main.lua', 1)
+        completion.BUDGET_SECONDS = budget
+        spec.truthy(result.isIncomplete)
+        navigation.sync({ session = 'complete', open = {} })
+    end)
+    spec.it('reads declared types from signatures', function()
+        local cases = {
+            { { kind = 'field', name = 'names', sig = 'private List<String> names' }, 'java', 'List' },
+            { { kind = 'method', name = 'make', sig = 'static std::unique_ptr<Box> make(int k)' }, 'cpp', 'Box' },
+            { { kind = 'method', name = 'Area', sig = 'func (b *Box) Area() (*Shape, error)' }, 'go', 'Shape' },
+            { { kind = 'field', name = 'Next', sig = 'Next *Box' }, 'go', 'Box' },
+            { { kind = 'method', name = 'new', sig = 'fn new(k: i32) -> Option<Rc<Boxy>>' }, 'rust', 'Boxy' },
+            { { kind = 'field', name = 'next', sig = 'next?: Box' }, 'typescript', 'Box' },
+            { { kind = 'method', name = 'make', sig = 'static make(k: number): Promise<Box>' }, 'typescript', 'Box' },
+            { { kind = 'method', name = 'area', sig = 'def area(self) -> Shape:' }, 'python', 'Shape' },
+            { { kind = 'field', name = 'next', type = 'struct Q *' }, 'c', 'Q' },
+        }
+        for _, case in ipairs(cases) do spec.equal(completion.declared(case[1], case[2]), case[3], case[1].sig) end
+    end)
+end)
+
+local function comp_session(extra)
+    local output = {}
+    local session = lsp.new({}, function(msg) output[#output + 1] = msg end, function(req, done)
+        if req.method == 'lsp_refresh' then return 'scan' end
+        output.request = req
+        done(true, { result = { isIncomplete = false, items = {} }, incomplete = false })
+        return 'job'
+    end, function() end, function() end)
+    session:accept(xutils.json_pack({ jsonrpc = '2.0', id = 1, method = 'initialize',
+        params = { rootUri = docs.uri(comp_root), capabilities = {}, initializationOptions = extra } }))
+    session:accept(xutils.json_pack({ jsonrpc = '2.0', method = 'initialized', params = {} }))
+    session.ready[comp_root] = true
+    return session, output
+end
+
+spec.describe('LSP completion requests', function()
+    spec.it('advertises member trigger characters and passes trigger context to the worker', function()
+        local session, output = comp_session()
+        local provider = output[1].result.capabilities.completionProvider
+        spec.equal(table.concat(provider.triggerCharacters, ''), '.:>')
+        session:accept(xutils.json_pack({ jsonrpc = '2.0', id = 2, method = 'textDocument/completion', params = {
+            textDocument = { uri = docs.uri(comp_root .. '/p.c') }, position = { line = 3, character = 12 },
+            context = { triggerKind = 2, triggerCharacter = '.' } } }))
+        spec.equal(output.request.method, 'lsp_completion'); spec.equal(output.request.trigger, true)
+        local reply = xutils.json_pack(output[#output])
+        spec.contains(reply, '"items":[]'); spec.contains(reply, '"isIncomplete":false')
+        local _, disabled = comp_session({ features = { completion = false } })
+        spec.equal(disabled[1].result.capabilities.completionProvider, nil)
+    end)
+end)
+
+service.forget(comp_root)
+assert(xutils.rmtree(comp_root))
 service.forget(nav_root)
 assert(xutils.rmtree(nav_root))
 service.forget(root)

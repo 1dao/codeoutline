@@ -129,15 +129,20 @@ local function body_members(T, r, o, c, parent, kind)
             x = x + 1
             if is(T, x, '(') and T.m[x] then x = T.m[x] + 1 end
         end
+        local field
         if T.k[x] == 'id' and (kind == 'enum' or is(T, x + 1, ':')) then
-            common.add_node(r, T, { kind = kind == 'enum' and 'enum_member' or 'field', name = T:text(x), ni = x,
+            field = common.add_node(r, T, { kind = kind == 'enum' and 'enum_member' or 'field', name = T:text(x), ni = x,
                 parent = parent, ti = x, tj = x })
+            if kind == 'enum' then field = nil end
         end
+        local type_start = x + 2
         while x < c and not is(T, x, ',') do
             if T.m[x] and T.m[x] > x then x = T.m[x] + 1
             elseif is(T, x, '<') then x = skip_angle(T, x, c)
             else x = x + 1 end
         end
+        -- Declared field types serve completion; compact index records omit them.
+        if field and r.ranges and type_start <= x - 1 then r.nodes[field].type = common.sig(T, type_start, x - 1, 120) end
         x = x + 1
     end
 end

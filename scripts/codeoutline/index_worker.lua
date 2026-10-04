@@ -7,6 +7,7 @@ local control = require('codeoutline.control')
 local documents = require('codeoutline.documents')
 local lsp = require('codeoutline.lsp')
 local navigation = require('codeoutline.navigation')
+require('codeoutline.completion') -- registers lsp_completion
 service.configure({ watch = true })
 local shared = assert(xshared.dict('codeoutline_control'))
 

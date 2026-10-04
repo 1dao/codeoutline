@@ -678,7 +678,7 @@ local function canonical_tables(G)
             out[#out + 1] = label .. '[' .. key .. ']=' .. table.concat(names, ',')
         end
     end
-    for _, name in ipairs({ 'by_name', 'by_lname', 'by_qualified' }) do dump(name, G[name], node) end
+    for _, name in ipairs({ 'by_name', 'by_lname', 'by_qualified', 'by_owner' }) do dump(name, G[name], node) end
     for _, name in ipairs({ 'by_base', 'by_stem', 'dir_files', 'pkg_files', 'ns_files' }) do dump(name, G[name], file) end
     dump('dir_by_base', G.dir_by_base, function(d) return d end)
     local children = {}

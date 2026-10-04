@@ -7,6 +7,7 @@
 --   G.files[f]         -> file record (path, language, nodes, refs, imports)
 --   G.file_order       -> { f, ... } in path order
 --   G.by_name[name]    -> { id, ... } in path, then node order
+--   G.by_owner[q]      -> members of qualifier q (`Box` for `Box::area`)
 --   local Q = graph.query(G)
 --   Q.out[id], Q.inn[id] -> { other, line, kind, other, line, kind, ... }
 --
@@ -380,7 +381,7 @@ end
 
 function M.new()
     return { files = {}, file_index = {}, file_order = {}, file_dir = {}, dir_ids = {}, nodes = {}, node_file = {},
-        id_of = {}, by_name = {}, by_lname = {}, by_qualified = {}, by_base = {}, by_stem = {}, pkg_files = {},
+        id_of = {}, by_name = {}, by_lname = {}, by_qualified = {}, by_owner = {}, by_base = {}, by_stem = {}, pkg_files = {},
         children = {}, dir_files = {}, dir_by_base = {}, ns_files = {},
         next_file = 0, next_node = 0, next_dir = 0, file_count = 0, node_count = 0 }
 end
@@ -393,6 +394,12 @@ local function namespaces(rec)
         end
     end
     return seen
+end
+
+-- Qualifier of a qualified name: `Box` for `Box::area`, `M` for `M:split` or `M.trim`.
+-- by_owner lists members wherever they are defined (out-of-line, other files).
+function M.owner(qualified)
+    return qualified:match('^(.+)::[^:]+$') or qualified:match('^(.+)[%.:][^%.:]+$')
 end
 
 -- Add a record under rel. No cancellation checkpoints: index commits call
@@ -428,6 +435,8 @@ function M.add_file(G, rel, rec)
         insert(G, G.by_name, node.name, id, node_before)
         insert(G, G.by_lname, node.name:lower(), id, node_before)
         insert(G, G.by_qualified, node.qualified, id, node_before)
+        local owner = M.owner(node.qualified)
+        if owner then insert(G, G.by_owner, owner, id, node_before) end
         if node.parent then push(G.children, ids[node.parent], id) end
     end
     G.file_count, G.node_count = G.file_count + 1, G.node_count + #rec.nodes
@@ -443,6 +452,8 @@ function M.remove_file(G, rel)
         remove(G, G.by_name, node.name, id, node_before)
         remove(G, G.by_lname, node.name:lower(), id, node_before)
         remove(G, G.by_qualified, node.qualified, id, node_before)
+        local owner = M.owner(node.qualified)
+        if owner then remove(G, G.by_owner, owner, id, node_before) end
         G.children[id] = nil
     end
     for _, id in ipairs(ids) do G.nodes[id], G.node_file[id] = nil, nil end

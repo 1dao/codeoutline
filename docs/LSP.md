@@ -47,7 +47,7 @@ depend on the editor's working directory. Runtime logs must go to stderr.
   submitting a worker job. Once all roots are ready, queries combine disk matches
   from the worker with the request's draft symbols. Navigation
   requests during initial indexing receive RequestFailed (-32803); completion
-  (not advertised yet) returns an empty incomplete list.
+  returns an empty incomplete list.
 - The INDEX worker exclusively owns resident indexes and executes requests
   directly, without coroutine slices. LSP refreshes only index records and scans
   those records for workspace symbols; it does not build symbol tables. Once a
@@ -55,8 +55,9 @@ depend on the editor's working directory. Runtime logs must go to stderr.
 - Navigation (see below): `textDocument/definition`, `textDocument/hover`,
   `textDocument/references` and call hierarchy (`prepareCallHierarchy`,
   `incomingCalls`, `outgoingCalls`).
+- Completion (see below), triggered by typing or by `.`, `:` and `>`.
 - `initializationOptions.features` can disable `documentSymbol`, `workspaceSymbol`,
-  `definition`, `hover`, `references` or `callHierarchy`, e.g. to run beside another
+  `definition`, `hover`, `references`, `callHierarchy` or `completion`, e.g. to run beside another
   language server; disabled features are neither advertised nor answered.
 - Cancellation responds immediately with -32800 and discards late results.
   Shutdown cancels session jobs; exit closes the stdio process with the appropriate
@@ -81,8 +82,9 @@ short requests run between them remains pending.
 Workspace symbols re-read matching disk files to produce correctly decoded
 positions. Initial indexing is still encoding-lazy, so GBK identifiers may not
 match until that file has been decoded. Navigation uses the same heuristic,
-name-based resolver as explore, not a type checker. Rename, diagnostics,
-completion and incremental text edits are not implemented.
+name-based resolver as explore, not a type checker, and completion infers types
+from declarations only. Rename, diagnostics and incremental text edits are not
+implemented.
 
 No symbol table is copied to the main thread. TCP LSP, stdio bridging, a single
 multi-protocol daemon, binary discovery and VS Code/Cursor/Zed extensions remain
@@ -117,6 +119,36 @@ overlay never writes to the resident tables.
   2 s; truncation is reported with `window/showMessage`.
 - Target positions come from reparsing the target file; a file edited since
   indexing is matched by name and line, or falls back to the start of the line.
+
+## Completion
+
+Completion also runs in the worker over the same overlay. It never offers
+global names, does not sort, and leaves case-insensitive filtering to the editor.
+
+- Without a member operator: locals and parameters visible at the cursor
+  (nested functions that end earlier keep theirs), the file's definitions and
+  imports, and members of the enclosing class.
+- After `.`, `->`, `::`, `?.` or Lua `:` (methods only): the receiver chain is
+  typed from `self`/`this`/`cls`, declared types of locals, parameters, fields and
+  return types read from signatures, initializers (`new T`, `T(...)`, `T{...}`,
+  `&T{...}`, `T::new(...)`, factory methods such as `new`/`create`), Lua `require`,
+  Python/JS/Go imports and static type or namespace names. Pointers, references,
+  generics and wrappers such as `Option<Box<T>>` or `unique_ptr<T>` are unwrapped.
+- Members are children, members defined out of line in any file (the symbol
+  tables index qualifiers in `by_owner`), attributes assigned through
+  `self.`/`this.`, Lua table fields, and up to three levels of base classes. In
+  dynamic languages an untyped receiver falls back to a global table's members
+  or, for a local, to the fields this file assigns or its table literal declares.
+- C and Rust field types come from full parses only (compact index records omit
+  them); type files are reparsed on demand, cached for 64 files, and skipped above
+  512 KB. Each request has a 300 ms budget and 500 items; exceeding either marks
+  the list incomplete. Trigger characters outside member operators, and positions
+  inside strings, return nothing.
+
+Unlike the original plan, dependencies are not pre-parsed on `didOpen`; type files
+are parsed when a completion first needs them. On a 56,661-file tree, 200 sampled
+member operators completed in p50 1 ms, p90 8 ms, max 84 ms. Most empty results
+were Lua calls on engine-bound objects with no static declaration.
 
 ## Symbol tables and query-time relationships
 

@@ -154,11 +154,19 @@ local function members(T, r, o, c, parent, is_enum)
             end
         else
             -- field names: identifiers followed by ';' ',' '[' ':' at this depth
+            local base
             for z = x, y - 1 do
                 if T.k[z] == 'id' and T.k[z + 1] == 'op' then
                     local nx = T:text(z + 1)
                     if (nx == ';' or nx == ',' or nx == '[' or nx == ':') or z + 1 == y then
-                        common.add_node(r, T, { kind = 'field', name = T:text(z), ni = z, parent = parent, ti = z, tj = z })
+                        local i = common.add_node(r, T, { kind = 'field', name = T:text(z), ni = z, parent = parent, ti = z, tj = z })
+                        -- Declared types serve completion; compact index records omit them.
+                        if r.ranges then
+                            local first = z
+                            while first > x and is(T, first - 1, '*') do first = first - 1 end
+                            base = base or (first > x and common.sig(T, x, first - 1, 120))
+                            if base then r.nodes[i].type = base .. string.rep('*', z - first) end
+                        end
                     end
                 end
                 if is(T, z, '(') and is(T, z + 1, '*') and T.k[z + 2] == 'id' then

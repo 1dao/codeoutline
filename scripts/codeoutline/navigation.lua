@@ -532,6 +532,10 @@ function handlers.lsp_references(req)
     return result, incomplete
 end
 
+-- Shared with completion.lua, which registers its own handler.
+M.view, M.request_doc, M.deps, M.source_doc = view, request_doc, deps, source_doc
+function M.register(method, handler) handlers[method] = handler end
+
 function M.handles(method) return handlers[method] ~= nil end
 
 -- Returns { result = value (false for null), incomplete = bool } or { error = message }.

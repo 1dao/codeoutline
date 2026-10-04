@@ -12,7 +12,7 @@ local paths = require('codeoutline.path')
 local control = require('codeoutline.control')
 local lsp = require('codeoutline.lsp')
 -- Reference scans stop at a result count or time budget and report truncation.
-local M = { MAX_RESULTS = 1000, MAX_HOVER = 3, SCAN_SECONDS = 3, POSITION_SECONDS = 2 }
+local M = { MAX_RESULTS = 1000, MAX_HOVER = 3, SCAN_SECONDS = 3, POSITION_SECONDS = 2, MAX_INCLUDES = 2000 }
 
 local sessions = {}
 local ANY = setmetatable({}, { __index = function() return true end })
@@ -28,6 +28,7 @@ local MEMBER = { ['.'] = true, ['->'] = true, ['::'] = true, ['?.'] = true }
 local LUA_MEMBER = { ['.'] = true, [':'] = true }
 local SELF = { self = true, this = true, cls = true }
 local PROTOTYPE = { prototype = true }
+local C_FAMILY = { c = true, cpp = true }
 
 -- Session drafts arrive with each navigation request: the open set always,
 -- text only for versions this worker has not seen.
@@ -135,10 +136,26 @@ local function view(session, root)
     return V
 end
 
+-- Dependencies of file f. C and C++ see everything their includes include,
+-- so headers are followed transitively (bounded), with the sources paired to
+-- any of them.
 local function deps(V, f)
     local entry = V.dep_cache[f]
     if not entry then
         local direct, paired = graph.dependencies(V, f)
+        if C_FAMILY[V.files[f].language] then
+            local queue = {}
+            for g in pairs(direct) do queue[#queue + 1] = g end
+            local i = 1
+            while i <= #queue and #queue < M.MAX_INCLUDES do
+                local more, sources = graph.dependencies(V, queue[i])
+                for h in pairs(sources) do paired[h] = true end
+                for h in pairs(more) do
+                    if not direct[h] and h ~= f then direct[h] = true; queue[#queue + 1] = h end
+                end
+                i = i + 1
+            end
+        end
         entry = { direct, paired }
         V.dep_cache[f] = entry
     end
@@ -188,6 +205,17 @@ local function resolve_site(V, f, from, name, kind, recv)
     -- names the function, and going to its definition lists them all.
     if #targets == 0 and (kind == 'call' or kind == 'ref') then
         targets = graph.resolve(V, f, src, name, kind, recv or nil, direct, paired, PROTOTYPE) or {}
+    end
+    if C_FAMILY[V.files[f].language] then
+        -- C binds only what its includes make visible; a lone far definition
+        -- (another library's macro) is not the one a system header declares.
+        local kept = {}
+        for _, id in ipairs(targets) do
+            if id == src or (graph.placement(V, f, V.node_file[id], V.nodes[id], direct, paired) or 0) > 0 then
+                kept[#kept + 1] = id
+            end
+        end
+        targets = kept
     end
     return targets
 end
@@ -472,8 +500,6 @@ local function probe_includes()
     probed_includes = unique
     return unique
 end
-
-local C_FAMILY = { c = true, cpp = true }
 
 -- Locations of the files an import on this line names: project files by the
 -- dependency rules, and C/C++ headers found in the include directories.

@@ -514,6 +514,15 @@ spec.describe('review regressions', function()
         spec.equal(#out, graph_mod.EDGE)
         spec.equal(G.files[G.node_file[out[1]]].path, '3rd/mini.h')
     end)
+    spec.it('static inline helpers in an included header are visible to the includer', function()
+        local G = build({ ['queue.h'] = 'static inline void queue_init(int *q) { *q = 0; }',
+            ['other.h'] = 'static inline void queue_init(int *q) { *q = 1; }',
+            ['thread.c'] = '#include "queue.h"\nvoid start(void) { int q; queue_init(&q); }' })
+        local Q = graph_mod.query(G)
+        local out = Q.out[G.by_name.start[1]]
+        spec.equal(#out, graph_mod.EDGE)
+        spec.equal(G.files[G.node_file[out[1]]].path, 'queue.h')
+    end)
     spec.it('file-scope C statics stay file-local', function()
         local G = build({ ['a.c'] = 'static int h(void) { return 0; }',
             ['b.c'] = 'int run(void) { return h(); }' })

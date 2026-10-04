@@ -259,7 +259,11 @@ end
 -- unrelated, nil when invisible (a C static of another file).
 local function locality(G, f, cf, c, deps, paired)
     if cf == f then return 100 end
-    if c.static then return nil end
+    if c.static then
+        -- `static inline` helpers in an included header serve every includer.
+        if deps[cf] and HEADER_EXT[G.files[cf].path:match('%.(%w+)$') or ''] then return 50 end
+        return nil
+    end
     if deps[cf] then return 50 end
     if paired[cf] then return 40 end
     if G.file_dir[cf] == G.file_dir[f] then return 20 end

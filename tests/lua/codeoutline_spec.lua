@@ -491,7 +491,9 @@ spec.describe('review regressions', function()
     end
     local function all_edges(G)
         local es = {}
-        for id, list in pairs(G.out) do
+        local Q = graph_mod.query(G)
+        for id in pairs(G.nodes) do
+            local list = Q.out[id]
             for i = 1, #list, graph_mod.EDGE do es[#es + 1] = G.nodes[id].qualified .. '->' .. G.nodes[list[i]].qualified end
         end
         table.sort(es)
@@ -602,8 +604,9 @@ local graph = require('codeoutline.graph')
 
 local function edges_from(G, name)
     local out = {}
+    local Q = graph.query(G)
     for _, id in ipairs(G.by_name[name] or {}) do
-        local list = G.out[id] or {}
+        local list = Q.out[id] or {}
         for i = 1, #list, graph.EDGE do
             out[#out + 1] = G.nodes[list[i]].name .. '@' .. G.files[G.node_file[list[i]]].path
         end
@@ -659,29 +662,64 @@ spec.describe('graph', function()
     end)
 end)
 
+-- Symbol tables with ids replaced by path#node and path, for comparing tables
+-- maintained per file against a fresh build of the same records.
+local function canonical_tables(G)
+    local function node(id) return G.files[G.node_file[id]].path .. '#' .. (id - G.id_of[G.node_file[id]][1] + 1) end
+    local function file(f) return G.files[f].path end
+    local out = {}
+    local function dump(label, t, map)
+        local keys = {}
+        for key in pairs(t) do keys[#keys + 1] = tostring(key) end
+        table.sort(keys)
+        for _, key in ipairs(keys) do
+            local list, names = t[key] or t[tonumber(key)], {}
+            for i, v in ipairs(list) do names[i] = map(v) end
+            out[#out + 1] = label .. '[' .. key .. ']=' .. table.concat(names, ',')
+        end
+    end
+    for _, name in ipairs({ 'by_name', 'by_lname', 'by_qualified' }) do dump(name, G[name], node) end
+    for _, name in ipairs({ 'by_base', 'by_stem', 'dir_files', 'pkg_files', 'ns_files' }) do dump(name, G[name], file) end
+    dump('dir_by_base', G.dir_by_base, function(d) return d end)
+    local children = {}
+    for parent, list in pairs(G.children) do children[node(parent)] = list end
+    dump('children', children, node)
+    local order, dirs = {}, {}
+    for i, f in ipairs(G.file_order) do order[i] = file(f) end
+    out[#out + 1] = 'order=' .. table.concat(order, ',')
+    for _, f in ipairs(G.file_order) do
+        local same = {}
+        for _, g in ipairs(G.file_order) do if G.file_dir[g] == G.file_dir[f] then same[#same + 1] = file(g) end end
+        dirs[#dirs + 1] = file(f) .. ':' .. table.concat(same, '|')
+    end
+    out[#out + 1] = 'dirs=' .. table.concat(dirs, ',')
+    out[#out + 1] = 'counts=' .. G.file_count .. '/' .. G.node_count
+    return table.concat(out, '\n')
+end
+
 spec.describe('query-time relationships', function()
-    spec.it('matches every ordered edge and batches all caller names into one scan', function()
-        local idx, eager = svc.get(tmp_root, { cache_path = cache })
-        local symbols = graph.build(idx, { edges = false })
+    spec.it('batches all caller names into one scan and caches per query', function()
+        local _, symbols = svc.get(tmp_root, { cache_path = cache })
         local lazy = graph.query(symbols)
         spec.equal(symbols.out, nil); spec.equal(symbols.inn, nil); spec.equal(symbols.deps, nil)
         local ids = {}
-        for id = 1, #eager.nodes do ids[#ids + 1] = id end
+        for id in pairs(symbols.nodes) do ids[#ids + 1] = id end
         lazy:load_incoming(ids)
         lazy:load_incoming(ids)
         spec.equal(lazy.stats.incoming_scans, 1)
-        for _, direction in ipairs({ 'out', 'inn' }) do
-            for _, id in ipairs(ids) do
-                local a, b = eager[direction][id] or {}, lazy[direction][id] or {}
-                spec.equal(#a, #b)
-                for i, value in ipairs(a) do spec.equal(b[i], value) end
-            end
+        local net_send = symbols.by_name.net_send
+        local callers = {}
+        for _, id in ipairs(net_send) do
+            local inn = lazy.inn[id]
+            for i = 1, #inn, graph.EDGE do callers[#callers + 1] = symbols.nodes[inn[i]].name end
         end
+        table.sort(callers)
+        spec.equal(table.concat(callers, ','), 'area,run')
         spec.equal(symbols.out, nil)
         local fresh = graph.query(symbols)
         spec.equal(next(fresh.out), nil); spec.equal(next(fresh.inn), nil)
     end)
-    spec.it('preserves resolver results across all parser languages', function()
+    spec.it('resolves calls in every parser language', function()
         local samples = {
             ['calls.c'] = 'int target(void) { return 1; } int entry(void) { return target(); }',
             ['calls.cpp'] = 'struct Box { int target() { return 1; } int entry() { return this->target(); } };',
@@ -694,46 +732,86 @@ spec.describe('query-time relationships', function()
             ['calls.rs'] = 'fn target() -> i32 { 1 } fn entry() -> i32 { target() }',
         }
         for path, source in pairs(samples) do
-            local idx = { generation = 1, files = { [path] = ci.parse(path, source) } }
-            local eager, lazy = graph.build(idx), graph.query(graph.build(idx, { edges = false }))
-            spec.truthy(eager.edge_count > 0, path .. ' must exercise resolution')
-            for id = 1, #eager.nodes do
-                for _, direction in ipairs({ 'out', 'inn' }) do
-                    local a, b = eager[direction][id] or {}, lazy[direction][id] or {}
-                    spec.equal(#a, #b, path)
-                    for i, value in ipairs(a) do spec.equal(b[i], value, path) end
-                end
-            end
+            local G = graph.build({ generation = 1, files = { [path] = ci.parse(path, source) } })
+            local Q, entry = graph.query(G), nil
+            for _, id in ipairs(G.by_name.entry) do entry = id end
+            local out = Q.out[entry]
+            spec.equal(#out, graph.EDGE, path)
+            spec.equal(G.nodes[out[1]].name, 'target', path)
+            local inn = Q.inn[out[1]]
+            spec.equal(inn[1], entry, path)
         end
     end)
-    spec.it('invalidates lazy symbols and query caches after an edit', function()
+    spec.it('keeps per-file symbol tables identical to a fresh build', function()
+        local function rec(path, source) return ci.parse(path, source, { ranges = false }) end
+        local idx = { generation = 0, files = {
+            ['b/m.lua'] = rec('b/m.lua', 'function shared() end function b_only() end'),
+            ['d/x.cs'] = rec('d/x.cs', 'namespace N { class C { void M() {} } }'),
+            ['a.c'] = rec('a.c', 'int shared(void) { return 0; }'),
+        } }
+        local G = graph.build(idx)
+        local steps = {
+            { 'c/new.py', 'def shared():\n    pass\nclass K:\n    def m(self):\n        return shared()\n' },
+            { 'a.c', 'int renamed(void) { return 0; } int shared(void) { return renamed(); }' },
+            { 'b/m.lua', nil },
+            { 'aa/first.java', 'package p; class Shared { void shared() {} }' },
+            { 'd/y.cs', 'namespace N { class D {} } namespace N { class E {} }' },
+            { 'd/x.cs', nil },
+            { 'b/m.lua', 'function back() end' },
+            { 'c/new.py', 'def shared():\n    pass\n' },
+        }
+        for _, step in ipairs(steps) do
+            local path, source = step[1], step[2]
+            if idx.files[path] then graph.remove_file(G, path) end
+            idx.files[path] = source and rec(path, source) or nil
+            if source then graph.add_file(G, path, idx.files[path]) end
+            spec.equal(canonical_tables(G), canonical_tables(graph.build(idx)), 'after ' .. path)
+        end
+        spec.equal(graph.before(G, G.by_name.shared[1], G.by_name.shared[2]), true)
+    end)
+    spec.it('commits index files with their symbol tables and no cancellation checkpoint', function()
+        local idx = svc.refresh(tmp_root, { cache_path = cache })
+        local G = idx:symbols()
+        local generation = idx.generation
+        local control = require('codeoutline.control')
+        control.callback = function() error(control.cancelled(), 0) end
+        local ok, err = pcall(function()
+            idx:commit('commit_probe.lua', ci.parse('commit_probe.lua', 'function commit_probe() end', { ranges = false }))
+        end)
+        control.callback = nil
+        assert(ok, err)
+        spec.equal(idx.generation, generation + 1); spec.equal(G.generation, idx.generation)
+        spec.truthy(G.by_name.commit_probe); spec.equal(idx:symbols(), G)
+        spec.equal(canonical_tables(G), canonical_tables(graph.build(idx)))
+        idx:commit('commit_probe.lua', nil)
+        spec.nil_value(G.by_name.commit_probe)
+        -- A failed table update drops the tables; the next use rebuilds them.
+        local add = graph.add_file
+        graph.add_file = function() error('broken tables') end
+        idx:commit('commit_probe.lua', ci.parse('commit_probe.lua', 'function commit_probe() end', { ranges = false }))
+        graph.add_file = add
+        spec.nil_value(idx.symbol_tables)
+        spec.truthy(idx:symbols().by_name.commit_probe)
+        idx:commit('commit_probe.lua', nil)
+    end)
+    spec.it('updates symbol tables in place after an edit', function()
         local path = tmp_root .. '/lazy_change.lua'
         write(path, 'function lazy_caller() return previous() end function previous() end')
-        local before = svc.explore(tmp_root, 'lazy_caller previous', { cache_path = cache, relationships = 'lazy' })
+        local before = svc.explore(tmp_root, 'lazy_caller previous', { cache_path = cache })
         spec.contains(before, 'lazy_caller -> previous')
-        local _, old = svc.resident(tmp_root)
+        local idx, old = svc.resident(tmp_root)
         write(path, 'function lazy_caller() return replacement() end function replacement() end')
-        local after = svc.explore(tmp_root, 'lazy_caller replacement', { cache_path = cache, relationships = 'lazy' })
+        local after = svc.explore(tmp_root, 'lazy_caller replacement', { cache_path = cache })
         spec.contains(after, 'lazy_caller -> replacement')
         spec.truthy(not after:find('previous', 1, true))
         local _, current = svc.resident(tmp_root)
-        spec.truthy(current ~= old); spec.equal(current.out, nil)
+        spec.equal(current, old); spec.equal(current.out, nil); spec.nil_value(current.by_name.previous)
+        spec.equal(canonical_tables(current), canonical_tables(graph.build(idx)))
         os.remove(path)
-    end)
-    spec.it('matches explore output and rebuilds only symbols in the opt-in service path', function()
-        for _, query in ipairs({ 'run net_send', 'Store.save', 'handle _write', 'go trim',
-            'Shape.scaled area', 'app.c', 'not_a_symbol' }) do
-            local eager = svc.explore(tmp_root, query, { cache_path = cache })
-            local lazy, info = svc.explore(tmp_root, query, { cache_path = cache, relationships = 'lazy' })
-            spec.equal(lazy, eager)
-            if info.query_stats then spec.equal(info.query_stats.incoming_scans, #info.seeds > 0 and 1 or 0) end
-            local _, symbols = svc.resident(tmp_root)
-            spec.truthy(symbols.symbols_only); spec.equal(symbols.out, nil); spec.equal(symbols.inn, nil)
-        end
     end)
     spec.it('reports expansion limits and never publishes cancelled caller scans', function()
         local idx = svc.refresh(tmp_root, { cache_path = cache })
-        local symbols = graph.build(idx, { edges = false })
+        local symbols = graph.build(idx)
         local output, info = explore.run(symbols, idx, 'run net_send', { max_expanded = 1 })
         spec.truthy(info.relationships_incomplete); spec.truthy(info.truncated)
         spec.contains(output, 'relationships are incomplete')

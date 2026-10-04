@@ -193,19 +193,19 @@ spec.describe('resident state and cancellation', function()
         control.callback = nil
         spec.equal(ok, false); spec.equal(err.code, 'cancelled')
     end)
-    spec.it('rolls back a refresh interrupted during graph construction', function()
-        local idx, G = service.get(root, opts)
-        local rec, generation = idx.files['a.lua'], idx.generation
+    spec.it('keeps committed files when building symbol tables is interrupted', function()
+        local idx = service.get(root, opts)
+        idx.symbol_tables = nil
         write(root .. '/a.lua', 'function renamed() end\n')
         local build = graph.build
         graph.build = function() error(control.cancelled(), 0) end
         local ok, err = pcall(service.get, root, opts)
         graph.build = build
         spec.equal(ok, false); spec.equal(err.code, 'cancelled')
-        spec.equal(idx.files['a.lua'], rec); spec.equal(idx.generation, generation)
+        spec.equal(idx.files['a.lua'].nodes[1].name, 'renamed'); spec.nil_value(idx.symbol_tables)
         local still, refreshed = service.get(root, opts)
-        spec.equal(still, idx); spec.truthy(refreshed ~= G)
-        spec.truthy(refreshed.by_name.renamed)
+        spec.equal(still, idx); spec.truthy(refreshed.by_name.renamed)
+        spec.equal(refreshed.generation, idx.generation)
     end)
     spec.it('preserves the resident index when a read-only query is cancelled', function()
         local idx, G = service.get(root, opts)
@@ -406,10 +406,12 @@ spec.describe('shared entry and worker lifecycle', function()
             graph.build = saved.build
             spec.contains(service.explore(root, 'worker_only'), 'worker_only')
             local _, built = service.resident(root); spec.truthy(built)
-            graph.build = function() error('index-only refresh must invalidate, not rebuild') end
+            graph.build = function() error('built symbol tables are updated per file, not rebuilt') end
             write(root .. '/a.lua', 'function after_graph() end\n')
             spec.truthy(run('changed', { method = 'lsp_refresh', paths = { root .. '/a.lua' } }).ok)
-            local _, stale = service.resident(root); spec.equal(stale, nil)
+            local idx, current = service.resident(root)
+            spec.equal(current, built); spec.truthy(current.by_name.after_graph)
+            spec.nil_value(current.by_name.worker_only); spec.equal(current.generation, idx.generation)
         end)
         xthread, xshared, graph.build = saved.xthread, saved.xshared, saved.build
         service.configure({ watch = false, max_projects = 8 })

@@ -1,6 +1,5 @@
 -- Requests within one Lua state are serialized by the owning transport.
 local index = require('codeoutline.index')
-local graph = require('codeoutline.graph')
 local explore = require('codeoutline.explore')
 local paths = require('codeoutline.path')
 local control = require('codeoutline.control')
@@ -58,7 +57,9 @@ local function key_for(root)
     return paths.key(canonical), canonical
 end
 
-local function refresh(root, opts, with_graph)
+-- Files commit one at a time, so an interrupted refresh needs no rollback:
+-- the index stays consistent and the next refresh resumes with a full pass.
+local function refresh(root, opts, with_symbols)
     opts = opts or {}
     local key, canonical = key_for(root)
     M.sweep()
@@ -76,29 +77,17 @@ local function refresh(root, opts, with_graph)
         if watch then p.idx:watch() end
     end
     local t0 = os.clock()
-    local ok, updated = pcall(function()
-        return p.idx:transaction(function()
-            local refresh_opts = opts
-            if not projects[key] and opts.paths then refresh_opts = { full_interval = opts.full_interval } end
-            local stats = p.idx:refresh(refresh_opts)
-            local G = p.G
-            if with_graph then
-                local symbols_only = with_graph == 'symbols'
-                if not G or G.generation ~= p.idx.generation or not not G.symbols_only ~= symbols_only then
-                    G = graph.build(p.idx, symbols_only and { edges = false } or nil)
-                end
-            elseif G and G.generation ~= p.idx.generation then
-                G = nil -- Release stale edges; the next graph consumer rebuilds lazily.
-            end
-            return { stats = stats, G = G }
-        end)
+    local ok, stats = pcall(function()
+        local refresh_opts = opts
+        if not projects[key] and opts.paths then refresh_opts = { full_interval = opts.full_interval } end
+        local result = p.idx:refresh(refresh_opts)
+        if with_symbols then p.idx:symbols() end
+        return result
     end)
     if not ok then
         if not projects[key] then p.idx:close() end
-        error(updated, 0)
+        error(stats, 0)
     end
-    local stats = updated.stats
-    p.G = updated.G
     sequence = sequence + 1
     p.used, p.stats, p.order = os.time(), stats, sequence
     projects[key] = p
@@ -109,49 +98,43 @@ local function refresh(root, opts, with_graph)
         stats.cache_saved, stats.cache_error = saved, err
     end
     stats.seconds = os.clock() - t0
-    return p.idx, p.G, stats
+    return p.idx, with_symbols and p.idx:symbols() or nil, stats
 end
 
--- LSP refreshes records without allocating a call graph.
+-- LSP refreshes records; symbol tables are kept current only once built.
 function M.refresh(root, opts)
     local idx, _, stats = refresh(root, opts, false)
     return idx, stats
 end
 
--- Existing graph consumers retain atomic refresh/build and rollback semantics.
+-- Refresh, and return the symbol tables relationships resolve against.
 function M.get(root, opts)
     return refresh(root, opts, true)
 end
 
 -- Worker-owned resident state; callers must serialize access with get/explore.
--- This does not create a snapshot or refresh the filesystem.
+-- This does not refresh the filesystem or build symbol tables.
 function M.resident(root)
     local key = key_for(root)
     local p = assert(projects[key], 'Project is indexing; retry when indexing completes')
     p.used = os.time()
-    return p.idx, p.G
+    return p.idx, p.idx.symbol_tables
 end
 
 function M.explore(root, query, opts)
     explore.validate(query, opts)
-    local mode = opts and opts.relationships or 'eager'
-    assert(mode == 'eager' or mode == 'lazy', 'relationships must be eager or lazy')
-    local idx, G, stats = refresh(root, opts, mode == 'lazy' and 'symbols' or true)
+    local idx, _, stats = refresh(root, opts, true)
     idx.query_sources = {}
     local ok, result = pcall(function()
-        return idx:transaction(function()
-            while true do
-                local output, details = explore.run(G, idx, query, opts)
-                control.check()
-                if not details.encoding_retry then return { text = output, info = details, G = G } end
-                G = graph.build(idx, mode == 'lazy' and { edges = false } or nil)
-            end
-        end)
+        while true do
+            -- A GBK repair commits the decoded file, which renumbers its nodes.
+            local output, details = explore.run(idx:symbols(), idx, query, opts)
+            control.check()
+            if not details.encoding_retry then return { text = output, info = details } end
+        end
     end)
     idx.query_sources = nil
-    local p = projects[paths.key(idx.root)]
     if not ok then error(result, 0) end
-    p.G = result.G
     if idx:needs_save() then
         local saved, err = idx:save()
         stats.cache_saved, stats.cache_error = saved, err
@@ -163,8 +146,8 @@ end
 function M.status(root, opts)
     local idx, G, stats = M.get(root, opts)
     local languages = {}
-    for _, rec in ipairs(G.files) do languages[rec.language] = (languages[rec.language] or 0) + 1 end
-    return { projectPath = idx.root, files = #G.files, symbols = #G.nodes, edges = G.edge_count,
+    for _, rec in pairs(idx.files) do languages[rec.language] = (languages[rec.language] or 0) + 1 end
+    return { projectPath = idx.root, files = G.file_count, symbols = G.node_count,
         generation = idx.generation, languages = languages, refresh = stats,
         cachePath = idx.cache_path, cacheLoaded = idx.cache_loaded, cacheWarning = idx.cache_error,
         enumerator = idx.enumerator, scanner = xscan and os.getenv('XSCAN_PURE_LUA') ~= '1' and 'native' or 'lua',

@@ -148,8 +148,9 @@ local function find_seeds(G, query)
             end
         elseif t.kind == 'file' then
             local want = t.text:gsub('\\', '/')
-            for f, rec in ipairs(G.files) do
-                if f % 128 == 0 then control.check() end
+            for i, f in ipairs(G.file_order) do
+                if i % 128 == 0 then control.check() end
+                local rec = G.files[f]
                 if rec.path == want or rec.path:sub(-(#want + 1)) == '/' .. want then files[#files + 1] = f end
             end
         elseif t.kind == 'qualified' then
@@ -205,7 +206,7 @@ local function find_seeds(G, query)
     end
     table.sort(list, function(a, b)
         if a.s ~= b.s then return a.s > b.s end
-        return a.id < b.id
+        return graph.before(G, a.id, b.id)
     end)
     return list, files
 end
@@ -300,12 +301,13 @@ local function label(G, id)
     return string.format('%s %s (%s)', node.kind, node.qualified, graph.where(G, id))
 end
 
--- Run a query. Returns the text and a table with what was selected.
+-- Run a query over symbol tables (graph.build). Returns the text and a table
+-- with what was selected; relationships resolve per query.
 function M.run(G, idx, query, opts)
     control.check()
     opts = opts or {}
     local budget = M.validate(query, opts)
-    if G.symbols_only or opts.relationships == 'lazy' then G = graph.query(G, opts) end
+    G = graph.query(G, opts)
     file_cache = {}
     local ranked, named_files = find_seeds(G, query)
 

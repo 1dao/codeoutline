@@ -17,6 +17,7 @@
 local ci = require('codeoutline.parse')
 local paths = require('codeoutline.path')
 local control = require('codeoutline.control')
+local graph = require('codeoutline.graph')
 
 local M = {}
 local INDEX_PARSE = { ranges = false }
@@ -102,7 +103,7 @@ function M.open(root, opts)
         max_bytes = max_bytes,
         lister = opts.lister,       -- 'rg' | 'walk' | nil (rg when it runs here)
         files = {},          -- rel path -> record
-        generation = 0,      -- bumped on every change; graph caches key on it
+        generation = 0,      -- bumped on every committed change
     }, Index)
     self.cache_loaded = not opts.rebuild and self:load() or false
     return self
@@ -200,28 +201,29 @@ function Index:save()
     return true
 end
 
-function Index:set_file(rel, rec)
-    if self.changes and self.changes[rel] == nil then self.changes[rel] = self.files[rel] or false end
+-- One file's change as a unit: the record, the symbol tables derived from
+-- the records, and the generation. Nothing inside checks for cancellation,
+-- so an interrupted refresh leaves every file either old or new. A failed
+-- table update drops the tables; the next symbols() call rebuilds them.
+function Index:commit(rel, rec)
+    local old = self.files[rel]
     self.files[rel] = rec
+    self.generation = self.generation + 1
+    local G = self.symbol_tables
+    if G then
+        local ok = pcall(function()
+            if old then graph.remove_file(G, rel) end
+            if rec then graph.add_file(G, rel, rec) end
+        end)
+        if ok then G.generation = self.generation else self.symbol_tables = nil end
+    end
 end
 
--- Record replacements, not full copies of the tree. Readers retain the last
--- complete index when refresh, decoding or graph construction is cancelled.
-function Index:transaction(fn)
-    assert(not self.changes, 'nested index transaction')
-    local generation, dirty, saved = self.generation, self.encoding_dirty, self.saved_generation
-    self.changes = {}
-    local ok, result = pcall(fn)
-    local changes = self.changes
-    self.changes = nil
-    if not ok then
-        for rel, rec in pairs(changes) do self.files[rel] = rec or nil end
-        self.generation, self.encoding_dirty, self.saved_generation = generation, dirty, saved
-        -- Watch events may already have been drained; reconcile on the next pass.
-        self.watch_ready, self.next_full = false, nil
-        error(result, 0)
-    end
-    return result
+-- Symbol tables over the records, built on first use and then kept current
+-- by commit(). Hosts that never resolve names do not pay for them.
+function Index:symbols()
+    if not self.symbol_tables then self.symbol_tables = graph.build(self) end
+    return self.symbol_tables
 end
 
 -- Only query-selected files are decoded. This cache lasts for one query and
@@ -255,15 +257,13 @@ function Index:query_source(rel)
         if encoding == 'gbk' then
             local parsed = assert(ci.parse(rel, src, INDEX_PARSE), 'cannot parse decoded source: ' .. rel)
             parsed.size, parsed.crc, parsed.mtime, parsed.checked = rec.size, rec.crc, rec.mtime, rec.checked
-            self:set_file(rel, parsed)
-            rec = parsed
-            self.generation = self.generation + 1
+            parsed.encoding = encoding
+            self:commit(rel, parsed)
             changed = true
+        else
+            -- Metadata only: names and positions are unchanged.
+            rec.encoding = encoding
         end
-        local updated = {}
-        for key, value in pairs(rec) do updated[key] = value end
-        updated.encoding = encoding
-        self:set_file(rel, updated)
         self.encoding_dirty = true
     end
     self.query_sources[rel] = src
@@ -450,11 +450,8 @@ function Index:sync_file(rel, st, stats)
     end
     local crc = checksum(src)
     if rec and rec.size == #src and rec.crc == crc then
-        local updated = {}
-        for key, value in pairs(rec) do updated[key] = value end
-        updated.mtime = st and st.mtime or rec.mtime
-        updated.checked = os.time()
-        self:set_file(rel, updated)
+        rec.mtime = st and st.mtime or rec.mtime
+        rec.checked = os.time()
         stats.unchanged = stats.unchanged + 1
         return true
     end
@@ -479,7 +476,7 @@ function Index:sync_file(rel, st, stats)
     end
     r.size, r.crc, r.mtime = #src, crc, st and st.mtime or nil
     r.checked = os.time()
-    self:set_file(rel, r)
+    self:commit(rel, r)
     stats.parsed = stats.parsed + 1
     return true
 end
@@ -554,11 +551,11 @@ function Index:refresh_changed(changed, structural)
         local known = self.files[rel] ~= nil
         if listed and listed[rel] or (not listed and known) then
             if not self:sync_file(rel, has_stat and xutils.stat(self:abs(rel)) or nil, stats) and known then
-                self:set_file(rel, nil)
+                self:commit(rel, nil)
                 stats.removed = stats.removed + 1
             end
         elseif known then
-            self:set_file(rel, nil)         -- no longer listed
+            self:commit(rel, nil)           -- no longer listed
             stats.removed = stats.removed + 1
         end
     end
@@ -584,9 +581,7 @@ function Index:refresh(opts)
                 if self.files[rel] then changed[rel] = true end
             end
         end
-        local stats = self:refresh_changed(changed, false)
-        if stats.parsed > 0 or stats.removed > 0 then self.generation = self.generation + 1 end
-        return stats
+        return self:refresh_changed(changed, false)
     end
     if self.watcher and self.watch_ready then
         local paths, structural, overflow = self.watcher:read()
@@ -596,7 +591,6 @@ function Index:refresh(opts)
             -- drained, so a pass that fails midway leaves a full one next.
             self.watch_ready = false
             local stats = self:refresh_changed(changed, structural)
-            if stats.parsed > 0 or stats.removed > 0 then self.generation = self.generation + 1 end
             self.watch_ready = true
             return stats
         end
@@ -618,8 +612,11 @@ function Index:refresh(opts)
     return stats
 end
 
+-- Files commit one at a time. An interrupted pass leaves next_full unset
+-- (and a watcher not ready), so the next refresh is a full pass again.
 function Index:refresh_all()
     local stats = new_stats('full')
+    self.next_full = nil
     local seen = {}
     local list, meta = self:list_files()
     if not meta and xutils and xutils.stat then meta = self:stat_listing(list) end
@@ -627,13 +624,14 @@ function Index:refresh_all()
         control.check()
         if self:sync_file(rel, meta and meta[rel], stats) then seen[rel] = true end
     end
+    local gone = {}
     for rel in pairs(self.files) do
-        if not seen[rel] then
-            self:set_file(rel, nil)
-            stats.removed = stats.removed + 1
-        end
+        if not seen[rel] then gone[#gone + 1] = rel end
     end
-    if stats.parsed > 0 or stats.removed > 0 then self.generation = self.generation + 1 end
+    for _, rel in ipairs(gone) do
+        self:commit(rel, nil)
+        stats.removed = stats.removed + 1
+    end
     return stats
 end
 

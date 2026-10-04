@@ -28,11 +28,14 @@ spec.describe('service stability', function()
         write(project .. '/中文.lua', 'function hinted() end\n')
         local stats = idx:refresh({ paths = { project .. '/中文.lua' } })
         spec.equal(stats.parsed, 1); spec.equal(idx.files['中文.lua'].nodes[1].name, 'hinted')
-        local ok = pcall(function()
-            idx:transaction(function() error(require('codeoutline.control').cancelled(), 0) end)
-        end)
-        spec.equal(ok, false); spec.equal(idx.next_full, nil)
         idx.list_files = original
+        -- An interrupted full pass keeps its committed files and runs again next time.
+        local control = require('codeoutline.control')
+        control.callback = function() error(control.cancelled(), 0) end
+        local ok = pcall(idx.refresh_all, idx)
+        control.callback = nil
+        spec.equal(ok, false); spec.equal(idx.next_full, nil)
+        spec.equal(idx.files['中文.lua'].nodes[1].name, 'hinted')
         spec.equal(idx:refresh({ full_interval = 45 }).mode, 'full')
         write(project .. '/中文.lua', 'function original() return "你好" end\n')
         idx:close()
@@ -291,15 +294,20 @@ do
             spec.contains(svc.explore(project, 'abc', opts), '现在是 UTF-8')
             spec.equal(idx.files['gbk.lua'].encoding, 'utf-8')
         end)
-        spec.it('retries GBK repairs with symbol-only tables in lazy explore', function()
+        spec.it('commits GBK repairs into the maintained symbol tables', function()
             if not gbk_or_skip() then return end
             write('lazy_tail.lua', 'function lazy_tail()\n local s = "\129\92"\n return lazy_helper()\nend\nfunction lazy_helper() return 1 end\n')
-            local lazy = svc.explore(project, 'lazy_tail lazy_helper', { cache_path = opts.cache_path,
-                lister = opts.lister, relationships = 'lazy' })
-            spec.contains(lazy, 'lazy_tail -> lazy_helper')
-            local _, symbols = svc.resident(project)
-            spec.truthy(symbols.symbols_only); spec.equal(symbols.out, nil)
-            spec.equal(lazy, svc.explore(project, 'lazy_tail lazy_helper', opts))
+            local idx, symbols = svc.get(project, opts)
+            local generation = idx.generation
+            local output = svc.explore(project, 'lazy_tail lazy_helper', opts)
+            spec.contains(output, 'lazy_tail -> lazy_helper')
+            local _, current = svc.resident(project)
+            spec.equal(current, symbols); spec.equal(current.out, nil)
+            spec.equal(idx.files['lazy_tail.lua'].encoding, 'gbk')
+            spec.truthy(idx.generation > generation); spec.equal(current.generation, idx.generation)
+            local graph = require('codeoutline.graph')
+            spec.equal(#current.by_name.lazy_helper, #graph.build(idx).by_name.lazy_helper)
+            spec.equal(output, svc.explore(project, 'lazy_tail lazy_helper', opts))
         end)
         spec.it('repairs GBK backslash-tail strings and discovers swallowed calls', function()
             if not gbk_or_skip() then return end

@@ -18,8 +18,8 @@ end
 local root = argv.ROOT or '.'
 local t0 = os.clock()
 local idx, G, stats = svc.get(root)
-print(string.format('[index] %d files, %d nodes, %d edges | refresh: parsed=%d unchanged=%d removed=%d skipped=%d | %.2fs%s',
-    #G.files, #G.nodes, G.edge_count, stats.parsed, stats.unchanged, stats.removed, stats.skipped,
+print(string.format('[index] %d files, %d nodes | refresh: parsed=%d unchanged=%d removed=%d skipped=%d | %.2fs%s',
+    G.file_count, G.node_count, stats.parsed, stats.unchanged, stats.removed, stats.skipped,
     os.clock() - t0, (xscan and os.getenv('XSCAN_PURE_LUA') ~= '1') and ' (native xscan)' or ''))
 
 if argv.Q and argv.STATS ~= '1' then

@@ -1,12 +1,19 @@
 -- graph.lua — cross-file resolution over an index: global symbol tables,
--- file dependencies (#include / import), and call edges between nodes.
+-- file dependencies (#include / import), and call edges resolved per query.
 --
---   local G = graph.build(idx)
+--   local G = graph.build(idx)       -- symbol and path tables, kept per file
 --   G.nodes[id]        -> <node table> (shared with the file record)
 --   G.node_file[id]    -> file index
 --   G.files[f]         -> file record (path, language, nodes, refs, imports)
---   G.by_name[name]    -> { id, ... }
---   G.out[id], G.inn[id] -> { other, line, kind, other, line, kind, ... }
+--   G.file_order       -> { f, ... } in path order
+--   G.by_name[name]    -> { id, ... } in path, then node order
+--   local Q = graph.query(G)
+--   Q.out[id], Q.inn[id] -> { other, line, kind, other, line, kind, ... }
+--
+-- Tables change one file at a time (add_file / remove_file). File and node
+-- ids are never reused while the tables live, so removed files leave holes:
+-- iterate file_order, and compare nodes with graph.before rather than by id.
+-- Every ordered list matches what a fresh build of the same records gives.
 --
 -- Edge lists are flat, EDGE values per edge, and nodes carry no wrapper
 -- table: on large trees per-edge and per-node tables cost more than the
@@ -332,86 +339,138 @@ local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired)
     return ties
 end
 
-function M.build(idx, opts)
-    local G = {
-        files = {}, file_index = {}, file_dir = {}, nodes = {}, node_file = {}, id_of = {},
-        by_name = {}, by_lname = {}, by_qualified = {}, by_base = {}, by_stem = {},
-        pkg_files = {}, children = {}, out = {}, inn = {}, deps = {}, dir_files = {}, ns_files = {},
-        generation = idx.generation,
-    }
+-- Files compare by path; nodes by file path, then node order (ids ascend
+-- within a file). Both are strict total orders over live entries.
+local function file_before(G, a, b) return G.files[a].path < G.files[b].path end
+local function node_before(G, a, b)
+    local fa, fb = G.node_file[a], G.node_file[b]
+    if fa == fb then return a < b end
+    return G.files[fa].path < G.files[fb].path
+end
+local function string_before(_, a, b) return a < b end
+M.before = node_before
+
+-- Position of v (or where it belongs) in an ordered list.
+local function search(G, list, v, before)
+    local lo, hi = 1, #list + 1
+    while lo < hi do
+        local mid = math.floor((lo + hi) / 2)
+        if before(G, list[mid], v) then lo = mid + 1 else hi = mid end
+    end
+    return lo
+end
+
+-- Ordered insert; a build in path order appends after one comparison.
+local function insert(G, t, key, v, before)
+    local list = t[key]
+    if not list then t[key] = { v }; return end
+    local n = #list
+    if before(G, list[n], v) then list[n + 1] = v; return end
+    table.insert(list, search(G, list, v, before), v)
+end
+
+local function remove(G, t, key, v, before)
+    local list = t[key]
+    if not list then return end
+    local i = search(G, list, v, before)
+    if list[i] ~= v then return end
+    table.remove(list, i)
+    if #list == 0 then t[key] = nil end
+end
+
+function M.new()
+    return { files = {}, file_index = {}, file_order = {}, file_dir = {}, dir_ids = {}, nodes = {}, node_file = {},
+        id_of = {}, by_name = {}, by_lname = {}, by_qualified = {}, by_base = {}, by_stem = {}, pkg_files = {},
+        children = {}, dir_files = {}, dir_by_base = {}, ns_files = {},
+        next_file = 0, next_node = 0, next_dir = 0, file_count = 0, node_count = 0 }
+end
+
+local function namespaces(rec)
+    local seen = {}
+    if rec.language == 'csharp' then
+        for _, node in ipairs(rec.nodes) do
+            if node.kind == 'namespace' then seen[node.qualified] = true end
+        end
+    end
+    return seen
+end
+
+-- Add a record under rel. No cancellation checkpoints: index commits call
+-- this and must not stop halfway.
+function M.add_file(G, rel, rec)
+    assert(not G.file_index[rel], 'file already in symbol tables: ' .. rel)
+    local f = G.next_file + 1
+    G.next_file = f
+    G.files[f], G.file_index[rel] = rec, f
+    G.file_order[#G.file_order + 1] = f
+    local order = G.file_order
+    if #order > 1 and not file_before(G, order[#order - 1], f) then
+        table.remove(order)
+        table.insert(order, search(G, order, f, file_before), f)
+    end
+    local dir = dirname(rel)
+    local did = G.dir_ids[dir]
+    if not did then G.next_dir = G.next_dir + 1; did = G.next_dir; G.dir_ids[dir] = did end
+    G.file_dir[f] = did
+    insert(G, G.by_base, basename(rel), f, file_before)
+    insert(G, G.by_stem, stem(rel), f, file_before)
+    if not G.dir_files[dir] then insert(G, G.dir_by_base, basename(dir), dir, string_before) end
+    insert(G, G.dir_files, dir, f, file_before)
+    if rec.package then insert(G, G.pkg_files, rec.package, f, file_before) end
+    for qualified in pairs(namespaces(rec)) do insert(G, G.ns_files, qualified, f, file_before) end
+    local ids = {}
+    G.id_of[f] = ids
+    for n, node in ipairs(rec.nodes) do
+        local id = G.next_node + 1
+        G.next_node = id
+        G.nodes[id], G.node_file[id] = node, f
+        ids[n] = id
+        insert(G, G.by_name, node.name, id, node_before)
+        insert(G, G.by_lname, node.name:lower(), id, node_before)
+        insert(G, G.by_qualified, node.qualified, id, node_before)
+        if node.parent then push(G.children, ids[node.parent], id) end
+    end
+    G.file_count, G.node_count = G.file_count + 1, G.node_count + #rec.nodes
+    return f
+end
+
+function M.remove_file(G, rel)
+    local f = G.file_index[rel]
+    if not f then return end
+    local rec, ids = G.files[f], G.id_of[f]
+    for _, id in ipairs(ids) do
+        local node = G.nodes[id]
+        remove(G, G.by_name, node.name, id, node_before)
+        remove(G, G.by_lname, node.name:lower(), id, node_before)
+        remove(G, G.by_qualified, node.qualified, id, node_before)
+        G.children[id] = nil
+    end
+    for _, id in ipairs(ids) do G.nodes[id], G.node_file[id] = nil, nil end
+    local dir = dirname(rel)
+    remove(G, G.by_base, basename(rel), f, file_before)
+    remove(G, G.by_stem, stem(rel), f, file_before)
+    remove(G, G.dir_files, dir, f, file_before)
+    if not G.dir_files[dir] then remove(G, G.dir_by_base, basename(dir), dir, string_before) end
+    if rec.package then remove(G, G.pkg_files, rec.package, f, file_before) end
+    for qualified in pairs(namespaces(rec)) do remove(G, G.ns_files, qualified, f, file_before) end
+    local order = G.file_order
+    table.remove(order, search(G, order, f, file_before))
+    G.files[f], G.file_index[rel], G.id_of[f], G.file_dir[f] = nil, nil, nil, nil
+    G.file_count, G.node_count = G.file_count - 1, G.node_count - #ids
+end
+
+-- Symbol tables for every record of idx. Checkpoints per file: a cancelled
+-- build is simply discarded.
+function M.build(idx)
+    local G = M.new()
     local paths = {}
     for rel in pairs(idx.files) do paths[#paths + 1] = rel end
     table.sort(paths)
-    -- Directory ids per file: placement scoring compares numbers instead of
-    -- slicing two paths per candidate.
-    local dir_ids = {}
-    -- Checkpoints per file: LuaJIT does not run count hooks inside compiled
-    -- loops, so cancellation relies on these (as in Index:refresh).
-    for f, rel in ipairs(paths) do
+    for _, rel in ipairs(paths) do
         control.check()
-        local rec = idx.files[rel]
-        G.files[f] = rec
-        G.file_index[rel] = f
-        local dir = dirname(rel)
-        local did = dir_ids[dir]
-        if not did then did = f; dir_ids[dir] = did end
-        G.file_dir[f] = did
-        push(G.by_base, basename(rel), f)
-        push(G.by_stem, stem(rel), f)
-        push(G.dir_files, dirname(rel), f)
-        if rec.package then push(G.pkg_files, rec.package, f) end
-        local ids = {}
-        G.id_of[f] = ids
-        for n, node in ipairs(rec.nodes) do
-            if n % 128 == 0 then control.check() end
-            local id = #G.nodes + 1
-            G.nodes[id], G.node_file[id] = node, f
-            ids[n] = id
-            push(G.by_name, node.name, id)
-            push(G.by_lname, node.name:lower(), id)
-            push(G.by_qualified, node.qualified, id)
-            if node.kind == 'namespace' and rec.language == 'csharp' then
-                local list = G.ns_files[node.qualified]
-                if not list or list[#list] ~= f then push(G.ns_files, node.qualified, f) end
-            end
-            if node.parent then push(G.children, ids[node.parent], id) end
-        end
+        M.add_file(G, rel, idx.files[rel])
     end
-    -- Directories indexed by their last path segment (Go import lookups).
-    G.dir_by_base = {}
-    for d in pairs(G.dir_files) do push(G.dir_by_base, basename(d), d) end
-    for _, list in pairs(G.dir_by_base) do table.sort(list) end
-    -- Step 3 keeps the eager graph as the oracle; this mode builds symbols only.
-    if opts and opts.edges == false then
-        G.out, G.inn, G.deps = nil, nil, nil
-        G.symbols_only = true
-        return G
-    end
-    -- Edges.
-    local edges = 0
-    for f, rec in ipairs(G.files) do
-        control.check()
-        local deps, paired = resolve_deps(G, f)
-        G.deps[f] = deps
-        local refs, ids = rec.refs, G.id_of[f]
-        local names, froms, kinds, lines, recvs = refs.name, refs.from, refs.kind, refs.line, refs.recv
-        for i = 1, #names do
-            if i % 128 == 0 then control.check() end
-            local from = froms[i]
-            if from > 0 then
-                local src, kind, line = ids[from], kinds[i], lines[i]
-                local targets = resolve_ref(G, f, src, names[i], kind, recvs[i] or nil, deps, paired)
-                if targets then
-                    for _, dst in ipairs(targets) do
-                        push3(G.out, src, dst, line, kind)
-                        push3(G.inn, dst, src, line, kind)
-                        edges = edges + 1
-                    end
-                end
-            end
-        end
-    end
-    G.edge_count = edges
+    G.generation = idx.generation
     return G
 end
 
@@ -483,7 +542,7 @@ function M.query(symbols, opts)
         -- Hot loop over every reference: numeric loops, hoisted fields, and the
         -- selective name test first. Checkpoints run per file and per chunk.
         local files = symbols.files
-        for f = 1, #files do
+        for _, f in ipairs(symbols.file_order) do
             control.check()
             local refs = files[f].refs
             local ref_names, froms = refs.name, refs.from

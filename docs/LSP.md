@@ -50,10 +50,8 @@ depend on the editor's working directory. Runtime logs must go to stderr.
   returns an empty incomplete list. These future capabilities are not advertised.
 - The INDEX worker exclusively owns resident indexes and executes requests
   directly, without coroutine slices. LSP refreshes only index records and scans
-  those records for workspace symbols; it does not build or retain a call graph.
-  Existing graph consumers build lazily when needed, and an index-only refresh
-  discards a stale graph after file changes. Safe batching with short-job
-  interleaving is deferred until per-file commits are implemented.
+  those records for workspace symbols; it does not build symbol tables. Once a
+  consumer has built them, every refresh keeps them current file by file.
 - Cancellation responds immediately with -32800 and discards late results.
   Shutdown cancels session jobs; exit closes the stdio process with the appropriate
   exit code. Session close is separate from process stop for future transports.
@@ -71,7 +69,8 @@ of draft text, 1.5 MB per document, 64 pending symbol requests and 4 MiB per inc
 wire message. Native parsing, enumeration, decoding and cache compression are bounded
 operations but cannot be interrupted in the middle of a native call. Worker
 requests are serialized, so a request can still wait behind a running refresh
-after initial indexing. Per-file commits and fair batching remain pending.
+after initial indexing. Index updates now commit per file; batching refreshes so
+short requests run between them remains pending.
 
 Workspace symbols re-read matching disk files to produce correctly decoded
 positions. Initial indexing is still encoding-lazy, so GBK identifiers may not
@@ -79,42 +78,47 @@ match until that file has been decoded. This preview does not add a complete
 semantic resolver, rename, references, diagnostics, completion or incremental text
 edits. Hover, definition and call hierarchy are not advertised yet.
 
-The existing graph implementation for MCP and record-replacement transactions remain until
-query-time relationship resolution is integrated and validated. No persistent
-symbol table is copied to the main thread. TCP LSP, stdio bridging, a single
+No symbol table is copied to the main thread. TCP LSP, stdio bridging, a single
 multi-protocol daemon, binary discovery and VS Code/Cursor/Zed extensions remain
 subsequent batches. Do not configure the MCP HTTP endpoint as an LSP URL.
 
-## Query-time relationship prototype
+## Symbol tables and query-time relationships
 
-Step 3 adds an opt-in Lua path while retaining the eager graph as the default
-and comparison oracle:
+The index keeps no call graph. Its only persistent state is the per-file
+records; symbol and path tables derive from them and change one file at a time:
 
-```lua
-local output, info = require('codeoutline.service').explore(root, query, {
-    relationships = 'lazy', budget = 16000,
-})
-```
+- `Index:commit(rel, record)` replaces (or, with `nil`, removes) one record,
+  updates the symbol tables and bumps the generation as one unit. It contains no
+  cancellation checkpoint, so an interrupted refresh leaves each file either old
+  or new and needs no rollback: the next refresh simply runs a full pass. A failed
+  table update drops the tables, and the next use rebuilds them from the records.
+  Refresh, removal and GBK repair all commit through it.
+- `Index:symbols()` builds the tables on first use. Hosts that never resolve
+  names (an LSP session that only lists symbols) never pay for them.
+- Name lists stay in path, then node order, maintained by binary insertion and
+  removal, so results match a fresh build regardless of edit history. File and
+  node ids are not reused; iterate `file_order` and compare with `graph.before`.
+- Calls, callers and call paths are resolved per query (`graph.query`). Outgoing
+  edges are computed only for visited nodes, with a 20,000-node expansion limit
+  reported in output and `info.relationships_incomplete`; callers of all seeds
+  share one scan of reference names.
 
-This mode retains symbol/path tables but computes edges per query. Outgoing
-edges are cached only for visited nodes, with a 20,000-node expansion limit;
-truncation is reported in both output and `info.relationships_incomplete`.
-Callers for all selected seeds share one scan of reference names. The prototype
-preserves the existing heuristic resolver, candidate order and encoding repair
-retry. It does not add complete reference semantics or alter LSP capabilities.
-The CLI/MCP default is unchanged; per-file symbol updates, removal of the old
-full graph and transaction replacement remain step 4.
+The record-replacement transactions, copy-on-write records and the eager graph
+are gone. Before removing the eager graph, explore output on the xnet2lua tree
+(92 queries) was recorded with it and matched exactly afterwards.
 
-Run the reproducible comparison against a local project (no project files or
-index cache are written):
+Measure a local project (no project files or index cache are written):
 
 ```powershell
-.\bin\xnet.exe tools/benchmark-relationships.lua ROOT=C:/src/project QUERIES=90
+.\bin\xnet.exe tools/benchmark-relationships.lua ROOT=C:/src/project QUERIES=90 UPDATES=300
 ```
 
-The benchmark checks every incoming/outgoing edge, compares explore output,
-and reports Lua-accounted memory and query timings. These are not process-RSS
-measurements or editor latency guarantees.
+It reports the table build, per-file commit timings with a parity check against
+a fresh build, and explore timings. On one Windows machine, a 56,661-file tree
+(799,334 symbols) built its tables in 1.4 s and 229 MB of Lua heap; 500 sampled
+commits took p50 0 ms, p99 1 ms and at most 15 ms (a 3,658-symbol file); 90
+explore queries took p50 51 ms, p90 65 ms, max 99 ms while other tests ran. These
+are Lua-accounted measurements, not process RSS or editor latency guarantees.
 
 ## Verification
 

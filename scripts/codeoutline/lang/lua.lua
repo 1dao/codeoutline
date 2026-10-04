@@ -102,9 +102,9 @@ local function string_value(T, i)
     return s:match('^"(.*)"$') or s:match("^'(.*)'$")
 end
 
-function M.parse(path, src)
+function M.parse(path, src, language, opts)
     local T = M.lang:tokenize(src)
-    local r = common.new(path, 'lua')
+    local r = common.new(path, 'lua', opts)
     r.member_ops = { ['.'] = true, [':'] = true }
     local stem = path:match('([^/\\]+)%.lua$') or path
     local bm = block_matches(T)
@@ -122,12 +122,13 @@ function M.parse(path, src)
         if k == 'kw' and T:text(i) == 'function' then
             local close = bm[i] or T.n
             local parent = parent_at(i)
-            local name, qualified, kind, start
+            local name, qualified, kind, start, name_tok
             if T.k[i + 1] == 'id' then
                 -- function a.b:c(...)  /  local function f(...)
                 local x = i + 1
                 while (is(T, x + 1, '.') or is(T, x + 1, ':')) and T.k[x + 2] == 'id' do x = x + 2 end
                 name = T:text(x)
+                name_tok = x
                 qualified = common.sig(T, i + 1, x):gsub('%s', '')
                 kind = is(T, x - 1, ':') and 'method' or 'function'
                 start = kw(T, i - 1, 'local') and i - 1 or i
@@ -136,6 +137,7 @@ function M.parse(path, src)
                 -- x = function / a.b = function / { key = function }
                 local lhs, y = name_chain_left(T, i - 2)
                 name = T:text(i - 2)
+                name_tok = i - 2
                 qualified = lhs
                 kind = 'function'
                 start = kw(T, y - 1, 'local') and y - 1 or y
@@ -151,6 +153,7 @@ function M.parse(path, src)
                 if key and T.k[i - 5] == 'id' then
                     local lhs, y = name_chain_left(T, i - 5)
                     name = key
+                    name_tok = i - 3
                     qualified = lhs .. '.' .. key
                     kind = 'function'
                     start = y
@@ -166,7 +169,7 @@ function M.parse(path, src)
                 local p = i + 1
                 while p < close and not is(T, p, '(') do p = p + 1 end
                 local node = common.add_node(r, T, {
-                    kind = kind, name = name, ti = start, tj = close,
+                    kind = kind, name = name, ni = name_tok, ti = start, tj = close,
                     sig = common.sig(T, start, T.m[p] or p),
                     ['local'] = kw(T, start, 'local') or nil,
                 })
@@ -179,7 +182,7 @@ function M.parse(path, src)
             local x = i + 1
             while T.k[x] == 'id' do
                 if not kw(T, x + 2, 'function') or not is(T, x + 1, '=') then
-                    common.add_node(r, T, { kind = 'variable', name = T:text(x), ti = x, tj = x, ['local'] = true })
+                    common.add_node(r, T, { kind = 'variable', name = T:text(x), ni = x, ti = x, tj = x, ['local'] = true })
                 end
                 if is(T, x + 1, ',') then x = x + 2 else break end
             end

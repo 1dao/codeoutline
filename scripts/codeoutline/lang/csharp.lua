@@ -79,7 +79,7 @@ local function member_head(T, i, j)
     while x < j do
         if is(T, x, '(') and d == 0 then
             local p = x - 1
-            if T.k[p] == 'op' and kw(T, p - 1, 'operator') then return 'operator' .. T:text(p), p, x end
+            if T.k[p] == 'op' and kw(T, p - 1, 'operator') then return 'operator' .. T:text(p), p - 1, x, p end
             if is(T, p, '>') or is(T, p, '>>') then
                 local dd = 0
                 while p > i do
@@ -90,12 +90,12 @@ local function member_head(T, i, j)
                 p = p - 1
             end
             if T.k[p] == 'id' then
-                if is(T, p - 1, '~') then return '~' .. T:text(p), p, x end
-                if kw(T, p - 1, 'operator') then return 'operator ' .. T:text(p), p, x end   -- conversion
-                return T:text(p), p, x
+                if is(T, p - 1, '~') then return '~' .. T:text(p), p - 1, x, p end
+                if kw(T, p - 1, 'operator') then return 'operator ' .. T:text(p), p - 1, x, p end   -- conversion
+                return T:text(p), p, x, p
             end
-            if T.k[p] == 'op' and kw(T, p - 1, 'operator') then return 'operator' .. T:text(p), p, x end
-            if T.k[p] == 'kw' and kw(T, p - 1, 'operator') then return 'operator ' .. T:text(p), p, x end
+            if T.k[p] == 'op' and kw(T, p - 1, 'operator') then return 'operator' .. T:text(p), p - 1, x, p end
+            if T.k[p] == 'kw' and kw(T, p - 1, 'operator') then return 'operator ' .. T:text(p), p - 1, x, p end
             -- not after a name: a tuple type such as `(int, string) Name(...)`
             if T.m[x] then x = T.m[x] end
         elseif (is(T, x, '(') or is(T, x, '[')) and T.m[x] then
@@ -134,7 +134,7 @@ local function type_decl(T, r, i, kwi, o, parent, kind)
     if kind == 'record' and (kw(T, name_tok, 'class') or kw(T, name_tok, 'struct')) then name_tok = name_tok + 1 end
     local bodyless = is(T, o, ';')
     local close = bodyless and o or (T.m[o] or T.n)
-    local node = common.add_node(r, T, { kind = kind, name = T:text(name_tok), parent = parent,
+    local node = common.add_node(r, T, { kind = kind, name = T:text(name_tok), ni = name_tok, parent = parent,
         ti = i, tj = close, sig = common.sig(T, i, o - 1, 200) })
     -- `: Base, IFace` after the name, generic parameters and record params
     local x = name_tok + 1
@@ -149,7 +149,7 @@ local function type_decl(T, r, i, kwi, o, parent, kind)
             if kind == 'record' then               -- positional record parameters -> properties
                 for z = x + 1, T.m[x] - 1 do
                     if T.k[z] == 'id' and (is(T, z + 1, ',') or z + 1 == T.m[x] or is(T, z + 1, '=')) then
-                        common.add_node(r, T, { kind = 'property', name = T:text(z), parent = node, ti = z, tj = z })
+                        common.add_node(r, T, { kind = 'property', name = T:text(z), ni = z, parent = node, ti = z, tj = z })
                     end
                 end
             end
@@ -164,7 +164,7 @@ local function type_decl(T, r, i, kwi, o, parent, kind)
         while y < close do
             while is(T, y, '[') and T.m[y] do y = T.m[y] + 1 end
             if T.k[y] == 'id' then
-                common.add_node(r, T, { kind = 'enum_member', name = T:text(y), parent = node, ti = y, tj = y })
+                common.add_node(r, T, { kind = 'enum_member', name = T:text(y), ni = y, parent = node, ti = y, tj = y })
             end
             while y < close and not is(T, y, ',') do y = (T.m[y] and T.m[y] > y) and T.m[y] + 1 or y + 1 end
             y = y + 1
@@ -198,12 +198,12 @@ parse_members = function(T, r, a, b, parent, class_name)
         elseif k == 'kw' and t == 'namespace' then
             local name, x = dotted(T, i + 1)
             if is(T, x, '{') and T.m[x] then
-                local node = common.add_node(r, T, { kind = 'namespace', name = name, parent = parent, ti = i, tj = T.m[x] })
+                local node = common.add_node(r, T, { kind = 'namespace', name = name, ni = i + 1, nj = x - 1, parent = parent, ti = i, tj = T.m[x] })
                 parse_members(T, r, x + 1, T.m[x] - 1, node, nil)
                 i = T.m[x] + 1
             else
                 -- file-scoped: namespace A.B;  applies to the rest of the file
-                local node = common.add_node(r, T, { kind = 'namespace', name = name, parent = parent, ti = i, tj = b })
+                local node = common.add_node(r, T, { kind = 'namespace', name = name, ni = i + 1, nj = x - 1, parent = parent, ti = i, tj = b })
                 parse_members(T, r, x + 1, b, node, nil)
                 i = b + 1
             end
@@ -229,16 +229,16 @@ parse_members = function(T, r, a, b, parent, class_name)
                     -- declaration without a '{' body
                     local is_delegate = false
                     for y = i, j do if kw(T, y, 'delegate') then is_delegate = true; break end end
-                    local name, nt, o = member_head(T, i, j)
+                    local name, nt, o, ne = member_head(T, i, j)
                     if name and (not eq or eq > o) then
                         local kind = is_delegate and 'typedef' or (name == class_name and 'constructor')
                             or (name:sub(1, 1) == '~' and 'destructor') or 'method'
-                        common.add_node(r, T, { kind = kind, name = name, parent = parent, ti = i, tj = j,
+                        common.add_node(r, T, { kind = kind, name = name, ni = nt, nj = ne, parent = parent, ti = i, tj = j,
                             sig = common.sig(T, i, T.m[o] or o, 200), abstract = (not eq) or nil })
                         common.add_calls(r, T, (T.m[o] or o) + 1, j)
                     elseif eq and is(T, eq, '=>') and T.k[eq - 1] == 'id' then
                         -- expression-bodied property: int X => expr;
-                        common.add_node(r, T, { kind = 'property', name = T:text(eq - 1), parent = parent,
+                        common.add_node(r, T, { kind = 'property', name = T:text(eq - 1), ni = eq - 1, parent = parent,
                             ti = i, tj = j, sig = common.sig(T, i, eq - 1, 160) })
                         common.add_calls(r, T, eq, j)
                     else
@@ -251,7 +251,7 @@ parse_members = function(T, r, a, b, parent, class_name)
                             elseif not init and dd == 0 and T.k[y] == 'id' and T.k[y + 1] == 'op' then
                                 local nx = T:text(y + 1)
                                 if nx == '=' or nx == ';' or nx == ',' then
-                                    common.add_node(r, T, { kind = 'field', name = T:text(y), parent = parent,
+                                    common.add_node(r, T, { kind = 'field', name = T:text(y), ni = y, parent = parent,
                                         ti = y, tj = j, sig = common.sig(T, i, math.min(j - 1, y + 1), 160) })
                                 end
                             end
@@ -284,18 +284,18 @@ parse_members = function(T, r, a, b, parent, class_name)
                     elseif eq then
                         j = close                          -- initializer { ... }: continue to ';'
                     else
-                        local name, nt, o = member_head(T, i, j)
+                        local name, nt, o, ne = member_head(T, i, j)
                         if name and o < j then
                             local kind = (name == class_name and 'constructor')
                                 or (name:sub(1, 1) == '~' and 'destructor') or 'method'
-                            common.add_node(r, T, { kind = kind, name = name, parent = parent, ti = i, tj = close,
+                            common.add_node(r, T, { kind = kind, name = name, ni = nt, nj = ne, parent = parent, ti = i, tj = close,
                                 sig = common.sig(T, i, T.m[o] or o, 200) })
                             common.add_calls(r, T, (T.m[o] or o) + 1, close)
                             j = close
                             done = true
                         elseif T.k[j - 1] == 'id' then
                             -- property with accessors: Type Name { get; set; } [= init;]
-                            common.add_node(r, T, { kind = 'property', name = T:text(j - 1), parent = parent,
+                            common.add_node(r, T, { kind = 'property', name = T:text(j - 1), ni = j - 1, parent = parent,
                                 ti = i, tj = close, sig = common.sig(T, i, j - 1, 160) })
                             common.add_calls(r, T, j, close)
                             if is(T, close + 1, '=') then
@@ -324,9 +324,9 @@ parse_members = function(T, r, a, b, parent, class_name)
     end
 end
 
-function M.parse(path, src)
+function M.parse(path, src, language, opts)
     local T = M.lang:tokenize(src)
-    local r = common.new(path, 'csharp')
+    local r = common.new(path, 'csharp', opts)
     parse_members(T, r, 1, T.n, nil, nil)
     return common.finish(r), T
 end

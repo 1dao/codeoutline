@@ -120,8 +120,8 @@ parse_block = function(T, r, a, b, parent, in_class)
                 while last > i and (T.k[last] == 'dedent' or T.k[last] == 'nl') do last = last - 1 end
                 local node = common.add_node(r, T, {
                     kind = is_class and 'class' or (in_class and 'method' or 'function'),
-                    name = T:text(name_tok), parent = parent,
-                    ti = deco_start or i, tj = stop, end_line = T:eline(last),
+                    name = T:text(name_tok), ni = name_tok, parent = parent,
+                    ti = deco_start or i, tj = stop, range_end = last, end_line = T:eline(last),
                     sig = common.sig(T, i, e - 1),
                     decorators = decorators,
                     async = head ~= i or nil,
@@ -157,7 +157,7 @@ parse_block = function(T, r, a, b, parent, in_class)
                     and (parent == nil or in_class) then
                     -- NAME = ... / NAME: type = ... at module or class level
                     common.add_node(r, T, {
-                        kind = in_class and 'field' or 'variable', name = T:text(i),
+                        kind = in_class and 'field' or 'variable', name = T:text(i), ni = i,
                         parent = parent, ti = i, tj = e, sig = common.sig(T, i, e - 1, 120),
                     })
                 end
@@ -174,9 +174,9 @@ parse_block = function(T, r, a, b, parent, in_class)
     end
 end
 
-function M.parse(path, src)
+function M.parse(path, src, language, opts)
     local T = M.lang:tokenize(src)
-    local r = common.new(path, 'python')
+    local r = common.new(path, 'python', opts)
     parse_block(T, r, 1, T.n, nil, false)
     return common.finish(r), T
 end

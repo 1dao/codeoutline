@@ -90,7 +90,7 @@ local function type_members(T, r, o, c, parent, is_interface)
             if T.k[first] == 'id' then
                 if is_interface then
                     if is(T, first + 1, '(') then
-                        common.add_node(r, T, { kind = 'method', name = T:text(first), parent = parent,
+                        common.add_node(r, T, { kind = 'method', name = T:text(first), ni = first, parent = parent,
                             ti = first, tj = last, sig = common.sig(T, first, last), abstract = true })
                     end
                 else
@@ -104,18 +104,18 @@ local function type_members(T, r, o, c, parent, is_interface)
                         or (last == first + 1 and T.k[last] == 'str'))
                     if embedded then
                         local e = is(T, first + 1, '.') and first + 2 or first
-                        common.add_node(r, T, { kind = 'field', name = T:text(e), parent = parent,
+                        common.add_node(r, T, { kind = 'field', name = T:text(e), ni = e, parent = parent,
                             ti = first, tj = last, sig = common.sig(T, first, last), embedded = true })
                     else
                         for _, nz in ipairs(names) do
-                            common.add_node(r, T, { kind = 'field', name = T:text(nz), parent = parent,
+                            common.add_node(r, T, { kind = 'field', name = T:text(nz), ni = nz, parent = parent,
                                 ti = nz, tj = last, sig = common.sig(T, first, last) })
                         end
                     end
                 end
             elseif is(T, first, '*') and T.k[first + 1] == 'id' and not is_interface then
                 local e = is(T, first + 2, '.') and first + 3 or first + 1
-                common.add_node(r, T, { kind = 'field', name = T:text(e), parent = parent,
+                common.add_node(r, T, { kind = 'field', name = T:text(e), ni = e, parent = parent,
                     ti = first, tj = last, embedded = true })
             end
             x = last + 1
@@ -137,7 +137,7 @@ local function type_spec(T, r, x, b, start)
     end
     local stop = body and (T.m[body] or b) or stmt_end(T, x, b)
     local node = common.add_node(r, T, {
-        kind = kind, name = T:text(x), ti = start or x, tj = stop,
+        kind = kind, name = T:text(x), ni = x, ti = start or x, tj = stop,
         sig = common.sig(T, start or x, body and body - 1 or stop, 160),
     })
     if body then type_members(T, r, body, stop, node, kind == 'interface') end
@@ -151,7 +151,7 @@ local function value_specs(T, r, a, b, kind)
         local last = stmt_end(T, x, b)
         local z = x
         while T.k[z] == 'id' and z <= last do
-            common.add_node(r, T, { kind = kind, name = T:text(z), ti = z, tj = last,
+            common.add_node(r, T, { kind = kind, name = T:text(z), ni = z, ti = z, tj = last,
                 sig = common.sig(T, x, last, 120) })
             if is(T, z + 1, ',') then z = z + 2 else break end
         end
@@ -160,9 +160,9 @@ local function value_specs(T, r, a, b, kind)
     end
 end
 
-function M.parse(path, src)
+function M.parse(path, src, language, opts)
     local T = M.lang:tokenize(src)
-    local r = common.new(path, 'go')
+    local r = common.new(path, 'go', opts)
     local i, n = 1, T.n
     while i <= n do
         if kw(T, i, 'package') and T.k[i + 1] == 'id' then
@@ -191,7 +191,7 @@ function M.parse(path, src)
                 local body = func_body(T, pc, n)
                 local close = body and (T.m[body] or n) or pc
                 local node = common.add_node(r, T, {
-                    kind = recv and 'method' or 'function', name = T:text(x), ti = i, tj = close,
+                    kind = recv and 'method' or 'function', name = T:text(x), ni = x, ti = i, tj = close,
                     sig = common.sig(T, i, body and body - 1 or pc, 200), recv = recv,
                 })
                 if recv then r.nodes[node].qualified = recv .. '.' .. T:text(x) end

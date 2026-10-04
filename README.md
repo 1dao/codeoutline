@@ -88,6 +88,10 @@ codeoutline doctor [--project PATH]
 
 `status`, `rebuild`, and `doctor` print JSON; a failed diagnostic exits nonzero. One-shot commands default to the current directory as the project.
 
+The `xlsp` branch also has an independent stdio LSP development preview with file
+and workspace symbols; see [LSP.md](docs/LSP.md). It is not part of the published
+0.1.9 release or the shared HTTP service yet.
+
 The runtime logs only warnings and errors, to stderr, and writes no log files, so starting it in a project leaves nothing behind. For troubleshooting, set `CODEOUTLINE_LOG_LEVEL` (`DEBUG`, `INFO`, `WARN`, `ERROR`, ...) and `CODEOUTLINE_LOG_DIR` to write log files to that directory.
 
 ## MCP service details
@@ -96,7 +100,7 @@ The protocol baseline is [MCP 2025-06-18](https://modelcontextprotocol.io/specif
 
 In stdio mode, stdout carries only MCP messages and logs go to stderr. HTTP listens on the local machine by default; clients connect to `http://127.0.0.1:19876/mcp`. Remote listening requires a `CODEOUTLINE_TOKEN` of at least 16 bytes and hosts allowed explicitly with `--allow-host`; clients send `Authorization: Bearer ...`. Unlike local HTTP, a remote service without `--allow-root` is limited to `--project` or its start directory. Repeat `--allow-origin` to allow full browser origins; unlisted origins are rejected. Protect the token with a TLS reverse proxy for remote deployments.
 
-The main thread handles the protocol while a resident index thread serves queries one at a time. Requests with a progress token receive progress every second (over SSE for HTTP); there is no standalone GET/SSE endpoint (it returns 405). Limits: 64 sessions, 64 queued or running jobs, a 120-second job deadline, and sessions expire after 15 idle minutes. Cancellation takes effect at per-file checkpoints, so a single file's parse cannot be interrupted (files are capped at 1.5 MB); after a cancellation the possibly incomplete in-memory index is discarded and the next query recovers from the cache.
+The main thread handles the protocol while a resident index thread serves queries one at a time. Requests with a progress token receive progress every second (over SSE for HTTP); there is no standalone GET/SSE endpoint (it returns 405). Limits: 64 sessions, 64 queued or running jobs, a 120-second job deadline, and sessions expire after 15 idle minutes. Cancellation takes effect at explicit checkpoints, so a single file's native parse cannot be interrupted (files are capped at 1.5 MB). Cancelled updates roll back to the last complete in-memory index; cancelling a read-only query does not discard it.
 
 ## Indexing behavior and limits
 

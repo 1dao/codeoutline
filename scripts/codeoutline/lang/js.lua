@@ -178,7 +178,7 @@ local function scan(T, r, a, b, parent, defs, stem)
                         or kw(T, start - 1, 'default') or word(T, start - 1, 'declare')) do start = start - 1 end
                     local close = body and (T.m[body] or b) or T.m[p]
                     defs[name_tok] = true
-                    local node = common.add_node(r, T, { kind = 'function', name = T:text(name_tok), parent = parent,
+                    local node = common.add_node(r, T, { kind = 'function', name = T:text(name_tok), ni = name_tok, parent = parent,
                         ti = start, tj = close, sig = common.sig(T, start, body and body - 1 or T.m[p], 200) })
                     if body then scan(T, r, body + 1, close - 1, node, defs, stem) end
                     i = close + 1
@@ -214,6 +214,7 @@ local function scan(T, r, a, b, parent, defs, stem)
                 local kind = t == 'class' and 'class' or 'interface'
                 local node = common.add_node(r, T, {
                     kind = kind, name = name_tok and T:text(name_tok) or (is(T, i - 1, '=') and T:text(i - 2)) or 'default',
+                    ni = name_tok or i,
                     parent = parent, ti = start, tj = T.m[x], sig = common.sig(T, start, x - 1, 200),
                     extends = #extends > 0 and extends or nil, implements = #implements > 0 and implements or nil,
                 })
@@ -224,12 +225,12 @@ local function scan(T, r, a, b, parent, defs, stem)
             end
         elseif k == 'kw' and t == 'enum' and T.k[i + 1] == 'id' and is(T, i + 2, '{') and T.m[i + 2] then
             local c = T.m[i + 2]
-            local node = common.add_node(r, T, { kind = 'enum', name = T:text(i + 1), parent = parent, ti = i, tj = c })
+            local node = common.add_node(r, T, { kind = 'enum', name = T:text(i + 1), ni = i + 1, parent = parent, ti = i, tj = c })
             local x = i + 3
             while x < c do
                 if T.k[x] == 'id' or T.k[x] == 'str' then
                     local nm = T.k[x] == 'str' and T:text(x):sub(2, -2) or T:text(x)
-                    common.add_node(r, T, { kind = 'enum_member', name = nm, parent = node, ti = x, tj = x })
+                    common.add_node(r, T, { kind = 'enum_member', name = nm, ni = x, parent = node, ti = x, tj = x })
                 end
                 while x < c and not is(T, x, ',') do x = (T.m[x] and T.m[x] > x) and T.m[x] + 1 or x + 1 end
                 x = x + 1
@@ -241,7 +242,7 @@ local function scan(T, r, a, b, parent, defs, stem)
             local y = skip_angle(T, i + 2, b)
             if is(T, y, '=') then
                 local stop = expr_end(T, y + 1, b)
-                common.add_node(r, T, { kind = 'typedef', name = T:text(i + 1), parent = parent, ti = i, tj = stop,
+                common.add_node(r, T, { kind = 'typedef', name = T:text(i + 1), ni = i + 1, parent = parent, ti = i, tj = stop,
                     sig = common.sig(T, i, stop, 160) })
                 i = stop + 1
                 handled = true
@@ -252,7 +253,7 @@ local function scan(T, r, a, b, parent, defs, stem)
             while x <= b and (T.k[x] == 'id' or is(T, x, '.') or T.k[x] == 'str') do x = x + 1 end
             if is(T, x, '{') and T.m[x] then
                 local nm = common.sig(T, i + 1, x - 1):gsub('%s', ''):gsub('^["\']', ''):gsub('["\']$', '')
-                local node = common.add_node(r, T, { kind = 'namespace', name = nm, parent = parent, ti = i, tj = T.m[x] })
+                local node = common.add_node(r, T, { kind = 'namespace', name = nm, ni = i + 1, nj = x - 1, parent = parent, ti = i, tj = T.m[x] })
                 scan(T, r, x + 1, T.m[x] - 1, node, defs, stem)
                 i = T.m[x] + 1
                 handled = true
@@ -272,7 +273,7 @@ local function scan(T, r, a, b, parent, defs, stem)
                 local start = kw(T, i - 1, 'export') and i - 1 or i
                 if fs then
                     defs[name_tok] = true
-                    local node = common.add_node(r, T, { kind = 'function', name = T:text(name_tok), parent = parent,
+                    local node = common.add_node(r, T, { kind = 'function', name = T:text(name_tok), ni = name_tok, parent = parent,
                         ti = start, tj = fe, sig = common.sig(T, start, math.max(fb - 1, name_tok), 200) })
                     if fb and is(T, fb, '{') then scan(T, r, fb + 1, fe - 1, node, defs, stem) end
                     i = fe + 1
@@ -280,7 +281,7 @@ local function scan(T, r, a, b, parent, defs, stem)
                 elseif not parent then
                     local stop = expr_end(T, y + 1, b)
                     defs[name_tok] = true
-                    common.add_node(r, T, { kind = 'variable', name = T:text(name_tok), ti = start, tj = stop,
+                    common.add_node(r, T, { kind = 'variable', name = T:text(name_tok), ni = name_tok, ti = start, tj = stop,
                         sig = common.sig(T, start, math.min(stop, y + 1), 120) })
                     -- keep scanning inside the initializer (object literals with functions, IIFEs)
                 end
@@ -325,7 +326,7 @@ local function scan(T, r, a, b, parent, defs, stem)
                     y = y - 2
                 end
                 defs[i] = true
-                local node = common.add_node(r, T, { kind = 'function', name = T:text(i), parent = parent,
+                local node = common.add_node(r, T, { kind = 'function', name = T:text(i), ni = i, parent = parent,
                     ti = y, tj = fe, sig = common.sig(T, y, math.max(fb - 1, i), 200) })
                 r.nodes[node].qualified = table.concat(parts, '.')
                 if fb and is(T, fb, '{') then scan(T, r, fb + 1, fe - 1, node, defs, stem) end
@@ -409,7 +410,7 @@ parse_class_body = function(T, r, o, c, parent, defs, stem)
                     if name then
                         defs[name_tok] = true
                         local kind = (name == 'constructor') and 'constructor' or 'method'
-                        local node = common.add_node(r, T, { kind = kind, name = name, parent = parent,
+                        local node = common.add_node(r, T, { kind = kind, name = name, ni = name_tok, parent = parent,
                             ti = start, tj = close, sig = common.sig(T, start, body and body - 1 or T.m[y], 200),
                             abstract = (not body) or nil })
                         if body then scan(T, r, body + 1, close - 1, node, defs, stem) end
@@ -431,12 +432,12 @@ parse_class_body = function(T, r, o, c, parent, defs, stem)
                         local fs, fe, fb
                         if eq then fs, fe, fb = func_expr(T, eq + 1, c - 1) end
                         if fs then
-                            local node = common.add_node(r, T, { kind = 'method', name = name, parent = parent,
+                            local node = common.add_node(r, T, { kind = 'method', name = name, ni = name_tok, parent = parent,
                                 ti = start, tj = fe, sig = common.sig(T, start, math.max(fb - 1, name_tok), 200) })
                             if is(T, fb, '{') then scan(T, r, fb + 1, fe - 1, node, defs, stem) end
                             stop = math.max(stop, fe)
                         else
-                            common.add_node(r, T, { kind = 'field', name = name, parent = parent,
+                            common.add_node(r, T, { kind = 'field', name = name, ni = name_tok, parent = parent,
                                 ti = start, tj = stop, sig = common.sig(T, start, stop, 120) })
                             if eq then scan(T, r, eq + 1, stop, parent, defs, stem) end
                         end
@@ -448,9 +449,9 @@ parse_class_body = function(T, r, o, c, parent, defs, stem)
     end
 end
 
-function M.parse(path, src, language)
+function M.parse(path, src, language, opts)
     local T = M.lang:tokenize(src)
-    local r = common.new(path, language or 'javascript')
+    local r = common.new(path, language or 'javascript', opts)
     local defs = {}
     local stem = path:match('([^/\\]+)%.[^./\\]+$') or path
     scan(T, r, 1, T.n, nil, defs, stem)

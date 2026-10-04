@@ -23,17 +23,19 @@ return {
     __update = function() service.sweep() end,
     __thread_handle = function(_, op, id, req)
         if op ~= 'run' then return end
-        control.callback = function()
-            if shared:get('shutdown') or shared:get('cancel:' .. id) then error('Request cancelled', 0) end
-            if xtimer.now_ms() > req.deadline then error('Indexing deadline exceeded', 0) end
+        local function abort(reason)
+            control.callback = nil
+            error(reason, 0)
         end
-        -- Lua graph/parse loops are interruptible. Native scanning is bounded
-        -- by max_file_bytes; explicit checkpoints also cover protected parses.
-        debug.sethook(control.check, '', 20000)
+        control.callback = function()
+            if shared:get('shutdown') or shared:get('cancel:' .. id) then abort(control.cancelled()) end
+            if xtimer.now_ms() > req.deadline then abort(control.deadline()) end
+        end
+        -- Check only at explicit safe points: a count hook can interrupt
+        -- transaction rollback/publication. A file parse is size-bounded.
         local ok, result = pcall(function() control.check(); return execute(req) end)
-        debug.sethook()
         control.callback = nil
-        if not ok then pcall(service.forget, req.projectPath) end
+        if not ok then result = tostring(result) end
         shared:delete('cancel:' .. id)
         assert(xthread.post(1, 'worker_result', id, ok, result))
     end,

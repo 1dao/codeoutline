@@ -363,6 +363,7 @@ function M.build(idx)
         local ids = {}
         G.id_of[f] = ids
         for n, node in ipairs(rec.nodes) do
+            if n % 128 == 0 then control.check() end
             local id = #G.nodes + 1
             G.nodes[id], G.node_file[id] = node, f
             ids[n] = id
@@ -389,6 +390,7 @@ function M.build(idx)
         local refs, ids = rec.refs, G.id_of[f]
         local names, froms, kinds, lines, recvs = refs.name, refs.from, refs.kind, refs.line, refs.recv
         for i = 1, #names do
+            if i % 128 == 0 then control.check() end
             local from = froms[i]
             if from > 0 then
                 local src, kind, line = ids[from], kinds[i], lines[i]

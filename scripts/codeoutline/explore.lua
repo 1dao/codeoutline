@@ -15,6 +15,7 @@
 
 local graph = require('codeoutline.graph')
 local text = require('codeoutline.text')
+local control = require('codeoutline.control')
 
 local M = {}
 
@@ -125,7 +126,10 @@ end
 local function find_seeds(G, query)
     local cands = {}          -- id -> score
     local files = {}          -- file indices named in the query
+    local considered = 0
     local function consider(id, s)
+        considered = considered + 1
+        if considered % 128 == 0 then control.check() end
         if not cands[id] or cands[id] < s then cands[id] = s end
     end
     local list_terms = terms(query)
@@ -134,6 +138,7 @@ local function find_seeds(G, query)
         if t.kind ~= 'word' then has_code = true end
     end
     for _, t in ipairs(list_terms) do
+        control.check()
         if t.kind == 'word' then
             -- Plain words count only as exact names (no case folding or fuzzy
             -- matching, which is where English words pick up noise), and rank
@@ -144,12 +149,14 @@ local function find_seeds(G, query)
         elseif t.kind == 'file' then
             local want = t.text:gsub('\\', '/')
             for f, rec in ipairs(G.files) do
+                if f % 128 == 0 then control.check() end
                 if rec.path == want or rec.path:sub(-(#want + 1)) == '/' .. want then files[#files + 1] = f end
             end
         elseif t.kind == 'qualified' then
             local last = t.text:match('([%w_]+)$')
             local first = t.text:match('^([%w_]+)')
-            for _, id in ipairs(G.by_name[last] or {}) do
+            for i, id in ipairs(G.by_name[last] or {}) do
+                if i % 128 == 0 then control.check() end
                 local q = G.nodes[id].qualified:gsub('[:]+', '.')
                 if q == t.text or q:sub(-(#t.text + 1)) == '.' .. t.text then
                     consider(id, seed_score(G, id, true) + 10)
@@ -172,8 +179,10 @@ local function find_seeds(G, query)
                 elseif #t.text >= 4 then
                     -- fuzzy: every query segment appears in the name's segments
                     local want = segments(t.text)
-                    local hits = 0
+                    local hits, visited = 0, 0
                     for name, ids in pairs(G.by_name) do
+                        visited = visited + 1
+                        if visited % 128 == 0 then control.check() end
                         local lname = name:lower()
                         local ok = true
                         for _, w in ipairs(want) do
@@ -190,7 +199,10 @@ local function find_seeds(G, query)
         end
     end
     local list = {}
-    for id, s in pairs(cands) do list[#list + 1] = { id = id, s = s } end
+    for id, s in pairs(cands) do
+        if #list % 128 == 0 then control.check() end
+        list[#list + 1] = { id = id, s = s }
+    end
     table.sort(list, function(a, b)
         if a.s ~= b.s then return a.s > b.s end
         return a.id < b.id
@@ -204,8 +216,10 @@ local function path_between(G, a, b, depth)
     for _ = 1, depth do
         local next_frontier = {}
         for _, x in ipairs(frontier) do
+            control.check()
             local out = G.out[x] or {}
             for i = 1, #out, graph.EDGE do
+                if i % 128 == 1 then control.check() end
                 local dst = out[i]
                 if not prev[dst] then
                     prev[dst] = x
@@ -288,6 +302,7 @@ end
 
 -- Run a query. Returns the text and a table with what was selected.
 function M.run(G, idx, query, opts)
+    control.check()
     opts = opts or {}
     local budget = M.validate(query, opts)
     file_cache = {}

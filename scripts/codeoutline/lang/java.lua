@@ -87,7 +87,7 @@ local parse_members
 local function type_decl(T, r, i, kwi, o, parent, kind)
     local name_tok = kwi + 1
     local node = common.add_node(r, T, {
-        kind = kind, name = T:text(name_tok), parent = parent,
+        kind = kind, name = T:text(name_tok), ni = name_tok, parent = parent,
         ti = i, tj = T.m[o] or T.n, sig = common.sig(T, i, o - 1),
     })
     local n = r.nodes[node]
@@ -113,7 +113,7 @@ local function type_decl(T, r, i, kwi, o, parent, kind)
         local c = T.m[name_tok + 1]
         for x = name_tok + 2, c - 1 do
             if T.k[x] == 'id' and (is(T, x + 1, ',') or x + 1 == c) then
-                common.add_node(r, T, { kind = 'field', name = T:text(x), parent = node, ti = x, tj = x })
+                common.add_node(r, T, { kind = 'field', name = T:text(x), ni = x, parent = node, ti = x, tj = x })
             end
         end
     end
@@ -128,7 +128,7 @@ local function type_decl(T, r, i, kwi, o, parent, kind)
                 local y = x + 1
                 if is(T, y, '(') and T.m[y] then y = T.m[y] + 1 end
                 if is(T, y, '{') and T.m[y] then y = T.m[y] + 1 end
-                common.add_node(r, T, { kind = 'enum_member', name = T:text(x), parent = node, ti = x, tj = y - 1 })
+                common.add_node(r, T, { kind = 'enum_member', name = T:text(x), ni = x, parent = node, ti = x, tj = y - 1 })
                 common.add_calls(r, T, x + 1, y - 1)
                 x = y
             end
@@ -170,7 +170,7 @@ parse_members = function(T, r, a, b, parent, class_name)
                         if eq and y >= eq then break end
                     end
                     if p then
-                        common.add_node(r, T, { kind = 'method', name = T:text(p), parent = parent, ti = mstart, tj = j, sig = common.sig(T, i, T.m[p + 1]), abstract = true })
+                        common.add_node(r, T, { kind = 'method', name = T:text(p), ni = p, parent = parent, ti = mstart, tj = j, sig = common.sig(T, i, T.m[p + 1]), abstract = true })
                     else
                         -- field names: identifiers at angle depth 0 followed by = , ;
                         -- (initializer bracket groups are skipped whole, so
@@ -185,7 +185,7 @@ parse_members = function(T, r, a, b, parent, class_name)
                                 -- `Type[] name`: a '[' after the type, not the name
                                 local array_type = nx == '[' and T.m[y + 1] and T.k[T.m[y + 1] + 1] == 'id'
                                 if (nx == '=' or nx == ';' or nx == ',' or nx == '[') and not array_type then
-                                    common.add_node(r, T, { kind = 'field', name = T:text(y), parent = parent, ti = y, tj = j, sig = common.sig(T, i, math.min(j - 1, y + 1)) })
+                                    common.add_node(r, T, { kind = 'field', name = T:text(y), ni = y, parent = parent, ti = y, tj = j, sig = common.sig(T, i, math.min(j - 1, y + 1)) })
                                 end
                             end
                             if init and T.m[y] and T.m[y] > y and T.k[y] == 'op' then y = T.m[y] end
@@ -224,7 +224,7 @@ parse_members = function(T, r, a, b, parent, class_name)
                             local name = T:text(o - 1)
                             common.add_node(r, T, {
                                 kind = (name == class_name) and 'constructor' or 'method',
-                                name = name, parent = parent, ti = mstart, tj = close,
+                                name = name, ni = o - 1, parent = parent, ti = mstart, tj = close,
                                 sig = common.sig(T, i, x),
                             })
                         end
@@ -243,9 +243,9 @@ parse_members = function(T, r, a, b, parent, class_name)
     end
 end
 
-function M.parse(path, src)
+function M.parse(path, src, language, opts)
     local T = M.lang:tokenize(src)
-    local r = common.new(path, 'java')
+    local r = common.new(path, 'java', opts)
     local i = 1
     while i <= T.n do
         if T.k[i] == 'kw' and T:text(i) == 'package' then

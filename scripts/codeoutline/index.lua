@@ -19,6 +19,7 @@ local paths = require('codeoutline.path')
 local control = require('codeoutline.control')
 
 local M = {}
+local INDEX_PARSE = { ranges = false }
 
 -- Cache version: a checksum of the parser sources, so any parser change
 -- rebuilds stale caches instead of silently reusing old parse results.
@@ -30,7 +31,7 @@ M.VERSION = (function()
         local h = file and io.open(file, 'rb')
         if h then parts[#parts + 1] = h:read('a'); h:close() end
     end
-    return 'p3-lazy-encoding-' .. xutils.sha256_hex(table.concat(parts))
+    return 'p5-compact-nodes-' .. xutils.sha256_hex(table.concat(parts))
 end)()
 -- Generated amalgamations (sqlite3.c, minified bundles) cost more to index
 -- than they give back; skip files above this size unless configured.
@@ -124,13 +125,15 @@ function Index:load()
         assert(t.version == M.VERSION and t.root == paths.key(self.root) and type(t.files) == 'table')
         local records = {}
         for _, rec in ipairs(t.files) do
+            control.check()
             assert(type(rec) == 'table' and type(rec.path) == 'string')
             assert(not rec.path:find('[\\:%z]') and rec.path:sub(1, 1) ~= '/')
             for part in rec.path:gmatch('[^/]+') do assert(part ~= '..' and part ~= '.') end
             assert(type(rec.nodes) == 'table' and type(rec.refs) == 'table' and type(rec.imports) == 'table')
             assert(type(rec.size) == 'number' and type(rec.language) == 'string')
             assert(rec.encoding == nil or rec.encoding == 'utf-8' or rec.encoding == 'utf-8-bom' or rec.encoding == 'gbk')
-            for _, n in ipairs(rec.nodes) do
+            for i, n in ipairs(rec.nodes) do
+                if i % 128 == 0 then control.check() end
                 assert(type(n.name) == 'string' and type(n.qualified) == 'string' and type(n.kind) == 'string')
                 assert(type(n.line) == 'number' and type(n.end_line) == 'number' and n.line >= 1 and n.end_line >= n.line)
             end
@@ -140,6 +143,7 @@ function Index:load()
             local nrefs = #refs.name
             assert(#refs.from == nrefs and #refs.kind == nrefs and #refs.line == nrefs and #refs.recv == nrefs)
             for i = 1, nrefs do
+                if i % 128 == 0 then control.check() end
                 assert(type(refs.name[i]) == 'string' and type(refs.from[i]) == 'number'
                     and type(refs.kind[i]) == 'string' and type(refs.line[i]) == 'number')
                 local recv = refs.recv[i]
@@ -150,7 +154,10 @@ function Index:load()
         end
         return records
     end)
-    if not ok then self.cache_error = 'invalid or stale cache; rebuilding'; return false end
+    if not ok then
+        if control.is_interrupted(files) then error(files, 0) end
+        self.cache_error = 'invalid or stale cache; rebuilding'; return false
+    end
     self.files = files
     self.generation = self.generation + 1
     self.saved_generation = self.generation
@@ -193,9 +200,34 @@ function Index:save()
     return true
 end
 
+function Index:set_file(rel, rec)
+    if self.changes and self.changes[rel] == nil then self.changes[rel] = self.files[rel] or false end
+    self.files[rel] = rec
+end
+
+-- Record replacements, not full copies of the tree. Readers retain the last
+-- complete index when refresh, decoding or graph construction is cancelled.
+function Index:transaction(fn)
+    assert(not self.changes, 'nested index transaction')
+    local generation, dirty, saved = self.generation, self.encoding_dirty, self.saved_generation
+    self.changes = {}
+    local ok, result = pcall(fn)
+    local changes = self.changes
+    self.changes = nil
+    if not ok then
+        for rel, rec in pairs(changes) do self.files[rel] = rec or nil end
+        self.generation, self.encoding_dirty, self.saved_generation = generation, dirty, saved
+        -- Watch events may already have been drained; reconcile on the next pass.
+        self.watch_ready = false
+        error(result, 0)
+    end
+    return result
+end
+
 -- Only query-selected files are decoded. This cache lasts for one query and
 -- holds the exact snapshot used for both reparsing and source rendering.
 function Index:query_source(rel)
+    control.check()
     self.query_sources = self.query_sources or {}
     if self.query_sources[rel] then return self.query_sources[rel], false end
     local rec = assert(self.files[rel], 'source is not indexed: ' .. rel)
@@ -221,13 +253,17 @@ function Index:query_source(rel)
     local changed = false
     if not rec.encoding then
         if encoding == 'gbk' then
-            local parsed = assert(ci.parse(rel, src), 'cannot parse decoded source: ' .. rel)
+            local parsed = assert(ci.parse(rel, src, INDEX_PARSE), 'cannot parse decoded source: ' .. rel)
             parsed.size, parsed.crc, parsed.mtime, parsed.checked = rec.size, rec.crc, rec.mtime, rec.checked
-            self.files[rel], rec = parsed, parsed
+            self:set_file(rel, parsed)
+            rec = parsed
             self.generation = self.generation + 1
             changed = true
         end
-        rec.encoding = encoding
+        local updated = {}
+        for key, value in pairs(rec) do updated[key] = value end
+        updated.encoding = encoding
+        self:set_file(rel, updated)
         self.encoding_dirty = true
     end
     self.query_sources[rel] = src
@@ -243,6 +279,7 @@ local function rg_available()
         has_rg = false
         if io.popen then
             local ok, p = pcall(io.popen, 'rg --version' .. (package.config:sub(1, 1) == '\\' and ' 2>nul' or ' 2>/dev/null'))
+            if not ok and control.is_interrupted(p) then error(p, 0) end
             if ok and p then
                 has_rg = (p:read('a') or ''):find('ripgrep', 1, true) ~= nil
                 p:close()
@@ -413,12 +450,16 @@ function Index:sync_file(rel, st, stats)
     end
     local crc = checksum(src)
     if rec and rec.size == #src and rec.crc == crc then
-        rec.mtime = st and st.mtime or rec.mtime
-        rec.checked = os.time()
+        local updated = {}
+        for key, value in pairs(rec) do updated[key] = value end
+        updated.mtime = st and st.mtime or rec.mtime
+        updated.checked = os.time()
+        self:set_file(rel, updated)
         stats.unchanged = stats.unchanged + 1
         return true
     end
-    local ok, r = pcall(ci.parse, rel, src)
+    local ok, r = pcall(ci.parse, rel, src, INDEX_PARSE)
+    if not ok and control.is_interrupted(r) then error(r, 0) end
     control.check()
     -- A parser exception must not permanently hide a GBK file.
     -- Successful speculative parsing does not scan encoding here.
@@ -426,7 +467,8 @@ function Index:sync_file(rel, st, stats)
         if xutils.to_utf8 then
             local decoded, encoding = xutils.to_utf8(src)
             if decoded then
-                ok, r = pcall(ci.parse, rel, decoded)
+                ok, r = pcall(ci.parse, rel, decoded, INDEX_PARSE)
+                if not ok and control.is_interrupted(r) then error(r, 0) end
                 if ok and r then r.encoding = encoding end
             end
         end
@@ -437,7 +479,7 @@ function Index:sync_file(rel, st, stats)
     end
     r.size, r.crc, r.mtime = #src, crc, st and st.mtime or nil
     r.checked = os.time()
-    self.files[rel] = r
+    self:set_file(rel, r)
     stats.parsed = stats.parsed + 1
     return true
 end
@@ -512,11 +554,11 @@ function Index:refresh_changed(changed, structural)
         local known = self.files[rel] ~= nil
         if listed and listed[rel] or (not listed and known) then
             if not self:sync_file(rel, has_stat and xutils.stat(self:abs(rel)) or nil, stats) and known then
-                self.files[rel] = nil
+                self:set_file(rel, nil)
                 stats.removed = stats.removed + 1
             end
         elseif known then
-            self.files[rel] = nil           -- no longer listed
+            self:set_file(rel, nil)         -- no longer listed
             stats.removed = stats.removed + 1
         end
     end
@@ -568,7 +610,7 @@ function Index:refresh_all()
     end
     for rel in pairs(self.files) do
         if not seen[rel] then
-            self.files[rel] = nil
+            self:set_file(rel, nil)
             stats.removed = stats.removed + 1
         end
     end

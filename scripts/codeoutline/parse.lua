@@ -36,14 +36,15 @@ function M.language(path)
     return ext and M.EXTENSIONS[ext:lower()]
 end
 
-function M.parse(path, src)
+-- opts.ranges=false emits compact index nodes; default parsing retains positions.
+function M.parse(path, src, opts)
     local lang = M.language(path)
     if not lang then return nil end
     -- Strip a UTF-8 BOM so it is not read as part of the first token.
     if src:sub(1, 3) == '\239\187\191' then src = src:sub(4) end
     -- .h is shared by C and C++: sniff for C++-only syntax.
     if lang == 'c' and path:match('%.[hH]$') and parser('cpp').looks_cpp(src) then lang = 'cpp' end
-    return (parser(MODULE[lang] or lang).parse(path, src, lang))
+    return (parser(MODULE[lang] or lang).parse(path, src, lang, opts))
 end
 
 return M

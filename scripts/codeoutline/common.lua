@@ -7,6 +7,8 @@
 --   refs    = { name = {...}, from = {...}, kind = {...}, line = {...}, recv = {...} },
 --   imports = { {path, line, names?} },
 -- }
+-- Unless ranges=false, nodes store start_byte/end_byte and name_start/name_end as zero-based,
+-- half-open byte ranges in the parser input (after BOM removal).
 -- Refs are attributed after parsing: a parser only records where each call
 -- sits (token index) and assign_refs() hands it to the innermost node whose
 -- token range contains it. That keeps nested functions/classes correct
@@ -19,8 +21,9 @@
 local M = {}
 local text = require('codeoutline.text')
 
-function M.new(path, language)
-    return { path = path, language = language, nodes = {}, refs = {}, imports = {} }
+function M.new(path, language, opts)
+    return { path = path, language = language, nodes = {}, refs = {}, imports = {},
+        ranges = not opts or opts.ranges ~= false }
 end
 
 -- Collapse a token span into a one-line signature.
@@ -33,12 +36,21 @@ function M.sig(T, a, b, max)
 end
 
 -- ti/tj: token range the node covers (used for ref attribution, then dropped).
+-- ni/nj: declaration name tokens; range_end overrides a synthetic block end.
 function M.add_node(r, T, f)
     local parent = f.parent and r.nodes[f.parent]
     local sep = f.sep or '.'
     f.qualified = parent and (parent.qualified .. sep .. f.name) or ((r.prefix and (r.prefix .. sep) or '') .. f.name)
     f.line = f.line or T:line(f.ti)
     f.end_line = f.end_line or T:eline(f.tj)
+    if r.ranges then
+        local ni, nj = f.ni or f.ti, f.nj or f.ni or f.ti
+        f.name_start = f.name_start or T.s[ni] - 1
+        f.name_end = f.name_end or T.e[nj]
+        f.start_byte = math.min(T.s[f.ti] - 1, f.name_start)
+        f.end_byte = math.max(T.e[f.range_end or f.tj], f.name_end)
+    end
+    f.ni, f.nj, f.range_end = nil, nil, nil
     f.sep = nil
     r.nodes[#r.nodes + 1] = f
     return #r.nodes
@@ -124,7 +136,20 @@ function M.finish(r)
         name[i], from[i], kind[i], line[i], recv[i] = ref.name, ref.from, ref.kind, ref.line, ref.recv or false
     end
     r.refs = { name = name, from = from, kind = kind, line = line, recv = recv }
-    for _, n in ipairs(r.nodes) do n.ti, n.tj = nil, nil end
+    for i, n in ipairs(r.nodes) do
+        n.ti, n.tj = nil, nil
+        if not r.ranges then
+            -- Rebuild: deleting keys does not shrink Lua table allocations.
+            local compact = {}
+            for key, value in pairs(n) do
+                if key ~= 'start_byte' and key ~= 'end_byte' and key ~= 'name_start' and key ~= 'name_end' then
+                    compact[key] = value
+                end
+            end
+            r.nodes[i] = compact
+        end
+    end
+    r.ranges = nil
     r.prefix, r.skip_calls = nil, nil
     return r
 end

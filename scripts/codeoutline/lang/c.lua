@@ -123,6 +123,8 @@ local function handle_directive(T, r, i)
     if not name then return end
     common.add_node(r, T, {
         kind = 'macro', name = name, ti = i, tj = i,
+        name_start = T.s[i] + assert(text:match('^#%s*define%s+()')) - 2,
+        name_end = T.s[i] + assert(text:match('^#%s*define%s+()')) - 2 + #name,
         sig = common.sig(T, i, i, 160),
     })
     -- Calls inside a function-like macro body belong to the macro.
@@ -148,7 +150,7 @@ local function members(T, r, o, c, parent, is_enum)
         end
         if is_enum then
             if T.k[x] == 'id' then
-                common.add_node(r, T, { kind = 'enum_member', name = T:text(x), parent = parent, ti = x, tj = math.max(x, y - 1) })
+                common.add_node(r, T, { kind = 'enum_member', name = T:text(x), ni = x, parent = parent, ti = x, tj = math.max(x, y - 1) })
             end
         else
             -- field names: identifiers followed by ';' ',' '[' ':' at this depth
@@ -156,11 +158,11 @@ local function members(T, r, o, c, parent, is_enum)
                 if T.k[z] == 'id' and T.k[z + 1] == 'op' then
                     local nx = T:text(z + 1)
                     if (nx == ';' or nx == ',' or nx == '[' or nx == ':') or z + 1 == y then
-                        common.add_node(r, T, { kind = 'field', name = T:text(z), parent = parent, ti = z, tj = z })
+                        common.add_node(r, T, { kind = 'field', name = T:text(z), ni = z, parent = parent, ti = z, tj = z })
                     end
                 end
                 if is(T, z, '(') and is(T, z + 1, '*') and T.k[z + 2] == 'id' then
-                    common.add_node(r, T, { kind = 'field', name = T:text(z + 2), parent = parent, ti = z + 2, tj = z + 2 })
+                    common.add_node(r, T, { kind = 'field', name = T:text(z + 2), ni = z + 2, parent = parent, ti = z + 2, tj = z + 2 })
                 end
                 if T.m[z] and T.m[z] > z then break end    -- nested struct / fn-pointer: skip
             end
@@ -194,7 +196,7 @@ local function declaration(T, r, i, j, parent)
             end
         end
         if name_tok then
-            common.add_node(r, T, { kind = 'typedef', name = T:text(name_tok), parent = parent, ti = i, tj = j, sig = common.sig(T, i, j) })
+            common.add_node(r, T, { kind = 'typedef', name = T:text(name_tok), ni = name_tok, parent = parent, ti = i, tj = j, sig = common.sig(T, i, j) })
         end
         return
     end
@@ -213,7 +215,7 @@ local function declaration(T, r, i, j, parent)
                     return
                 end
                 common.add_node(r, T, {
-                    kind = 'prototype', name = T:text(p), parent = parent,
+                    kind = 'prototype', name = T:text(p), ni = p, parent = parent,
                     ti = decl_start(T, i, p), tj = j, sig = common.sig(T, decl_start(T, i, p), T.m[y]),
                     static = first == 'static' or nil,
                 })
@@ -234,7 +236,7 @@ local function declaration(T, r, i, j, parent)
     if is_extern then names = {} end    -- extern int x; is a declaration of a def elsewhere
     for _, x in ipairs(names) do
         common.add_node(r, T, {
-            kind = 'variable', name = T:text(x), parent = parent, ti = x, tj = j,
+            kind = 'variable', name = T:text(x), ni = x, parent = parent, ti = x, tj = j,
             static = first == 'static' or nil, sig = common.sig(T, i, math.min(j, x + 1)),
         })
     end
@@ -270,7 +272,7 @@ parse_range = function(T, r, a, b, parent)
                         local start = decl_start(T, i, name)
                         if start > i then common.add_calls(r, T, i, start - 1) end   -- MACRO(...) before it
                         common.add_node(r, T, {
-                            kind = 'function', name = T:text(name), parent = parent,
+                            kind = 'function', name = T:text(name), ni = name, parent = parent,
                             ti = start, tj = close, sig = common.sig(T, start, c),
                             static = T:text(start) == 'static' or nil,
                         })
@@ -307,7 +309,7 @@ parse_range = function(T, r, a, b, parent)
                             local node
                             if nm then
                                 node = common.add_node(r, T, {
-                                    kind = kind, name = T:text(nm), parent = parent,
+                                    kind = kind, name = T:text(nm), ni = nm, parent = parent,
                                     ti = i, tj = close, sig = common.sig(T, i, j - 1),
                                 })
                                 members(T, r, j, close, node, kind == 'enum')
@@ -315,7 +317,7 @@ parse_range = function(T, r, a, b, parent)
                                 members(T, r, j, close, parent, true)    -- anonymous enum constants
                             end
                             if alias and alias ~= nm then
-                                common.add_node(r, T, { kind = 'typedef', name = T:text(alias), parent = parent, ti = alias, tj = alias })
+                                common.add_node(r, T, { kind = 'typedef', name = T:text(alias), ni = alias, parent = parent, ti = alias, tj = alias })
                             elseif not alias and stop > close + 1 then
                                 -- struct X {..} var;  → globals after the body
                                 declaration(T, r, close + 1, math.min(stop, b), parent)
@@ -340,9 +342,9 @@ parse_range = function(T, r, a, b, parent)
     end
 end
 
-function M.parse(path, src)
+function M.parse(path, src, language, opts)
     local T = M.lang:tokenize(src)
-    local r = common.new(path, 'c')
+    local r = common.new(path, 'c', opts)
     r.skip_calls = ATTR
     parse_range(T, r, 1, T.n, nil)
     return common.finish(r), T

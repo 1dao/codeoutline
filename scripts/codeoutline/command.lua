@@ -16,6 +16,7 @@ Usage:
   codeoutline uninstall [--port PORT]
   codeoutline daemon [--port PORT]
   codeoutline serve --stdio [--project PATH] [--allow-root PATH ...]
+  codeoutline lsp --stdio [--project PATH]
   codeoutline serve --http [--host HOST] [--port PORT] [--project PATH] [--allow-root PATH ...]
   codeoutline explore --project PATH --query QUERY [--budget BYTES]
   codeoutline status [--project PATH]
@@ -54,6 +55,7 @@ local function parse(args)
         return command, {}
     end
     local allowed = {
+        lsp = { stdio = true, project = true },
         serve = { stdio = true, http = true, project = true, host = true, port = true,
             ['allow-root'] = true, ['allow-host'] = true, ['allow-origin'] = true },
         daemon = { port = true }, install = { port = true, npm = true }, uninstall = { port = true },
@@ -212,6 +214,10 @@ local function run()
             __uninit = function() xnet.uninit() end,
             __thread_handle = function() end,
         }
+    end
+    if command == 'lsp' then
+        assert(options.stdio, 'lsp requires --stdio')
+        error('lsp is unavailable while it moves onto the shared index worker; see docs/LSP.md', 0)
     end
     if command == 'serve' then
         assert(not not options.stdio ~= not not options.http, 'serve requires exactly one of --stdio or --http')

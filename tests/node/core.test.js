@@ -17,7 +17,7 @@ test('signed script and runtime updates preserve integrity and rollback', {
     assert.match(result.stdout, /missing-runtime checks passed/);
 });
 for (const mode of ['native', 'lua']) {
-    for (const script of ['codeoutline_spec', 'stability_spec']) {
+    for (const script of ['codeoutline_spec', 'stability_spec', 'lsp_spec']) {
         test(`${script}: ${mode} scanner`, () => {
             const env = { ...process.env };
             if (mode === 'lua') env.XSCAN_PURE_LUA = '1'; else delete env.XSCAN_PURE_LUA;

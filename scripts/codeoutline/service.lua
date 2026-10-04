@@ -3,6 +3,7 @@ local index = require('codeoutline.index')
 local graph = require('codeoutline.graph')
 local explore = require('codeoutline.explore')
 local paths = require('codeoutline.path')
+local control = require('codeoutline.control')
 local M = {}
 local projects = {}
 local sequence = 0
@@ -75,18 +76,30 @@ function M.get(root, opts)
         if watch then p.idx:watch() end
     end
     local t0 = os.clock()
-    local stats = p.idx:refresh()
-    if not p.G or p.G.generation ~= p.idx.generation then p.G = graph.build(p.idx) end
+    local ok, updated = pcall(function()
+        return p.idx:transaction(function()
+            local stats = p.idx:refresh()
+            local G = p.G
+            if not G or G.generation ~= p.idx.generation then G = graph.build(p.idx) end
+            return { stats = stats, G = G }
+        end)
+    end)
+    if not ok then
+        if not projects[key] then p.idx:close() end
+        error(updated, 0)
+    end
+    local stats = updated.stats
+    p.G = updated.G
+    sequence = sequence + 1
+    p.used, p.stats, p.order = os.time(), stats, sequence
+    projects[key] = p
+    M.sweep()
     -- A failed save leaves the index behind its cache, so the next call retries.
     if p.idx:needs_save() then
         local saved, err = p.idx:save()
         stats.cache_saved, stats.cache_error = saved, err
     end
     stats.seconds = os.clock() - t0
-    sequence = sequence + 1
-    p.used, p.stats, p.order = os.time(), stats, sequence
-    projects[key] = p
-    M.sweep()
     return p.idx, p.G, stats
 end
 
@@ -94,27 +107,26 @@ function M.explore(root, query, opts)
     explore.validate(query, opts)
     local idx, G, stats = M.get(root, opts)
     idx.query_sources = {}
-    local ok, text, info = pcall(function()
-        while true do
-            local output, details = explore.run(G, idx, query, opts)
-            if not details.encoding_retry then return output, details end
-            G = graph.build(idx)
-        end
+    local ok, result = pcall(function()
+        return idx:transaction(function()
+            while true do
+                local output, details = explore.run(G, idx, query, opts)
+                control.check()
+                if not details.encoding_retry then return { text = output, info = details, G = G } end
+                G = graph.build(idx)
+            end
+        end)
     end)
     idx.query_sources = nil
-    -- A partial encoding repair can precede an error in another file. Keep
-    -- the resident graph consistent even when the query itself fails.
     local p = projects[paths.key(idx.root)]
-    if p.G.generation ~= idx.generation then
-        p.G = G.generation == idx.generation and G or graph.build(idx)
-    end
+    if not ok then error(result, 0) end
+    p.G = result.G
     if idx:needs_save() then
         local saved, err = idx:save()
         stats.cache_saved, stats.cache_error = saved, err
     end
-    if not ok then error(text, 2) end
-    info.refresh = stats
-    return text, info
+    result.info.refresh = stats
+    return result.text, result.info
 end
 
 function M.status(root, opts)
@@ -130,7 +142,9 @@ end
 
 -- Forget drops memory only. Rebuild bypasses cache and publishes after success.
 function M.forget(root)
-    local key = key_for(root)
+    -- A resident canonical root can disappear after a checkout or deletion.
+    local key = type(root) == 'string' and paths.key(root)
+    if not key or not projects[key] then key = key_for(root) end
     local existed = projects[key] ~= nil
     drop(key)
     return existed

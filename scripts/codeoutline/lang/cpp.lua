@@ -121,6 +121,7 @@ local function name_before_paren(T, o, floor)
         return nil
     end
     -- qualifier chain: A::B::name, A<T>::name
+    local name_first = first
     local quals = {}
     local q = first - 1
     while q > floor and is(T, q, '::') do
@@ -131,7 +132,7 @@ local function name_before_paren(T, o, floor)
         first = z
         q = z - 1
     end
-    return { first = first, name = name, quals = quals }
+    return { first = first, name = name, quals = quals, ni = name_first, nj = p }
 end
 
 -- If the '{' at j opens a function body, describe the head; the parameter
@@ -205,7 +206,7 @@ local function cpp_decl(T, r, i, j, parent)
     if first == 'typedef' then return c.declaration(T, r, i, j, parent) end
     if first == 'using' then
         if T.k[i + 1] == 'id' and is(T, i + 2, '=') then
-            common.add_node(r, T, { kind = 'typedef', name = T:text(i + 1), parent = parent, ti = i, tj = j, sig = common.sig(T, i, j) })
+            common.add_node(r, T, { kind = 'typedef', name = T:text(i + 1), ni = i + 1, parent = parent, ti = i, tj = j, sig = common.sig(T, i, j) })
         end
         return
     end
@@ -231,7 +232,7 @@ local function cpp_decl(T, r, i, j, parent)
                         return
                     end
                     common.add_node(r, T, {
-                        kind = 'prototype', name = info.name, parent = parent,
+                        kind = 'prototype', name = info.name, ni = info.ni, nj = info.nj, parent = parent,
                         ti = i, tj = j, sig = common.sig(T, i, T.m[y]),
                         quals = #info.quals > 0 and info.quals or nil,
                         static = first == 'static' or nil,
@@ -262,7 +263,7 @@ local function cpp_decl(T, r, i, j, parent)
             q = q - 2
         end
         common.add_node(r, T, {
-            kind = 'variable', name = T:text(x), parent = parent, ti = x, tj = j,
+            kind = 'variable', name = T:text(x), ni = x, parent = parent, ti = x, tj = j,
             static = first == 'static' or nil, sig = common.sig(T, i, math.min(j, x + 1)),
             quals = #quals > 0 and quals or nil,
         })
@@ -333,7 +334,7 @@ local function aggregate(T, r, i, head, j, close, b, parent, agg)
     local node
     if nm then
         node = common.add_node(r, T, {
-            kind = kind, name = T:text(nm), parent = parent,
+            kind = kind, name = T:text(nm), ni = nm, parent = parent,
             ti = i, tj = close, sig = common.sig(T, head, j - 1), bases = bases,
         })
         if kind == 'enum' then
@@ -347,7 +348,7 @@ local function aggregate(T, r, i, head, j, close, b, parent, agg)
         cpp_range(T, r, j + 1, close - 1, parent)       -- anonymous struct/union members
     end
     if alias and alias ~= nm then
-        common.add_node(r, T, { kind = 'typedef', name = T:text(alias), parent = parent, ti = alias, tj = alias })
+        common.add_node(r, T, { kind = 'typedef', name = T:text(alias), ni = alias, parent = parent, ti = alias, tj = alias })
     elseif not alias and stop > close + 1 then
         cpp_decl(T, r, close + 1, math.min(stop, b), parent)
     end
@@ -382,7 +383,7 @@ cpp_range = function(T, r, a, b, parent)
                     for part in full:gmatch('[^:]+') do quals[#quals + 1] = part end
                     local name = table.remove(quals)
                     node = common.add_node(r, T, {
-                        kind = 'namespace', name = name, parent = parent, ti = i, tj = close,
+                        kind = 'namespace', name = name, ni = j - 1, parent = parent, ti = i, tj = close,
                         quals = #quals > 0 and quals or nil,
                     })
                 end
@@ -423,7 +424,7 @@ cpp_range = function(T, r, a, b, parent)
                         local close = T.m[body] or c.fallback_close(T, body, b)
                         if info then
                             common.add_node(r, T, {
-                                kind = 'function', name = info.name, parent = parent, ti = i, tj = close,
+                                kind = 'function', name = info.name, ni = info.ni, nj = info.nj, parent = parent, ti = i, tj = close,
                                 sig = common.sig(T, head, info.close),
                                 quals = #info.quals > 0 and info.quals or nil,
                             })
@@ -450,7 +451,7 @@ cpp_range = function(T, r, a, b, parent)
                     end
                     if info then
                         common.add_node(r, T, {
-                            kind = 'function', name = info.name, parent = parent, ti = i, tj = close,
+                            kind = 'function', name = info.name, ni = info.ni, nj = info.nj, parent = parent, ti = i, tj = close,
                             sig = common.sig(T, head, info.close),
                             quals = #info.quals > 0 and info.quals or nil,
                             static = T:text(head) == 'static' or nil,
@@ -520,9 +521,9 @@ local function finalize(r)
     end
 end
 
-function M.parse(path, src)
+function M.parse(path, src, language, opts)
     local T = M.lang:tokenize(src)
-    local r = common.new(path, 'cpp')
+    local r = common.new(path, 'cpp', opts)
     r.skip_calls = ATTR
     cpp_range(T, r, 1, T.n, nil)
     finalize(r)

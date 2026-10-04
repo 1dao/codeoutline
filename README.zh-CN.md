@@ -88,6 +88,8 @@ codeoutline doctor [--project PATH]
 
 `status`、`rebuild`、`doctor` 输出 JSON；诊断失败返回非零退出码。一次性命令的项目默认为当前目录。
 
+`xlsp` 分支已提供独立 stdio LSP 开发预览，支持文件符号和项目符号，详见 [LSP.md](docs/LSP.md)。它尚未包含在已发布的 0.1.9 中，也尚未接入共享 HTTP 后台。
+
 运行时只把警告和错误输出到 stderr，不写日志文件，在项目中启动不会留下任何文件。排查问题时可设置 `CODEOUTLINE_LOG_LEVEL`（`DEBUG`、`INFO`、`WARN`、`ERROR` 等）调整级别，设置 `CODEOUTLINE_LOG_DIR` 将日志文件写到该目录。
 
 ## MCP 服务细节
@@ -96,7 +98,7 @@ codeoutline doctor [--project PATH]
 
 stdio 模式下 stdout 只输出 MCP 消息，日志写入 stderr。HTTP 默认只监听本机，客户端地址为 `http://127.0.0.1:19876/mcp`。远程监听需设置至少 16 字节的 `CODEOUTLINE_TOKEN` 并用 `--allow-host` 显式允许主机，客户端使用 `Authorization: Bearer ...`；与本机 HTTP 不同，远程服务未传 `--allow-root` 时只允许访问 `--project` 或启动目录；`--allow-origin` 可重复指定允许的完整 Origin，未配置的浏览器 Origin 被拒绝。远程部署应由 TLS 反向代理保护令牌。
 
-主线程处理协议，常驻索引线程串行处理查询。请求含进度 token 时每秒报告进度，HTTP 使用 SSE；没有独立的 GET/SSE 订阅端点（返回 405）。最多 64 个会话、64 个排队或执行中的任务；任务期限 120 秒，会话空闲 15 分钟过期。取消在每个文件的检查点生效，单个文件解析期间无法中断（单文件上限 1.5 MB）；取消后丢弃可能不完整的内存索引，下次查询从缓存恢复。
+主线程处理协议，常驻索引线程串行处理查询。请求含进度 token 时每秒报告进度，HTTP 使用 SSE；没有独立的 GET/SSE 订阅端点（返回 405）。最多 64 个会话、64 个排队或执行中的任务；任务期限 120 秒，会话空闲 15 分钟过期。取消在显式检查点生效，单个文件的原生解析期间无法中断（单文件上限 1.5 MB）。更新被取消时回滚至上一份完整的内存索引；取消只读查询不会丢弃索引。
 
 ## 索引行为与限制
 

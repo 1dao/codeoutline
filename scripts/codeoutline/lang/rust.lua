@@ -79,7 +79,7 @@ end
 -- Type name in `impl<T> Trait<X> for Type<Y> where ...` / `impl Type`.
 local function impl_target(T, x, body)
     x = skip_angle(T, x, body)
-    local first, trait
+    local first, trait, name_tok
     local d, y = 0, x
     local names = {}
     while y < body do
@@ -87,9 +87,11 @@ local function impl_target(T, x, body)
         if kw(T, y, 'for') and d == 0 then
             trait = names[#names]
             names = {}
+            name_tok = nil
         elseif (T.k[y] == 'id' or kw(T, y, 'Self')) and d == 0 and not is(T, y + 1, '::')
             and T:text(y):sub(1, 1) ~= "'" then              -- 'static is a lifetime, not the type
             names[#names + 1] = T:text(y)
+            name_tok = name_tok or y
         end
         d = math.max(0, d + angle(T, y))
         y = y + 1
@@ -103,7 +105,7 @@ local function impl_target(T, x, body)
         for z = from, body - 1 do if T.k[z] == 'kw' and T:text(z) == 'where' then to = z - 1; break end end
         if to >= from then first = common.sig(T, from, to, 60):gsub('%s', '') end
     end
-    return first, trait
+    return first, trait, name_tok or x
 end
 
 -- Record calls in [a, b], including macro invocations `name!(..)` / `name![..]`.
@@ -128,7 +130,7 @@ local function body_members(T, r, o, c, parent, kind)
             if is(T, x, '(') and T.m[x] then x = T.m[x] + 1 end
         end
         if T.k[x] == 'id' and (kind == 'enum' or is(T, x + 1, ':')) then
-            common.add_node(r, T, { kind = kind == 'enum' and 'enum_member' or 'field', name = T:text(x),
+            common.add_node(r, T, { kind = kind == 'enum' and 'enum_member' or 'field', name = T:text(x), ni = x,
                 parent = parent, ti = x, tj = x })
         end
         while x < c and not is(T, x, ',') do
@@ -173,7 +175,7 @@ parse_items = function(T, r, a, b, parent, impl_type, in_trait)
             local p = skip_angle(T, x + 2, b)
             local e, body = item_end(T, p, b)
             local node = common.add_node(r, T, {
-                kind = (impl_type or in_trait) and 'method' or 'function', name = T:text(name_tok),
+                kind = (impl_type or in_trait) and 'method' or 'function', name = T:text(name_tok), ni = name_tok,
                 parent = parent, ti = start, tj = e,
                 sig = common.sig(T, start, body and body - 1 or e, 200), abstract = (not body) or nil,
             })
@@ -185,21 +187,22 @@ parse_items = function(T, r, a, b, parent, impl_type, in_trait)
             stop = e
         elseif (t == 'struct' or t == 'enum' or t == 'union') and T.k[x + 1] == 'id' then
             local e, body = item_end(T, x + 2, b)
-            local node = common.add_node(r, T, { kind = t == 'enum' and 'enum' or 'struct', name = T:text(x + 1),
+            local node = common.add_node(r, T, { kind = t == 'enum' and 'enum' or 'struct', name = T:text(x + 1), ni = x + 1,
                 parent = parent, ti = start, tj = e, sig = common.sig(T, start, body and body - 1 or e, 160) })
             if body then body_members(T, r, body, e, node, t) end
             stop = e
         elseif t == 'trait' and T.k[x + 1] == 'id' then
             local e, body = item_end(T, x + 2, b)
-            local node = common.add_node(r, T, { kind = 'interface', name = T:text(x + 1), parent = parent,
+            local node = common.add_node(r, T, { kind = 'interface', name = T:text(x + 1), ni = x + 1, parent = parent,
                 ti = start, tj = e, sig = common.sig(T, start, body and body - 1 or e, 160) })
             if body then parse_items(T, r, body + 1, e - 1, node, nil, true) end
             stop = e
         elseif t == 'impl' then
             local e, body = item_end(T, x + 1, b)
             if body then
-                local ty, trait = impl_target(T, x + 1, body)
+                local ty, trait, name_tok = impl_target(T, x + 1, body)
                 local node = common.add_node(r, T, { kind = 'impl', name = ty or 'impl', parent = parent,
+                    ni = name_tok,
                     ti = start, tj = e, sig = common.sig(T, start, body - 1, 160), trait = trait })
                 r.nodes[node].qualified = ty or 'impl'
                 parse_items(T, r, body + 1, e - 1, node, ty, false)
@@ -208,12 +211,12 @@ parse_items = function(T, r, a, b, parent, impl_type, in_trait)
         elseif t == 'mod' and T.k[x + 1] == 'id' then
             local e, body = item_end(T, x + 2, b)
             if body then
-                local node = common.add_node(r, T, { kind = 'namespace', name = T:text(x + 1), parent = parent,
+                local node = common.add_node(r, T, { kind = 'namespace', name = T:text(x + 1), ni = x + 1, parent = parent,
                     ti = start, tj = e })
                 parse_items(T, r, body + 1, e - 1, node, nil, false)
             else
                 -- `mod x;` declares a file module: a node and an import of x.rs / x/mod.rs
-                common.add_node(r, T, { kind = 'namespace', name = T:text(x + 1), parent = parent, ti = start, tj = e })
+                common.add_node(r, T, { kind = 'namespace', name = T:text(x + 1), ni = x + 1, parent = parent, ti = start, tj = e })
                 r.imports[#r.imports + 1] = { path = T:text(x + 1), line = T:line(x), kind = 'mod' }
             end
             stop = e
@@ -223,7 +226,7 @@ parse_items = function(T, r, a, b, parent, impl_type, in_trait)
             stop = e
         elseif (t == 'type') and T.k[x + 1] == 'id' then
             local e = item_end(T, x + 2, b)
-            common.add_node(r, T, { kind = 'typedef', name = T:text(x + 1), parent = parent, ti = start, tj = e,
+            common.add_node(r, T, { kind = 'typedef', name = T:text(x + 1), ni = x + 1, parent = parent, ti = start, tj = e,
                 sig = common.sig(T, start, e, 160) })
             stop = e
         elseif (t == 'const' or t == 'static') then
@@ -231,7 +234,7 @@ parse_items = function(T, r, a, b, parent, impl_type, in_trait)
             if kw(T, y, 'mut') then y = y + 1 end
             local e = item_end(T, y, b)
             if T.k[y] == 'id' then
-                local node = common.add_node(r, T, { kind = t == 'const' and 'constant' or 'variable', name = T:text(y),
+                local node = common.add_node(r, T, { kind = t == 'const' and 'constant' or 'variable', name = T:text(y), ni = y,
                     parent = parent, ti = start, tj = e, sig = common.sig(T, start, math.min(e, y + 2), 120) })
                 if impl_type then r.nodes[node].qualified = impl_type .. '::' .. T:text(y) end
                 calls(r, T, y, e)
@@ -241,7 +244,7 @@ parse_items = function(T, r, a, b, parent, impl_type, in_trait)
             local o = x + 3
             local e = (T.m[o] or o)
             if is(T, e + 1, ';') then e = e + 1 end
-            common.add_node(r, T, { kind = 'macro', name = T:text(x + 2), parent = parent, ti = start, tj = e })
+            common.add_node(r, T, { kind = 'macro', name = T:text(x + 2), ni = x + 2, parent = parent, ti = start, tj = e })
             stop = e
         elseif kw(T, x, 'extern') and kw(T, x + 1, 'crate') then
             local e = item_end(T, x, b)
@@ -264,9 +267,9 @@ parse_items = function(T, r, a, b, parent, impl_type, in_trait)
     end
 end
 
-function M.parse(path, src)
+function M.parse(path, src, language, opts)
     local T = M.lang:tokenize(src)
-    local r = common.new(path, 'rust')
+    local r = common.new(path, 'rust', opts)
     parse_items(T, r, 1, T.n, nil, nil, false)
     -- '::' is the path separator: fix qualified names built with '.'
     for _, n in ipairs(r.nodes) do n.qualified = n.qualified:gsub('%.', '::') end

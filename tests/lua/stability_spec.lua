@@ -237,6 +237,10 @@ do
             assert(utf8.len(output))
             local idx = svc.get(project, opts)
             spec.equal(idx.files['gbk.lua'].encoding, 'gbk')
+            for _, node in ipairs(idx.files['gbk.lua'].nodes) do
+                spec.equal(node.start_byte, nil); spec.equal(node.name_start, nil)
+                spec.equal(node.end_byte, nil); spec.equal(node.name_end, nil)
+            end
             spec.equal(idx.files['unused.lua'].encoding, nil)
             spec.equal(idx.query_sources, nil)
         end)
@@ -257,6 +261,10 @@ do
             local idx = svc.get(project, opts)
             spec.truthy(idx.cache_loaded)
             spec.equal(idx.files['gbk.lua'].encoding, 'gbk')
+            for _, node in ipairs(idx.files['gbk.lua'].nodes) do
+                spec.equal(node.start_byte, nil); spec.equal(node.name_start, nil)
+                spec.equal(node.end_byte, nil); spec.equal(node.name_end, nil)
+            end
             spec.contains(svc.explore(project, 'abc', opts), '中文')
             write('gbk.lua', 'function abc() return "现在是 UTF-8" end\n')
             idx = svc.get(project, opts)

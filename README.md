@@ -107,6 +107,8 @@ The main thread handles the protocol while a resident index thread serves querie
 
 ## Indexing behavior and limits
 
+The service starts parse workers on demand for full scans with at least 32 files that need reading, while the index thread commits their results. It uses 8 parse threads on Windows and 6 elsewhere; set `CODEOUTLINE_INDEX_THREADS` to override the count, or `0` to disable them. Workers are reused and shut down after 60 seconds idle, once all outstanding batches have returned, then recreated when needed.
+
 The cache lives at `.codeoutline/cache/<SHA-256 of path>.idx` in the user's home directory. It is integrity-checked and rebuilt automatically if corrupt; every write goes to a separate temporary file that atomically replaces the old one, which survives a failed write. Up to 8 projects stay resident by default, and idle ones are evicted after 15 minutes. Directory aliases and links resolve to real absolute paths; on Windows, ASCII case is ignored.
 
 Source encodings are confirmed on demand: the first index pass does not check each file, only the files a query touches. UTF-8 (with or without BOM) is tried first, then strict GBK conversion; a GBK file is reparsed and its symbols updated before the query runs, without modifying the file. Encoding results are cached and invalidated when a file changes, and a matched file that cannot be decoded is reported as an error. When both encodings are valid, UTF-8 wins. GBK files that no query has touched yet may still be misparsed, so Chinese identifiers can be missed; querying the file name triggers its repair.

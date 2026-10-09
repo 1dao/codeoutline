@@ -106,18 +106,21 @@ return {
     __init = function()
         assert(xnet.init())
         local threads = tonumber(os.getenv('CODEOUTLINE_INDEX_THREADS') or '') or pool.THREADS
-        if threads >= 1 then pool.start(scripts .. '/codeoutline/parse_worker.lua', math.floor(threads)) end
+        pool.configure(scripts .. '/codeoutline/parse_worker.lua', math.max(0, math.floor(threads)))
         assert(xthread.post(1, 'worker_ready'))
     end,
     -- A suspended job still holds its project: sweeping waits for it.
-    __update = function() if not active then service.sweep() end end,
+    __update = function()
+        pool.sweep()
+        if not active then service.sweep() end
+    end,
     __thread_handle = function(_, op, id, req, failure)
         if op == 'run' then
             queue[#queue + 1] = { id, req }
             pump()
         elseif op == 'parsed' then
             -- (token, results, failure); stale tokens are dropped by the pool.
-            if active and pool.waiting() then resume(id, req, failure); pump() end
+            if pool.receive(id) and active and pool.waiting() then resume(id, req, failure); pump() end
         end
     end,
     __uninit = function()

@@ -44,6 +44,32 @@ local serial_stats = serial:refresh()
 local expected = snapshot(serial)
 
 local job, steps, delivered = nil, {}, 0
+local draining, created, baseline_handles = false, 0, 0
+local function retained_handles()
+    local registry, count = debug.getregistry(), 0
+    for _, value in pairs(registry) do
+        if type(value) == 'userdata' and getmetatable(value) == registry['xthread.ThreadData'] then
+            count = count + 1
+        end
+    end
+    return count
+end
+
+local function sweep_after(ms)
+    local clock = xtimer.now_ms
+    xtimer.now_ms = function() return clock() + ms end
+    local ok, err = pcall(pool.sweep)
+    xtimer.now_ms = clock
+    assert(ok, err)
+end
+
+local function alive()
+    local count = 0
+    for id = pool.FIRST_ID, pool.FIRST_ID + 3 do
+        if xthread.stats(id) then count = count + 1 end
+    end
+    return count
+end
 local function step()
     if job and coroutine.status(job) ~= 'dead' then return end
     local nxt = table.remove(steps, 1)
@@ -58,6 +84,16 @@ local function step()
     step()
 end
 
+steps[#steps + 1] = { 'keeps startup and small refreshes free of parse threads', function()
+    spec.equal(alive(), 0)
+    assert(xutils.mkdir_p(root .. '/small'))
+    write(root .. '/small/one.lua', 'function only_one() end\n')
+    local idx = index.open(root .. '/small', { cache_path = root .. '/small.idx', lister = 'walk', rebuild = true })
+    spec.equal(idx:refresh().parsed, 1)
+    spec.equal(alive(), 0); spec.equal(created, 0)
+    idx:close()
+end }
+
 steps[#steps + 1] = { 'balances threads by size, largest first', function()
     local jobs = {}
     for i, w in ipairs({ 10, 70, 30, 40, 50, 20, 60 }) do jobs[i] = { rel = tostring(i), weight = w } end
@@ -69,10 +105,10 @@ steps[#steps + 1] = { 'balances threads by size, largest first', function()
 end }
 
 steps[#steps + 1] = { 'commits the same records as a serial pass', function()
-    spec.truthy(pool.ready())
     local idx = index.open(project, { cache_path = root .. '/pool.idx', lister = 'walk', rebuild = true,
         max_file_bytes = MAX_BYTES })
     local stats = idx:refresh()
+    spec.equal(alive(), 4); spec.equal(created, 4)
     spec.truthy(delivered >= 4, 'every parse thread returned results')
     spec.equal(stats.parsed, serial_stats.parsed); spec.equal(stats.skipped, 1)
     spec.equal(stats.parsed, 121)
@@ -83,6 +119,9 @@ steps[#steps + 1] = { 'commits the same records as a serial pass', function()
     local generation = idx.generation
     stats = idx:refresh()
     spec.equal(stats.parsed, 0); spec.equal(idx.generation, generation)
+    sweep_after(0)
+    spec.equal(alive(), 4, 'retain threads during the idle grace period')
+    idx:close()
 end }
 
 steps[#steps + 1] = { 'abandons a cancelled pass and ignores its late results', function()
@@ -101,18 +140,83 @@ steps[#steps + 1] = { 'abandons a cancelled pass and ignores its late results', 
     spec.equal(stats.mode, 'full'); spec.equal(stats.parsed + stats.unchanged, 121)
     local got = snapshot(idx)
     for rel, packed in pairs(expected) do spec.equal(got[rel], packed, rel) end
+    spec.equal(created, 4, 'reuse workers across passes and cancellation')
+    idx:close()
+end }
+
+steps[#steps + 1] = { 'reclaims idle workers and restarts them for the next full pass', function()
+    sweep_after(pool.IDLE_MS + 1)
+    spec.equal(alive(), 0)
+    spec.equal(retained_handles(), baseline_handles, 'release native ownership references after shutdown')
+    local idx = index.open(project, { cache_path = root .. '/restart.idx', lister = 'walk', rebuild = true,
+        max_file_bytes = MAX_BYTES })
+    spec.equal(idx:refresh().parsed, 121)
+    spec.equal(created, 8); spec.equal(alive(), 4)
+    local got = snapshot(idx)
+    for rel, packed in pairs(expected) do spec.equal(got[rel], packed, rel) end
+    idx:close()
+end }
+
+steps[#steps + 1] = { 'drains cancelled work before reclaiming workers without an active pass', function()
+    local idx = index.open(project, { cache_path = root .. '/drain.idx', lister = 'walk', rebuild = true,
+        max_file_bytes = MAX_BYTES })
+    local chunk_files = pool.CHUNK_FILES
+    pool.CHUNK_FILES = 1
+    control.callback = function() if idx.generation >= 1 then error(control.cancelled(), 0) end end
+    local ok, err = pcall(idx.refresh, idx)
+    control.callback = nil
+    pool.CHUNK_FILES = chunk_files
+    spec.equal(ok, false); spec.truthy(control.is_interrupted(err))
+    sweep_after(pool.IDLE_MS + 1)
+    spec.equal(alive(), 4, 'cancelled pass still has outstanding replies')
+    local partial = snapshot(idx)
+    draining = true
+    coroutine.yield()
+    spec.equal(alive(), 0)
+    spec.equal(retained_handles(), baseline_handles, 'repeated lifecycles must not retain native handles')
+    local got = snapshot(idx)
+    for rel, packed in pairs(partial) do spec.equal(got[rel], packed, rel) end
+    for rel in pairs(got) do spec.truthy(partial[rel], 'late reply committed ' .. rel) end
+    idx:close()
+end }
+
+steps[#steps + 1] = { 'preserves serial mode when parse threads are disabled', function()
+    pool.configure('scripts/codeoutline/parse_worker.lua', 0)
+    spec.equal(pool.ready(), false)
+    local idx = index.open(project, { cache_path = root .. '/disabled.idx', lister = 'walk', rebuild = true,
+        max_file_bytes = MAX_BYTES })
+    spec.equal(idx:refresh().parsed, 121)
+    spec.equal(alive(), 0); spec.equal(created, 8)
+    idx:close()
 end }
 
 return {
     __init = function()
         assert(xnet.init())
         assert(xshared.create('codeoutline_control', 65536, 256))
-        spec.equal(pool.start('scripts/codeoutline/parse_worker.lua', 4), 4)
+        baseline_handles = retained_handles()
+        local create = xthread.create_thread
+        xthread.create_thread = function(...)
+            local ok, err = create(...)
+            if ok then created = created + 1 end
+            return ok, err
+        end
+        pool.configure('scripts/codeoutline/parse_worker.lua', 4)
         step()
     end,
     __thread_handle = function(_, op, token, results, failure)
-        if op == 'parsed' and job and pool.waiting() then
+        if op ~= 'parsed' or not pool.receive(token) then return end
+        if draining then
+            sweep_after(pool.IDLE_MS + 1)
+            if alive() == 0 then
+                draining = false
+                assert(coroutine.resume(job))
+                step()
+            end
+        elseif job and pool.waiting() then
             delivered = delivered + 1
+            sweep_after(pool.IDLE_MS + 1)
+            assert(alive() == 4, 'never reclaim workers during an active pass')
             local ok, err = coroutine.resume(job, token, results, failure)
             if not ok then io.stderr:write(tostring(err), '\n'); os.exit(1) end
             step()

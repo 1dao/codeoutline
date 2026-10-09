@@ -369,6 +369,20 @@ test('LSP returns JSON null for shutdown and ignores late initialized notificati
     assert.equal((await exit)[0], 0);
 });
 
+test('LSP accepts null params and answers invalid requests by id', { timeout: 30000 }, async (t) => {
+    const client = await start(t);
+    await initialize(client, [client.project]);
+    // Array params are invalid; the error must carry the id, or the client waits forever.
+    const invalid = await client.rawRequest('workspace/symbol', [{ query: '' }]);
+    assert.equal(invalid.error.code, -32600);
+    const shutdown = await client.rawRequest('shutdown', null);
+    assert.equal(shutdown.error, undefined, JSON.stringify(shutdown.error));
+    assert.equal(shutdown.result, null);
+    const exit = once(client.child, 'exit');
+    client.child.stdin.write(frame({ method: 'exit', params: null }));
+    assert.equal((await exit)[0], 0);
+});
+
 test('LSP reports indexing progress and refreshes saved files without a query-triggered scan', { timeout: 30000 }, async (t) => {
     const client = await start(t);
     await initialize(client, [client.project]);

@@ -500,9 +500,13 @@ function M.new(config, emit, submit, cancel, stop)
             if job.done then self:end_index(job.root, job.message) end
             return
         end
+        -- Some clients send `"params": null` for parameterless requests such as
+        -- shutdown; treat it as omitted.
+        if object(msg) and msg.params == null then msg.params = nil end
         if not object(msg) or msg.jsonrpc ~= '2.0' or type(msg.method) ~= 'string'
             or (msg.id ~= nil and not valid_id(msg.id)) or (msg.params ~= nil and not object(msg.params)) then
-            error_response(nil, -32600, 'Invalid JSON-RPC request'); return
+            -- Echo a readable id so the client can fail that request instead of waiting.
+            error_response(object(msg) and valid_id(msg.id) and msg.id or nil, -32600, 'Invalid JSON-RPC request'); return
         end
         if (msg.method == 'initialize' or msg.method == 'shutdown') and msg.id == nil then return end
         local dispatched, err = pcall(dispatch, msg)

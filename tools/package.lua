@@ -114,8 +114,8 @@ local dependencies = {}
 for name in pairs(targets) do dependencies[scope .. 'codeoutline-' .. name] = version end
 write(output .. '/npm/package.json', xutils.json_pack({ name = 'codeoutline', version = version,
     private = not release or nil, license = 'BSD-2-Clause',
-    description = 'MCP server for code exploration: symbols, line-numbered source and call paths',
-    keywords = { 'mcp', 'model-context-protocol', 'code-index', 'call-graph', 'lua' },
+    description = 'MCP and LSP server for code exploration: symbols, line-numbered source, call paths and editor navigation',
+    keywords = { 'mcp', 'model-context-protocol', 'lsp', 'language-server', 'code-index', 'call-graph', 'lua' },
     repository = repository, homepage = 'https://github.com/1dao/codeoutline#readme', publishConfig = public,
     bugs = { url = 'https://github.com/1dao/codeoutline/issues' },
     bin = { codeoutline = 'launcher/codeoutline.cjs' }, engines = { node = '>=20' },

@@ -4,7 +4,7 @@ local scripts = assert(source:match('^(.*)/codeoutline/[^/]+$'))
 local install = assert(scripts:match('^(.*)/scripts$'))
 package.path = scripts .. '/?.lua;' .. package.path
 local version = require('codeoutline.version')
-local help = [[CodeOutline - Lua code indexing and MCP
+local help = [[CodeOutline - Lua code indexing for MCP and LSP
 
 One shared background service serves every MCP client. A global npm install
 starts it and registers it to start at login (codeoutline install does the same

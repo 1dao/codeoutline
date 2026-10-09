@@ -3,35 +3,55 @@
 A thin language client for the Lua CodeOutline server. The same VSIX works in
 VS Code and Cursor. The extension contains no indexer or server runtime.
 
-## Local preview
+## Install
 
-Install `codeoutline.vsix` with the editor's **Extensions: Install from VSIX**
-command. This Windows source preview includes the following local settings in
-its manifest's `codeoutlineInstallationDefaults`. On first activation after
-installation, it writes them automatically to the editor's global user settings.
-It applies them once per editor profile; later restarts retain your edits.
-The preset targets `C:/source/ops/codeoutline` and is not a portable runtime
-installation. The VSIX installer itself does not run extension code: open the
-editor after installing to apply the settings.
+The extension needs CodeOutline 0.2.0 or newer (`npm install -g codeoutline`),
+which provides `codeoutline lsp --stdio`. It is not on a marketplace yet: build
+`codeoutline.vsix` as below (CI also uploads it as the `codeoutline-vscode`
+artifact) and install it with the editor's **Extensions: Install from VSIX**
+command.
 
-Released CodeOutline 0.1.9 has no LSP command yet. For another checkout or platform,
-use a built source checkout in your user settings:
+The client starts the server directly, without a shell.
 
-```json
-{
-  "codeoutline.serverPath": "C:/source/ops/codeoutline/bin/xnet.exe",
-  "codeoutline.serverArguments": [
-    "C:/source/ops/codeoutline/scripts/codeoutline/command.lua",
-    "LOG_STDERR=1", "LOG_FILE=0", "lsp", "--stdio"
-  ],
-  "codeoutline.mode": "navigation"
-}
-```
+- **Linux and macOS**: the defaults (`codeoutline` with `lsp --stdio`) use the
+  npm-installed command. If the editor does not see it on PATH, set
+  `codeoutline.serverPath` to the output of `command -v codeoutline`.
+- **Windows**: npm's `codeoutline.cmd` cannot start without a shell, so run the
+  npm launcher with Node. `npm root -g` prints the global folder:
 
-On Linux/macOS use the absolute `bin/xnet` path. A compatible `codeoutline`
-command on PATH works with the default arguments. Commands are executed directly,
-without a shell. Windows npm `.cmd` launchers are not native executables: use
-the native runtime and its Lua command script as above.
+  ```json
+  {
+    "codeoutline.serverPath": "node",
+    "codeoutline.serverArguments": [
+      "C:/Users/<you>/AppData/Roaming/npm/node_modules/codeoutline/launcher/codeoutline.cjs",
+      "lsp", "--stdio"
+    ],
+    "codeoutline.mode": "navigation"
+  }
+  ```
+
+- **Native archive or source checkout**: run the runtime with the Lua command
+  script (`bin/xnet` instead of `bin/xnet.exe` on Linux/macOS):
+
+  ```json
+  {
+    "codeoutline.serverPath": "C:/source/ops/codeoutline/bin/xnet.exe",
+    "codeoutline.serverArguments": [
+      "C:/source/ops/codeoutline/scripts/codeoutline/command.lua",
+      "LOG_STDERR=1", "LOG_FILE=0", "lsp", "--stdio"
+    ],
+    "codeoutline.mode": "navigation"
+  }
+  ```
+
+The server uses the newest installed CodeOutline version each time it starts;
+a runtime started directly from an archive or checkout always runs that copy.
+
+The current manifest also carries `codeoutlineInstallationDefaults`, a preset for
+the maintainer's Windows checkout (`C:/source/ops/codeoutline`). On Windows, the
+first activation writes it to the global user settings, once per editor profile;
+later edits are kept. Elsewhere it is ignored. Replace those settings as above
+when your installation differs.
 
 The default `auxiliary` mode enables workspace symbols only, to avoid adding
 duplicate navigation providers beside an existing language server. Use
@@ -51,10 +71,9 @@ documents are supported; unsaved changes are synchronized in full.
 `codeoutline.trace.server` for protocol tracing. Opening an untrusted workspace
 does not launch the server.
 
-This preview uses an independent stdio process, matching the current Zed client.
-Shared MCP/TCP startup and automatic runtime downloads require a compatible
-server release and are not implemented in this preview. No marketplace publish
-is performed by the build commands.
+Each editor window runs an independent stdio server, as the Zed client does; it
+does not connect to the shared MCP service. The extension does not download a
+runtime, and the build commands publish nothing to a marketplace.
 
 ## Build
 

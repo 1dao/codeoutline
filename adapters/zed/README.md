@@ -6,14 +6,34 @@ protocol handling and resolution stay in the Lua server.
 Requires Zed with LSP call hierarchy support (1.19.2 or later) for the call
 hierarchy commands.
 
+The server needs CodeOutline 0.2.0 or newer (`npm install -g codeoutline`). The
+extension is not in Zed's extension registry yet; install it as a dev extension
+(see Development).
+
 ## Binary lookup
 
 1. `lsp.codeoutline.binary` in Zed settings (`path`, optional `arguments` and `env`;
    arguments default to `["lsp", "--stdio"]`).
 2. `codeoutline` on PATH.
 
-Released 0.1.9 has no `lsp` command, so until a release includes it, point the
-setting at a source checkout:
+On Linux and macOS the npm-installed `codeoutline` is found on PATH. On Windows,
+npm installs `codeoutline.cmd`, which is not a native executable; run the npm
+launcher with Node instead (`npm root -g` prints the global folder):
+
+```json
+"lsp": {
+  "codeoutline": {
+    "binary": {
+      "path": "node",
+      "arguments": ["C:/Users/<you>/AppData/Roaming/npm/node_modules/codeoutline/launcher/codeoutline.cjs",
+        "lsp", "--stdio"]
+    }
+  }
+}
+```
+
+For a native archive or a source checkout, run the runtime with the Lua command
+script (`bin/xnet` on Linux/macOS):
 
 ```json
 "lsp": {
@@ -39,8 +59,8 @@ To keep another server for definitions and hover, disable those features here:
   "features": { "definition": false, "hover": false } } } }
 ```
 
-Features: `documentSymbol`, `workspaceSymbol`, `definition`, `hover`, `references`,
-`callHierarchy`, `completion`.
+Features: `documentSymbol`, `workspaceSymbol`, `definition`, `hover`, `signatureHelp`,
+`references`, `callHierarchy`, `completion`.
 
 `#include <...>` headers outside the project are found through the compiler or
 Windows Kits/MSVC; add other directories with

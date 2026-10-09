@@ -1,21 +1,28 @@
-# LSP Development Preview
+# LSP Server
 
-The source checkout provides a Lua stdio language server. Released CodeOutline
-0.1.9 does not contain this command; editor clients currently launch the built
-source checkout.
+`codeoutline lsp --stdio` is a Lua language server on stdin and stdout. Releases
+include it from 0.2.0; the README's
+[Editor integration](../README.md#editor-integration-lsp) section covers
+installation and how each platform's editors start it.
 
-Development clients are available for [VS Code/Cursor](../adapters/vscode/README.md)
+Clients are available for [VS Code/Cursor](../adapters/vscode/README.md)
 and [Zed](../adapters/zed/README.md). The VS Code/Cursor client uses one common
 VSIX and supports capability selection, server configuration, restart and logs.
 
-LSP now uses `main.lua` and the same INDEX worker submission/cancellation path
-as MCP. The stdio command is available again. A process still selects either
-MCP or LSP transport; simultaneous HTTP MCP and TCP LSP is a later batch.
+The server shares `main.lua` and the INDEX worker's submission and cancellation
+path with MCP. A process serves either MCP or LSP: the language server does not
+join the shared MCP HTTP service, and there is no TCP transport.
 
 ## Launch
 
-Rebuild the bundled runtime first. Windows needs `xutils.stdout_binary()` to keep
-the CRLF separators in LSP frames intact; an older runtime is rejected explicitly.
+From an installation, the editor runs `codeoutline lsp --stdio`. Windows editors
+start servers without a shell, so they run `node` with the npm launcher
+(`<npm root -g>/codeoutline/launcher/codeoutline.cjs lsp --stdio`) or the native
+archive's `bin/xnet.exe` with its `scripts/codeoutline/command.lua`, as below.
+
+From a source checkout, rebuild the bundled runtime first. Windows needs
+`xutils.stdout_binary()` to keep the CRLF separators in LSP frames intact; an
+older runtime is rejected explicitly.
 
 ```powershell
 .\tools\build-runtime.ps1
@@ -23,9 +30,9 @@ the CRLF separators in LSP frames intact; an older runtime is rejected explicitl
 ```
 
 On Linux/macOS, build with `sh tools/build-runtime.sh` and launch `bin/xnet` with
-the same script and arguments. These platforms have not yet been runtime-tested
-for the LSP preview. Configure an LSP client to start this process with piped
-stdin/stdout; this is not an interactive console command.
+the same script and arguments. Linux CI runs the VS Code client against this
+server; macOS has not been runtime-tested yet. Configure an LSP client to start
+this process with piped stdin/stdout; this is not an interactive console command.
 
 Workspace folders come from `initialize`. `--project PATH` is an optional
 fallback when the client supplies no workspace root. Resource lookup does not
@@ -57,12 +64,13 @@ depend on the editor's working directory. Runtime logs must go to stderr.
   those records for workspace symbols; it does not build symbol tables. Once a
   consumer has built them, every refresh keeps them current file by file.
 - Navigation (see below): `textDocument/definition`, `textDocument/hover`,
-  `textDocument/references` and call hierarchy (`prepareCallHierarchy`,
-  `incomingCalls`, `outgoingCalls`).
+  `textDocument/signatureHelp`, `textDocument/references` and call hierarchy
+  (`prepareCallHierarchy`, `incomingCalls`, `outgoingCalls`).
 - Completion (see below), triggered by typing or by `.`, `:` and `>`.
 - `initializationOptions.features` can disable `documentSymbol`, `workspaceSymbol`,
-  `definition`, `hover`, `references`, `callHierarchy` or `completion`, e.g. to run beside another
-  language server; disabled features are neither advertised nor answered.
+  `definition`, `hover`, `signatureHelp`, `references`, `callHierarchy` or
+  `completion`, e.g. to run beside another language server; disabled features are
+  neither advertised nor answered.
 - Cancellation responds immediately with -32800 and discards late results.
   Shutdown cancels session jobs; exit closes the stdio process with the appropriate
   exit code. Session close is separate from process stop for future transports.
@@ -90,9 +98,11 @@ name-based resolver as explore, not a type checker, and completion infers types
 from declarations only. Rename, diagnostics and incremental text edits are not
 implemented.
 
-No symbol table is copied to the main thread. TCP LSP, stdio bridging, a single
-multi-protocol daemon, binary discovery and VS Code/Cursor/Zed extensions remain
-subsequent batches. Do not configure the MCP HTTP endpoint as an LSP URL.
+No symbol table is copied to the main thread. TCP LSP, a single daemon serving
+both protocols, and automatic runtime downloads by the editor clients are not
+implemented. The VS Code/Cursor and Zed clients are built from this repository
+and are not yet published to an extension marketplace. Do not configure the MCP
+HTTP endpoint as an LSP URL.
 
 ## Navigation
 
@@ -122,6 +132,11 @@ overlay never writes to the resident tables.
   including file. When definitions are too far apart to choose between, a visible
   prototype is the target.
 - Hover shows the target's signature, kind, qualified name and location.
+- Signature help, triggered by `(` and `,`, finds the innermost open call before
+  the cursor (commas inside nested calls, literals and brackets do not count),
+  resolves its name like definition, and lists each target's signature with
+  parameters split from the declaration. The active parameter follows the
+  argument count; unsaved edits are included.
 - References support functions, methods, constructors, destructors and macros;
   types, fields and variables get RequestFailed rather than incomplete results.
   A declaration and its definitions count as one target. Results come from one
@@ -175,12 +190,16 @@ navigation only.
 
 ## Completion
 
-Completion also runs in the worker over the same overlay. It never offers
-global names, does not sort, and leaves case-insensitive filtering to the editor.
+Completion also runs in the worker over the same overlay. It does not offer
+project-wide global names and leaves case-insensitive filtering to the editor.
+Items keep their collection order, except that when a request exceeds the item
+limit, names starting with the typed prefix come first.
 
 - Without a member operator: locals and parameters visible at the cursor
   (nested functions that end earlier keep theirs), the file's definitions and
-  imports, and members of the enclosing class.
+  imports, members of the enclosing class, and in C/C++ the top-level
+  declarations of headers the file includes, directly or transitively (not of
+  paired implementation files, whose private symbols are not visible).
 - After `.`, `->`, `::`, `?.` or Lua `:` (methods only): the receiver chain is
   typed from `self`/`this`/`cls`, declared types of locals, parameters, fields and
   return types read from signatures, initializers (`new T`, `T(...)`, `T{...}`,

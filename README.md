@@ -2,9 +2,9 @@
 
 English | [简体中文](README.zh-CN.md)
 
-Lightweight code indexing and exploration for coding agents, as an MCP server. Powered by Lua.
+Lightweight code indexing and exploration for coding agents, as an MCP server, and for editors, as a language server. Powered by Lua.
 
-CodeOutline answers symbol queries with line-numbered source, call paths, and callers/callees, refreshes incrementally, and caches the index on disk. The MCP protocol and both transports (stdio and Streamable HTTP) are implemented in Lua, so the service does not depend on Node; in the npm package, Node only locates and starts the runtime for your platform.
+CodeOutline answers symbol queries with line-numbered source, call paths, and callers/callees, refreshes incrementally, and caches the index on disk. Editors get symbols, definitions, references, call hierarchy, and completion from the same index through LSP. The MCP protocol with both transports (stdio and Streamable HTTP) and the language server are implemented in Lua, so neither depends on Node; in the npm package, Node only locates and starts the runtime for your platform.
 
 ## Installation and setup
 
@@ -61,6 +61,28 @@ Three tools are provided:
 
 Without Node, download the native archive for your platform from [GitHub Releases](https://github.com/1dao/codeoutline/releases), extract it, and run `codeoutline` (`codeoutline.cmd` on Windows).
 
+## Editor integration (LSP)
+
+`codeoutline lsp --stdio` is a language server over the same indexer. Each editor window starts its own server process with its own index; it does not connect to the shared MCP service, and the MCP URL is not an LSP endpoint.
+
+| Feature | Scope |
+| --- | --- |
+| Document and workspace symbols | Workspace symbols match substrings, case-insensitively |
+| Definition, hover, signature help | Definition also goes from import lines (`require`, `#include`, module imports) to the files they load |
+| References, call hierarchy | Functions, methods, constructors, and macros; incoming and outgoing calls |
+| Completion | Locals, the file's definitions and imports, declarations from included C/C++ headers, and members after `.`, `->`, `::`, `?.`, or Lua `:` |
+
+Resolution is name-based, the same as `codeoutline_explore`; it is not a type checker. Rename, diagnostics, and formatting are not provided, so CodeOutline works best beside a language's own server or where none is available. Unsaved edits are included in every request. A `.codeoutline.json` file in the workspace root can map Lua call arguments to registration sites for Go to Definition. Behavior, limits, and options are described in [LSP.md](docs/LSP.md).
+
+Thin clients are in this repository: one VSIX for [VS Code and Cursor](adapters/vscode/README.md), and a [Zed](adapters/zed/README.md) extension. They are not published to an extension marketplace yet; install them as described in their READMEs. Other editors can start the same command through their generic LSP support; only VS Code, Cursor, and Zed have been tested.
+
+Clients start the server directly, without a shell:
+
+- **Linux and macOS**: the npm installation puts an executable `codeoutline` on PATH, so the client defaults (`codeoutline` with `lsp --stdio`) work. An editor started from the desktop may not inherit PATH entries added by your shell profile (nvm, for example); then configure the absolute path printed by `command -v codeoutline`.
+- **Windows**: npm's `codeoutline.cmd` cannot be started without a shell. Configure `node` as the command, with the arguments `<global npm folder>/codeoutline/launcher/codeoutline.cjs`, `lsp`, `--stdio`; `npm root -g` prints the global folder, usually `C:\Users\<you>\AppData\Roaming\npm\node_modules`. For the native archive, run its `bin/xnet.exe` with `<archive>/scripts/codeoutline/command.lua`, `LOG_STDERR=1`, `LOG_FILE=0`, `lsp`, `--stdio`.
+
+The server uses the newest installed version when it starts and does not install updates itself; an update installed by the background service takes effect the next time the editor starts the server. Started directly from the native archive, the server always runs that archive's version.
+
 ## System requirements
 
 | Platform | Requirements |
@@ -80,20 +102,14 @@ C, C++, C#, Go, Java, JavaScript / TypeScript (including JSX/TSX), Lua, Python, 
 ```sh
 codeoutline serve --stdio [--project PATH] [--allow-root PATH ...]
 codeoutline serve --http [--host HOST] [--port PORT] [--project PATH] [--allow-root PATH ...]
+codeoutline lsp --stdio [--project PATH]
 codeoutline explore --project PATH --query QUERY [--budget BYTES]
 codeoutline status [--project PATH]
 codeoutline rebuild [--project PATH]
 codeoutline doctor [--project PATH]
 ```
 
-`status`, `rebuild`, and `doctor` print JSON; a failed diagnostic exits nonzero. One-shot commands default to the current directory as the project.
-
-The source checkout also has a stdio LSP development preview with symbols,
-definition, hover, references, call hierarchy and completion; see
-[LSP.md](docs/LSP.md). Thin clients are available for
-[VS Code/Cursor](adapters/vscode/README.md) and [Zed](adapters/zed/README.md).
-The LSP command is not part of the published 0.1.9 release or the shared HTTP
-service yet; configure a built source checkout for these previews.
+`status`, `rebuild`, and `doctor` print JSON; a failed diagnostic exits nonzero. One-shot commands default to the current directory as the project. `lsp --stdio` is started by an editor and speaks LSP on stdin and stdout; it is not an interactive command. Its workspace comes from the editor, and `--project` is used only when the editor sends none.
 
 The runtime logs only warnings and errors, to stderr, and writes no log files, so starting it in a project leaves nothing behind. For troubleshooting, set `CODEOUTLINE_LOG_LEVEL` (`DEBUG`, `INFO`, `WARN`, `ERROR`, ...) and `CODEOUTLINE_LOG_DIR` to write log files to that directory.
 
@@ -145,6 +161,7 @@ Tests:
 .\bin\xnet.exe tests/lua/codeoutline_spec.lua
 .\bin\xnet.exe tests/lua/stability_spec.lua
 .\bin\xnet.exe tests/lua/parse_pool_spec.lua
+.\bin\xnet.exe tests/lua/lsp_spec.lua
 npm ci
 npm test
 npm run test:package

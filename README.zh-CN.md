@@ -2,9 +2,9 @@
 
 [English](README.md) | 简体中文
 
-Lightweight code indexing and exploration for coding agents, as an MCP server. Powered by Lua.
+Lightweight code indexing and exploration for coding agents, as an MCP server, and for editors, as a language server. Powered by Lua.
 
-面向编程智能体的轻量代码索引与查询服务：按符号查询带行号的源码、调用路径和上下游关系，自动增量刷新并缓存到磁盘。MCP 协议、stdio 与 Streamable HTTP 传输均由 Lua 实现，服务运行不依赖 Node；npm 包中的 Node 只负责找到对应平台的程序并启动。
+面向编程智能体的轻量代码索引与查询服务：按符号查询带行号的源码、调用路径和上下游关系，自动增量刷新并缓存到磁盘。编辑器通过 LSP 使用同一套索引，获得符号、定义跳转、引用、调用层级和补全。MCP 协议（含 stdio 与 Streamable HTTP 传输）和语言服务器均由 Lua 实现，运行不依赖 Node；npm 包中的 Node 只负责找到对应平台的程序并启动。
 
 ## 安装与配置
 
@@ -61,6 +61,28 @@ Windows 上 Claude Code 无法直接启动 `codeoutline.cmd`，请改用 `-- cmd
 
 不使用 Node 时，可从 [GitHub Releases](https://github.com/1dao/codeoutline/releases) 下载对应平台的原生压缩包，解压后直接运行 `codeoutline`（Windows 为 `codeoutline.cmd`）。
 
+## 编辑器集成（LSP）
+
+`codeoutline lsp --stdio` 是基于同一索引器的语言服务器。每个编辑器窗口各自启动一个服务进程、各建一份索引，不连接共享的 MCP 服务；MCP 地址也不能当作 LSP 地址使用。
+
+| 功能 | 范围 |
+| --- | --- |
+| 文档符号、工作区符号 | 工作区符号按子串匹配，不区分大小写 |
+| 定义跳转、悬停、签名帮助 | 在导入行（`require`、`#include`、模块导入）上跳转定义会打开被加载的文件 |
+| 引用、调用层级 | 函数、方法、构造函数和宏；支持调入与调出 |
+| 补全 | 局部变量、本文件的定义与导入、C/C++ 所包含头文件中的声明，以及 `.`、`->`、`::`、`?.`、Lua `:` 之后的成员 |
+
+解析基于名称，与 `codeoutline_explore` 相同，不做类型检查；不提供重命名、诊断和格式化，适合与语言自身的服务器并用，或用于没有语言服务器的场景。每次请求都会带上未保存的修改。工作区根目录的 `.codeoutline.json` 可以把 Lua 调用参数映射到注册位置，用于跳转定义。具体行为、限制和选项见 [LSP.md](docs/LSP.md)。
+
+仓库内提供轻量客户端：[VS Code 与 Cursor](adapters/vscode/README.md) 共用的 VSIX，以及 [Zed](adapters/zed/README.md) 扩展。它们尚未发布到扩展市场，请按各自 README 安装。其他编辑器可通过通用 LSP 支持启动同一命令；目前只在 VS Code、Cursor 和 Zed 上验证过。
+
+客户端不经过 shell 直接启动服务器：
+
+- **Linux 与 macOS**：npm 安装会在 PATH 中放一个可执行的 `codeoutline`，客户端默认配置（`codeoutline` 加 `lsp --stdio`）即可使用。从桌面启动的编辑器可能拿不到 shell 配置文件里追加的 PATH（例如 nvm），此时请配置 `command -v codeoutline` 输出的绝对路径。
+- **Windows**：npm 的 `codeoutline.cmd` 不经过 shell 无法启动。请把命令配置为 `node`，参数为 `<npm 全局目录>/codeoutline/launcher/codeoutline.cjs`、`lsp`、`--stdio`；`npm root -g` 可输出全局目录，通常为 `C:\Users\<用户名>\AppData\Roaming\npm\node_modules`。使用原生压缩包时，运行其中的 `bin/xnet.exe`，参数为 `<解压目录>/scripts/codeoutline/command.lua`、`LOG_STDERR=1`、`LOG_FILE=0`、`lsp`、`--stdio`。
+
+服务器启动时使用已安装的最新版本，自身不安装更新；后台服务安装的更新在编辑器下次启动服务器时生效。直接从原生压缩包启动时，始终运行该压缩包的版本。
+
 ## 系统要求
 
 | 平台 | 要求 |
@@ -80,15 +102,14 @@ C、C++、C#、Go、Java、JavaScript / TypeScript（含 JSX/TSX）、Lua、Pyth
 ```sh
 codeoutline serve --stdio [--project PATH] [--allow-root PATH ...]
 codeoutline serve --http [--host HOST] [--port PORT] [--project PATH] [--allow-root PATH ...]
+codeoutline lsp --stdio [--project PATH]
 codeoutline explore --project PATH --query QUERY [--budget BYTES]
 codeoutline status [--project PATH]
 codeoutline rebuild [--project PATH]
 codeoutline doctor [--project PATH]
 ```
 
-`status`、`rebuild`、`doctor` 输出 JSON；诊断失败返回非零退出码。一次性命令的项目默认为当前目录。
-
-源码已提供 stdio LSP 开发预览，支持符号、定义跳转、悬停、引用、调用层级和补全，详见 [LSP.md](docs/LSP.md)。已有 [VS Code/Cursor](adapters/vscode/README.md) 共用 VSIX 和 [Zed](adapters/zed/README.md) 客户端。LSP 命令尚未包含在已发布的 0.1.9 中，也尚未接入共享 HTTP 后台；预览客户端需要配置已构建的源码路径。
+`status`、`rebuild`、`doctor` 输出 JSON；诊断失败返回非零退出码。一次性命令的项目默认为当前目录。`lsp --stdio` 由编辑器启动，通过 stdin/stdout 收发 LSP 消息，不是交互式命令；工作区由编辑器提供，编辑器未提供时才使用 `--project`。
 
 运行时只把警告和错误输出到 stderr，不写日志文件，在项目中启动不会留下任何文件。排查问题时可设置 `CODEOUTLINE_LOG_LEVEL`（`DEBUG`、`INFO`、`WARN`、`ERROR` 等）调整级别，设置 `CODEOUTLINE_LOG_DIR` 将日志文件写到该目录。
 
@@ -140,6 +161,7 @@ sh tools/build-runtime.sh
 .\bin\xnet.exe tests/lua/codeoutline_spec.lua
 .\bin\xnet.exe tests/lua/stability_spec.lua
 .\bin\xnet.exe tests/lua/parse_pool_spec.lua
+.\bin\xnet.exe tests/lua/lsp_spec.lua
 npm ci
 npm test
 npm run test:package

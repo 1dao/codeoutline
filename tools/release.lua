@@ -166,8 +166,12 @@ end
 local function release(project)
     if options.RESUME then continue_release(project); return end
     local current = require('codeoutline.version')
+    -- A script-only update ships the base's runtime, so it must have been built
+    -- from this submodule commit with these build scripts (older bases without
+    -- runtimeBuild never match).
+    local runtime_commit = command('git -C xnet2lua rev-parse HEAD')
+    local runtime_build = dofile(root .. '/tools/runtime_build.lua')(root)
     if mode == 'update' and not options.BASE then
-        local runtime_commit = command('git -C xnet2lua rev-parse HEAD')
         local directories, truncated = u.list_dir(parent, 10000)
         assert(not truncated, 'Too many release directories')
         local best_sequence = -1
@@ -179,7 +183,8 @@ local function release(project)
                         local info = c.decode_json(c.read(candidate .. '/codeoutline-' .. target .. '/native/package/build-info.json'))
                         local published = info and project.releases[info.version .. '/' .. target]
                         if not info or not published or published.status ~= 'published' or published.manifest.kind == 'scripts'
-                            or info.runtimeCommit ~= runtime_commit or info.target ~= target or not info.updateSequence
+                            or info.runtimeCommit ~= runtime_commit or info.runtimeBuild ~= runtime_build
+                            or info.target ~= target or not info.updateSequence
                             or (candidate_sequence and candidate_sequence ~= info.updateSequence) then matches = false; break end
                         candidate_sequence = info.updateSequence
                     end
@@ -234,7 +239,8 @@ local function release(project)
         for _, target in ipairs(targets) do
             local directory = base .. '/codeoutline-' .. target .. '/native/package'
             local info = assert(c.decode_json(c.read(directory .. '/build-info.json')), 'Missing baseline: ' .. directory)
-            assert(info.runtimeCommit == command('git -C xnet2lua rev-parse HEAD'), 'Runtime changed; use MODE=runtime or MODE=full')
+            assert(info.runtimeCommit == runtime_commit, 'Runtime changed; use MODE=runtime or MODE=full')
+            assert(info.runtimeBuild == runtime_build, 'Runtime build options changed (tools/build-runtime.*); use MODE=runtime or MODE=full')
             for path, hash in pairs(info.sha256) do assert(c.path(path) and u.sha256_hex(assert(c.read(directory .. '/' .. path))) == hash, 'Base file changed: ' .. path) end
         end
         baseline = base

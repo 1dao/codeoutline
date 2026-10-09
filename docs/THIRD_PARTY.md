@@ -13,7 +13,6 @@ the runtime links, recorded as `lua` in `build-info.json`:
 | LuaJIT (release; includes Lua 5.1 notice) | `3rd/luajit/` | `licenses/luajit.txt` (MIT) |
 | Lua / minilua (embedded-Lua builds only) | `3rd/minilua.h` | `licenses/lua-minilua.txt` (MIT) |
 | lua-cmsgpack | `xlua/lua_cmsgpack.c` | `licenses/lua-cmsgpack.txt` (MIT) |
-| rpmalloc | `3rd/rpmalloc/` | `licenses/rpmalloc.txt` (source public-domain dedication) |
 | Mbed TLS 3.6.5 | `3rd/mbedtls3/` | `licenses/mbedtls.txt` (Apache-2.0 option) |
 | CodeOutline | `scripts/codeoutline/` | `LICENSE` (BSD-2-Clause) |
 
@@ -21,8 +20,9 @@ No ripgrep executable is bundled. An installed `rg` is used when available;
 otherwise the Lua directory walker is used with the limitations in README.md.
 The MCP SDK is a development test dependency and is not in either runtime package.
 
-Lua, minilua, cmsgpack, and rpmalloc notices were extracted from the pinned runtime
-sources. Mbed TLS's complete dual-license text is preserved from its
+Lua, minilua, and cmsgpack notices were extracted from the pinned runtime
+sources. The runtime is built without rpmalloc (`WITH_RPMALLOC=0`), so its code
+is not linked and no notice ships for it. Mbed TLS's complete dual-license text is preserved from its
 [v3.6.5 upstream LICENSE](https://github.com/Mbed-TLS/mbedtls/blob/v3.6.5/LICENSE);
 this distribution selects its Apache-2.0 option. The LuaJIT notice is copied from
 `3rd/luajit/COPYRIGHT`. Recheck this inventory when the runtime commit or build

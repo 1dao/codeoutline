@@ -51,6 +51,7 @@ local function git(command)
 end
 local runtime_commit = git('git -C xnet2lua rev-parse HEAD')
 assert(git('git -C xnet2lua diff --name-only') == '', 'runtime has uncommitted changes; commit upstream first')
+local runtime_build = dofile(root .. '/tools/runtime_build.lua')(root)
 local binary = platform[1] == 'win32' and 'xnet.exe' or 'xnet'
 copy(options.RUNTIME or root .. '/bin/' .. binary, 'bin/' .. binary)
 copy_lua('scripts/codeoutline')
@@ -67,7 +68,7 @@ if jit then
 else
     copy(root .. '/licenses/lua-minilua.txt', 'licenses/lua-minilua.txt')
 end
-for _, name in ipairs({ 'lua-cmsgpack', 'rpmalloc', 'mbedtls' }) do
+for _, name in ipairs({ 'lua-cmsgpack', 'mbedtls' }) do
     copy(root .. '/licenses/' .. name .. '.txt', 'licenses/' .. name .. '.txt')
 end
 local yyjson = read(root .. '/xnet2lua/3rd/yyjson.h'):match('^(.-)%*/')
@@ -105,7 +106,7 @@ write(output .. '/native/package.json', xutils.json_pack(manifest) .. '\n')
 copy(root .. '/launcher/codeoutline.cmd', 'codeoutline.cmd')
 copy(root .. '/launcher/codeoutline', 'codeoutline')
 write(output .. '/native/build-info.json', xutils.json_pack({ version = version, target = target,
-    updateSequence = tonumber(options.UPDATE_SEQUENCE) or require('codeoutline.update_sequence'), runtimeCommit = runtime_commit, lua = jit and jit.version or _VERSION, sourceCommit = git('git rev-parse HEAD'),
+    updateSequence = tonumber(options.UPDATE_SEQUENCE) or require('codeoutline.update_sequence'), runtimeCommit = runtime_commit, runtimeBuild = runtime_build, lua = jit and jit.version or _VERSION, sourceCommit = git('git rev-parse HEAD'),
     sourceDirty = source_dirty, sha256 = files, releaseReady = release,
     note = release and 'Release build from a clean checkout'
         or 'Preview: stage with RELEASE=1 from a clean, tagged checkout to publish' }) .. '\n')

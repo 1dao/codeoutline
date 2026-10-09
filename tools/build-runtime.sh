@@ -1,11 +1,12 @@
 #!/bin/sh
 # Build the release runtime (LuaJIT, xproc, MPSCQ, HTTPS) and copy it to the
-# repository-level bin/.
+# repository-level bin/. rpmalloc is off: libc indexes as fast, and rpmalloc
+# keeps each exited parse thread's pages committed.
 set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 jobs=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)
 luajit="$root/xnet2lua/3rd/luajit"
-flags="BUILD_MODE=release WITH_XPROC=1 WITH_MPSCQ=1 LUA_BACKEND=luajit"
+flags="BUILD_MODE=release WITH_XPROC=1 WITH_MPSCQ=1 WITH_RPMALLOC=0 LUA_BACKEND=luajit"
 mkdir -p "$root/bin"
 
 if [ "$(uname -s)" != Darwin ]; then

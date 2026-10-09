@@ -2,17 +2,8 @@
   "name": "codeoutline",
   "displayName": "CodeOutline",
   "description": "Index-backed code navigation with the Lua CodeOutline language server.",
-  "version": "0.1.9",
+  "version": "0.2.0",
   "publisher": "1dao",
-  "codeoutlineInstallationDefaults": {
-    "platform": "win32",
-    "serverPath": "C:/source/ops/codeoutline/bin/xnet.exe",
-    "serverArguments": [
-      "C:/source/ops/codeoutline/scripts/codeoutline/command.lua",
-      "LOG_STDERR=1", "LOG_FILE=0", "lsp", "--stdio"
-    ],
-    "mode": "navigation"
-  },
   "license": "BSD-2-Clause",
   "repository": {
     "type": "git",
@@ -42,6 +33,7 @@
     "vscode:prepublish": "npm run build",
     "package": "vsce package --out codeoutline.vsix",
     "build:test": "esbuild test/smoke.ts --bundle --platform=node --format=cjs --external:vscode --outfile=out/smoke.js",
+    "test:unit": "esbuild test/server.test.ts --bundle --platform=node --format=cjs --outfile=out/server.test.js && node --test out/server.test.js",
     "test:editor": "npm run build:test && node test/run.mjs"
   },
   "dependencies": {

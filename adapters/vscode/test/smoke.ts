@@ -17,13 +17,6 @@ export async function run(): Promise<void> {
     assert.ok(extension, 'packaged extension loaded');
     const api = await extension.activate();
     await api.ready();
-    const defaults = extension.packageJSON.codeoutlineInstallationDefaults;
-    if (defaults.platform === process.platform) {
-        const config = vscode.workspace.getConfiguration('codeoutline');
-        for (const key of ['serverPath', 'serverArguments', 'mode']) {
-            assert.deepEqual(config.inspect(key)?.globalValue, defaults[key], 'first activation writes global ' + key);
-        }
-    }
     const folder = vscode.workspace.workspaceFolders![0].uri;
     const uri = vscode.Uri.joinPath(folder, 'send.lua');
     const target = vscode.Uri.joinPath(folder, 'receive.lua');

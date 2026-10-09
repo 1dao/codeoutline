@@ -1,7 +1,7 @@
 id = "codeoutline"
 name = "CodeOutline"
 description = "Index-backed navigation and completion: symbols, definitions, hover, references, call hierarchy."
-version = "0.1.9"
+version = "0.2.0"
 schema_version = 1
 authors = ["chib <chib@foxmail.com>"]
 repository = "https://github.com/1dao/codeoutline"

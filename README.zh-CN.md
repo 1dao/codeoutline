@@ -79,7 +79,7 @@ Windows 上 Claude Code 无法直接启动 `codeoutline.cmd`，请改用 `-- cmd
 客户端不经过 shell 直接启动服务器：
 
 - **Linux 与 macOS**：npm 安装会在 PATH 中放一个可执行的 `codeoutline`，客户端默认配置（`codeoutline` 加 `lsp --stdio`）即可使用。从桌面启动的编辑器可能拿不到 shell 配置文件里追加的 PATH（例如 nvm），此时请配置 `command -v codeoutline` 输出的绝对路径。
-- **Windows**：npm 的 `codeoutline.cmd` 不经过 shell 无法启动。请把命令配置为 `node`，参数为 `<npm 全局目录>/codeoutline/launcher/codeoutline.cjs`、`lsp`、`--stdio`；`npm root -g` 可输出全局目录，通常为 `C:\Users\<用户名>\AppData\Roaming\npm\node_modules`。使用原生压缩包时，运行其中的 `bin/xnet.exe`，参数为 `<解压目录>/scripts/codeoutline/command.lua`、`LOG_STDERR=1`、`LOG_FILE=0`、`lsp`、`--stdio`。
+- **Windows**：npm 的 `codeoutline.cmd` 不经过 shell 无法启动。VS Code/Cursor 客户端会自行找到 npm 安装，无需任何设置。其他客户端（包括 Zed）请把命令配置为 `node`，参数为 `<npm 全局目录>/codeoutline/launcher/codeoutline.cjs`、`lsp`、`--stdio`；`npm root -g` 可输出全局目录，通常为 `C:\Users\<用户名>\AppData\Roaming\npm\node_modules`。使用原生压缩包时，运行其中的 `bin/xnet.exe`，参数为 `<解压目录>/scripts/codeoutline/command.lua`、`LOG_STDERR=1`、`LOG_FILE=0`、`lsp`、`--stdio`。
 
 服务器启动时使用已安装的最新版本，自身不安装更新；后台服务安装的更新在编辑器下次启动服务器时生效。直接从原生压缩包启动时，始终运行该压缩包的版本。
 

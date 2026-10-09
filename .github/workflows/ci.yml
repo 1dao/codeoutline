@@ -25,6 +25,7 @@ jobs:
           cache-dependency-path: adapters/vscode/package-lock.json
       - run: npm ci
       - run: npm run check
+      - run: npm run test:unit
       - run: npm run package
       - name: Build Lua runtime for editor smoke test
         working-directory: .

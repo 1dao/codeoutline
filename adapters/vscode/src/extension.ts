@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { LanguageClient, LanguageClientOptions, ServerOptions } from 'vscode-languageclient/node';
+import { missingServerHint, resolveServer } from './server';
 
 const featureNames = ['documentSymbol', 'workspaceSymbol', 'definition', 'hover', 'references', 'callHierarchy', 'completion', 'signatureHelp'] as const;
 let client: LanguageClient | undefined;
@@ -22,9 +23,12 @@ async function restart(): Promise<void> {
     const full = config.get<string>('mode') === 'navigation';
     for (const name of featureNames) features[name] = full || name === 'workspaceSymbol';
     Object.assign(features, config.get<Record<string, boolean>>('features', {}));
+    const launch = resolveServer(command, config.get<string[]>('serverArguments', ['lsp', '--stdio']));
+    const hint = missingServerHint(launch);
+    if (hint) throw new Error(hint);
     const server: ServerOptions = {
-        command, args: config.get<string[]>('serverArguments', ['lsp', '--stdio']),
-        options: { env: { ...process.env, ...config.get<Record<string, string>>('serverEnvironment', {}) } }
+        command: launch.command, args: launch.args,
+        options: { env: { ...process.env, ...config.get<Record<string, string>>('serverEnvironment', {}), ...launch.env } }
     };
     const options: LanguageClientOptions = {
         documentSelector: languages.map(language => ({ scheme: 'file', language })),
@@ -57,24 +61,10 @@ function scheduleRestart(): Promise<void> {
     return pending;
 }
 
-async function applyInstallationDefaults(context: vscode.ExtensionContext): Promise<void> {
-    const defaults = context.extension.packageJSON.codeoutlineInstallationDefaults;
-    if (!defaults || defaults.platform !== process.platform
-        || context.globalState.get<boolean>('installationDefaultsApplied')) return;
-    const config = vscode.workspace.getConfiguration('codeoutline');
-    for (const key of ['serverPath', 'serverArguments', 'mode']) {
-        await config.update(key, defaults[key], vscode.ConfigurationTarget.Global);
-    }
-    await context.globalState.update('installationDefaultsApplied', true);
-    output.appendLine('Applied packaged CodeOutline settings to the global user configuration.');
-}
-
 export async function activate(context: vscode.ExtensionContext): Promise<{ ready: () => Promise<void> }> {
     disposed = false;
     output = vscode.window.createOutputChannel('CodeOutline');
     context.subscriptions.push(output);
-    // Run before subscribing to configuration changes, avoiding three restarts.
-    await applyInstallationDefaults(context);
     context.subscriptions.push(
         vscode.commands.registerCommand('codeoutline.restart', scheduleRestart),
         vscode.commands.registerCommand('codeoutline.showLog', () => output.show()),

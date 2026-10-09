@@ -17,6 +17,19 @@ impl CodeOutline {
     fn settings(worktree: &zed::Worktree) -> Option<LspSettings> {
         LspSettings::for_worktree(SERVER, worktree).ok()
     }
+
+    // On Windows an npm global install (or a native archive) puts
+    // `codeoutline.cmd` on PATH beside an extensionless shell script. Zed's
+    // lookup completes the name from PATHEXT and skips the script, and Zed
+    // starts batch files through cmd.exe, so the shim runs as installed and
+    // still selects installed updates. Name the shim explicitly in case the
+    // lookup does not complete extensions.
+    fn find(worktree: &zed::Worktree) -> Option<String> {
+        worktree.which(SERVER).or_else(|| match zed::current_platform().0 {
+            zed::Os::Windows => worktree.which("codeoutline.cmd"),
+            _ => None,
+        })
+    }
 }
 
 impl zed::Extension for CodeOutline {
@@ -43,15 +56,15 @@ impl zed::Extension for CodeOutline {
                 .unwrap_or_else(|| vec!["lsp".into(), "--stdio".into()]);
             return Ok(zed::Command { command: path, args, env });
         }
-        if let Some(path) = worktree.which(SERVER) {
+        if let Some(path) = Self::find(worktree) {
             return Ok(zed::Command {
                 command: path,
                 args: vec!["lsp".into(), "--stdio".into()],
                 env,
             });
         }
-        Err("codeoutline was not found on PATH; install it (npm install -g codeoutline) \
-             or set lsp.codeoutline.binary.path in Zed settings"
+        Err("codeoutline was not found on PATH; install CodeOutline 0.2.0 or newer \
+             (npm install -g codeoutline) or set lsp.codeoutline.binary.path in Zed settings"
             .into())
     }
 

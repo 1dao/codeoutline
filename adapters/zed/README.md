@@ -13,24 +13,13 @@ extension is not in Zed's extension registry yet; install it as a dev extension
 ## Binary lookup
 
 1. `lsp.codeoutline.binary` in Zed settings (`path`, optional `arguments` and `env`;
-   arguments default to `["lsp", "--stdio"]`).
-2. `codeoutline` on PATH.
+   arguments default to `["lsp", "--stdio"]`). `env` also applies without `path`.
+2. `codeoutline` on PATH (on Windows, `codeoutline.cmd`).
 
-On Linux and macOS the npm-installed `codeoutline` is found on PATH. On Windows,
-npm installs `codeoutline.cmd`, which is not a native executable; run the npm
-launcher with Node instead (`npm root -g` prints the global folder):
-
-```json
-"lsp": {
-  "codeoutline": {
-    "binary": {
-      "path": "node",
-      "arguments": ["C:/Users/<you>/AppData/Roaming/npm/node_modules/codeoutline/launcher/codeoutline.cjs",
-        "lsp", "--stdio"]
-    }
-  }
-}
-```
+With an npm global install, no settings are needed: the npm-installed command is
+found on PATH. On Windows that is npm's `codeoutline.cmd`, which Zed starts
+through cmd.exe; it runs the npm launcher, which selects installed updates as on
+the command line. Zed starts language servers only in trusted worktrees.
 
 For a native archive or a source checkout, run the runtime with the Lua command
 script (`bin/xnet` on Linux/macOS):

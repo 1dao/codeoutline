@@ -15,10 +15,11 @@ join the shared MCP HTTP service, and there is no TCP transport.
 
 ## Launch
 
-From an installation, the editor runs `codeoutline lsp --stdio`. Windows editors
-start servers without a shell, which cannot run npm's `codeoutline.cmd`. The
-VS Code/Cursor client then finds the npm installation and runs its launcher with
-Node itself; other clients run `node` with the npm launcher
+From an installation, the editor runs `codeoutline lsp --stdio`. On Windows, npm
+installs `codeoutline.cmd`, a batch file. Zed starts it from PATH through
+cmd.exe. The VS Code/Cursor client, whose Node-based spawn rejects batch files,
+finds the npm installation and runs its launcher with Node itself. Clients that
+cannot start a batch file run `node` with the npm launcher
 (`<npm root -g>/codeoutline/launcher/codeoutline.cjs lsp --stdio`) or the native
 archive's `bin/xnet.exe` with its `scripts/codeoutline/command.lua`, as below.
 

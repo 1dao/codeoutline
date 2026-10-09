@@ -8,7 +8,7 @@
 
 - 语言服务器 `codeoutline lsp --stdio`：文档与工作区符号、定义跳转（在导入行上跳到被加载的文件）、悬停、签名帮助、引用、调用层级和补全。每次请求都包含未保存的修改；`initializationOptions.features` 可逐项关闭功能，以便与其他语言服务器并用，`includePaths` 可补充 C/C++ 头文件目录。各平台的启动方式见 README 的“编辑器集成（LSP）”。
 - 工作区根目录的 `.codeoutline.json` 可定义跳转规则，把 Lua 调用中的字面量参数映射到注册位置，例如从 `xthread.post` 的消息名跳到对应的 `xthread.register`。
-- VS Code 与 Cursor 共用的 VSIX 客户端，以及 Zed 扩展。两者都在仓库内构建，尚未上架扩展市场。VSIX 默认使用 npm 全局安装；Windows 上 npm 的 `codeoutline.cmd` 无法直接启动，扩展会自行找到该安装，用 Node 运行它的启动器，无需任何设置。
+- VS Code 与 Cursor 共用的 VSIX 客户端，以及 Zed 扩展。两者都在仓库内构建，尚未上架扩展市场。两者默认都使用 npm 全局安装，无需任何设置：Windows 上 VSIX 无法直接启动 npm 的 `codeoutline.cmd`，会自行找到该安装并用 Node 运行它的启动器；Zed 从 PATH 找到 `codeoutline.cmd` 后通过 cmd.exe 启动。
 - 全量索引并行解析：需要读取的文件不少于 32 个时，按需启动解析线程（Windows 8 个，其他平台 6 个），按文件大小均衡分配，由索引线程统一提交结果；空闲 60 秒后回收。`CODEOUTLINE_INDEX_THREADS` 可覆盖线程数，设为 `0` 关闭。在一个 5.6 万文件的项目上，Windows 冷启动的首次索引从约 55 秒降到约 14 秒。
 
 ### 变更

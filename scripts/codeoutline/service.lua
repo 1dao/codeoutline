@@ -10,11 +10,18 @@ local limits = { max_projects = 8, idle_seconds = 900 }
 -- Long-lived hosts watch resident projects so a query refreshes only what
 -- changed; one-shot commands would pay for a watcher they never read.
 local watch = false
+-- LuaJIT starts a collection cycle only once the heap has doubled since the
+-- last one. A resident index makes the heap large, so the garbage of polls
+-- and requests (and a dropped project's whole index) would build up toward
+-- the index's own size; hosts collect it on idle ticks with M.collect.
+local gc = { live = collectgarbage('count'), running = false }
+-- A 512 KB step takes about 1 ms (6 ms at most) on a 650 MB heap.
+M.GC_MIN_KB, M.GC_STEP_KB = 16384, 512
 
 local function drop(key)
     local p = projects[key]
     projects[key] = nil
-    if p then p.idx:close() end
+    if p then p.idx:close(); gc.running = true end
 end
 
 function M.configure(opts)
@@ -32,14 +39,17 @@ function M.configure(opts)
     M.sweep()
 end
 
+-- Hosts sweep on every tick: allocate only when something is dropped.
 function M.sweep(now)
     now = now or os.time()
-    local count = 0
-    local idle = {}
+    local count, idle = 0, nil
     for key, p in pairs(projects) do
-        if now - p.used >= limits.idle_seconds then idle[#idle + 1] = key else count = count + 1 end
+        if now - p.used >= limits.idle_seconds then
+            idle = idle or {}
+            idle[#idle + 1] = key
+        else count = count + 1 end
     end
-    for _, key in ipairs(idle) do drop(key) end
+    if idle then for _, key in ipairs(idle) do drop(key) end end
     while count > limits.max_projects do
         local oldest
         for key, p in pairs(projects) do
@@ -49,6 +59,19 @@ function M.sweep(now)
         count = count - 1
     end
     return count
+end
+
+-- Run one bounded incremental GC step on an idle tick; returns whether a cycle
+-- is still in progress. A cycle starts once the garbage since the last one
+-- reaches a sixteenth of the live heap (at least GC_MIN_KB), or a project is
+-- dropped, and then advances one step per call until it completes.
+function M.collect()
+    if not gc.running then
+        if collectgarbage('count') - gc.live < math.max(M.GC_MIN_KB, gc.live / 16) then return false end
+        gc.running = true
+    end
+    if collectgarbage('step', M.GC_STEP_KB) then gc.running, gc.live = false, collectgarbage('count') end
+    return gc.running
 end
 
 local function key_for(root)

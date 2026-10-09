@@ -109,10 +109,11 @@ return {
         pool.configure(scripts .. '/codeoutline/parse_worker.lua', math.max(0, math.floor(threads)))
         assert(xthread.post(1, 'worker_ready'))
     end,
-    -- A suspended job still holds its project: sweeping waits for it.
+    -- A suspended job still holds its project: sweeping waits for it. Idle
+    -- ticks also collect garbage, a step at a time (see service.collect).
     __update = function()
         pool.sweep()
-        if not active then service.sweep() end
+        if not active then service.sweep(); service.collect() end
     end,
     __thread_handle = function(_, op, id, req, failure)
         if op == 'run' then

@@ -174,6 +174,19 @@ spec.describe('service stability', function()
         spec.equal(service.sweep(os.time() + 901), 0)
         service.configure({ max_projects = 8 })
     end)
+    spec.it('collects idle garbage in bounded steps', function()
+        while service.collect() do end -- finish the cycle the evictions above started
+        collectgarbage('stop')
+        local base, junk = collectgarbage('count'), {}
+        while collectgarbage('count') - base < 2 * service.GC_MIN_KB do junk[#junk + 1] = { #junk } end
+        junk = nil
+        local before, steps = collectgarbage('count'), 0
+        while service.collect() do steps = steps + 1 end
+        collectgarbage('restart')
+        spec.truthy(steps > 0, 'a cycle spans several idle ticks')
+        spec.truthy(collectgarbage('count') < before - service.GC_MIN_KB, 'idle garbage was collected')
+        spec.equal(service.collect(), false)
+    end)
     spec.it('rg respects ignored extensions and negations outside a git repository', function()
         if not index.rg_available() then print('SKIP ripgrep is unavailable'); return end
         write(project .. '/.gitignore', '*.lua\n!keep.lua\n')

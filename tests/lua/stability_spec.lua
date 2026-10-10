@@ -26,7 +26,8 @@ spec.describe('service stability', function()
         idx.list_files = function() error('unexpected full enumeration') end
         spec.equal(idx:refresh({ full_interval = 45 }).mode, 'idle')
         write(project .. '/中文.lua', 'function hinted() end\n')
-        local stats = idx:refresh({ paths = { project .. '/中文.lua' } })
+        -- Hints are canonical paths under the index root, as sessions send them.
+        local stats = idx:refresh({ paths = { idx:abs('中文.lua') } })
         spec.equal(stats.parsed, 1); spec.equal(idx.files['中文.lua'].nodes[1].name, 'hinted')
         idx.list_files = original
         -- An interrupted full pass keeps its committed files and runs again next time.

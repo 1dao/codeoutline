@@ -124,6 +124,50 @@ function M.new(config, emit, submit, cancel, stop)
     local function root_for(path)
         for _, root in ipairs(self.roots) do if paths.contains(root, path) then return root end end
     end
+    -- Clients may name a workspace through a symlink, junction or short name
+    -- (/var for /private/var, RUNNER~1), while roots and the index use the
+    -- canonical spelling. Paths are mapped at this boundary: the worker sees
+    -- canonical paths and URIs, and results return in the client's spelling.
+    local aliases = {}
+    local function rebase(path, from, to)
+        if not paths.contains(from, path) then return nil end
+        local rest = path:sub(#from + 1):gsub('^/', '')
+        if rest == '' then return to end
+        return (to:sub(-1) == '/' and to or to .. '/') .. rest
+    end
+    local function server_path(path)
+        for _, alias in ipairs(aliases) do
+            local mapped = rebase(path, alias.client, alias.root)
+            if mapped then return mapped end
+        end
+        return path
+    end
+    local function server_uri(uri)
+        local path = #aliases > 0 and documents.path(uri)
+        local mapped = path and server_path(path)
+        return mapped and mapped ~= path and documents.uri(mapped) or uri
+    end
+    local function client_uri(uri)
+        local path = documents.path(uri)
+        for _, alias in ipairs(aliases) do
+            local mapped = path and rebase(path, alias.root, alias.client)
+            if mapped then return documents.uri(mapped) end
+        end
+        return uri
+    end
+    -- Rewrites result URIs in place; call hierarchy data stays canonical.
+    local function to_client(value)
+        if #aliases == 0 or type(value) ~= 'table' then return value end
+        for key, item in pairs(value) do
+            if key == 'uri' and type(item) == 'string' then value[key] = client_uri(item)
+            elseif key ~= 'data' then to_client(item) end
+        end
+        return value
+    end
+    local function document_path(uri)
+        local path = documents.path(uri)
+        return path and server_path(path)
+    end
     local function scan(root, hints)
         local existing = self.scans[root]
         if existing then
@@ -155,15 +199,19 @@ function M.new(config, emit, submit, cancel, stop)
         for _, root in ipairs(self.roots) do scan(root) end
     end
     local function set_roots(folders)
-        local roots = {}
+        local roots, spelled = {}, {}
         assert(type(folders) == 'table' and #folders <= M.MAX_ROOTS, 'too many workspace folders')
         for _, folder in ipairs(folders) do
             local path = documents.path(folder.uri)
             local root = path and paths.canonical(path)
             assert(root, 'workspace folder must be an existing local directory')
             roots[#roots + 1] = root
+            if paths.key(path) ~= paths.key(root) then spelled[#spelled + 1] = { client = path, root = root } end
         end
         table.sort(roots, function(a, b) return #a < #b or (#a == #b and a < b) end)
+        -- The longest client spelling wins when aliases nest.
+        table.sort(spelled, function(a, b) return #a.client > #b.client end)
+        aliases = spelled
         self.roots = {}
         for _, root in ipairs(roots) do
             if not root_for(root) then self.roots[#self.roots + 1] = root end
@@ -182,11 +230,13 @@ function M.new(config, emit, submit, cancel, stop)
         local uri = params.textDocument.uri
         local doc = self.documents[uri]
         if doc then return doc end
-        local path = documents.path(uri)
+        local path = document_path(uri)
         assert(path and root_for(path), 'document is outside the workspace')
         local canonical = xutils.realpath(path)
         assert(canonical and root_for(paths.normalize(canonical)), 'document is outside the workspace')
-        return documents.read(canonical)
+        doc = documents.read(canonical)
+        if doc then doc.uri = uri end
+        return doc
     end
     local function cancel_pending(id)
         local job = self.pending[id]
@@ -289,7 +339,7 @@ function M.new(config, emit, submit, cancel, stop)
         end
     end
     local function hint(uri)
-        local path = documents.path(uri)
+        local path = document_path(uri)
         local root = path and root_for(path)
         if root then scan(root, { path }) end
     end
@@ -337,9 +387,10 @@ function M.new(config, emit, submit, cancel, stop)
         assert(type(params.query) == 'string' and #params.query <= M.MAX_QUERY, 'invalid symbol query')
         local drafts, exclude, result = {}, {}, array()
         for _, doc in pairs(self.documents) do
-            if doc.path and root_for(doc.path) then
+            local path = doc.path and server_path(doc.path)
+            if path and root_for(path) then
                 drafts[#drafts + 1] = doc
-                exclude[paths.key(doc.path)] = true
+                exclude[paths.key(path)] = true
             end
         end
         table.sort(drafts, function(a, b) return a.uri < b.uri end)
@@ -357,7 +408,7 @@ function M.new(config, emit, submit, cancel, stop)
         end
         request(id, { method = 'lsp_symbols', roots = self.roots, exclude = exclude,
             query = params.query, limit = M.MAX_SYMBOLS - #result }, function(symbols)
-            for _, symbol in ipairs(symbols) do result[#result + 1] = symbol end
+            for _, symbol in ipairs(to_client(symbols)) do result[#result + 1] = symbol end
             reply(id, result)
         end)
     end
@@ -365,12 +416,14 @@ function M.new(config, emit, submit, cancel, stop)
     -- carries the open set and the text of versions the worker has not seen.
     local function navigate(id, req, finish)
         assert(id ~= nil, 'navigation must be a request')
-        local open, changed = {}, {}
+        local open, changed, sent = {}, {}, {}
         for uri, doc in pairs(self.documents) do
-            if doc.path and root_for(doc.path) then
-                open[uri] = doc.version
+            if doc.path and root_for(server_path(doc.path)) then
+                local key = server_uri(uri)
+                open[key] = doc.version
                 if self.synced[uri] ~= doc.version then
-                    changed[uri] = { source = doc.source, version = doc.version, language = doc.language }
+                    changed[key] = { source = doc.source, version = doc.version, language = doc.language }
+                    sent[uri] = doc.version
                 end
             end
         end
@@ -382,10 +435,10 @@ function M.new(config, emit, submit, cancel, stop)
                 emit({ jsonrpc = '2.0', method = 'window/showMessage', params = { type = 2,
                     message = 'CodeOutline: results were truncated; too many matching references' } })
             end
-            reply(id, finish(value.result))
+            reply(id, to_client(finish(value.result)))
         end)
         if submitted then
-            for uri, draft in pairs(changed) do self.synced[uri] = draft.version end
+            for uri, version in pairs(sent) do self.synced[uri] = version end
         end
     end
     -- Worker results lose array metatables in transit; empty lists must stay JSON arrays.
@@ -399,10 +452,10 @@ function M.new(config, emit, submit, cancel, stop)
     local function at(id, params, method, empty, finish, extra)
         assert(object(params.textDocument) and type(params.textDocument.uri) == 'string', 'document URI required')
         assert(object(params.position), 'position required')
-        local path = documents.path(params.textDocument.uri)
+        local path = document_path(params.textDocument.uri)
         local root = path and root_for(path)
         if not root then reply(id, empty); return end
-        local req = { method = method, root = root, uri = params.textDocument.uri, position = params.position }
+        local req = { method = method, root = root, uri = server_uri(params.textDocument.uri), position = params.position }
         for key, value in pairs(extra or {}) do req[key] = value end
         navigate(id, req, finish)
     end

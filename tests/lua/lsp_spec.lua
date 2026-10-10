@@ -297,17 +297,55 @@ spec.describe('LSP sessions', function()
         send('textDocument/didOpen', { textDocument = { uri = docs.uri(root .. '/draft.lua'),
             languageId = 'lua', version = 1, text = 'function immediate_draft() end' } })
         -- A ready root must not cause a query to queue behind another unready root.
-        session.roots = { root, other }; session.ready[root] = true
+        local real, second = session.roots[1], assert(require('codeoutline.path').canonical(other))
+        session.roots = { real, second }; session.ready[real] = true
         local before = #jobs
         send('workspace/symbol', { query = 'immediate' }, 2)
         spec.equal(#jobs, before)
         spec.equal(output[#output].result[1].name, 'immediate_draft')
         spec.equal(next(session.pending), nil)
-        session.ready[other] = true
+        session.ready[second] = true
         send('workspace/symbol', { query = 'immediate' }, 3)
         spec.equal(#jobs, before + 1); spec.equal(jobs[#jobs].req.method, 'lsp_symbols')
         jobs[#jobs].done(true, {})
         spec.equal(output[#output].result[1].name, 'immediate_draft')
+    end)
+    spec.it('maps a workspace named through a directory link to canonical paths and back', function()
+        local paths = require('codeoutline.path')
+        local real, link = assert(paths.canonical(root)), root .. '-link'
+        if paths.windows then os.execute('mklink /J "' .. link:gsub('/', '\\') .. '" "' .. real:gsub('/', '\\') .. '" >NUL')
+        else os.execute("ln -s '" .. real .. "' '" .. link .. "'") end
+        if xutils.realpath(link) == nil then print('SKIP cannot create a directory link'); return end
+        local ok, err = pcall(function()
+            local output, jobs = {}, {}
+            local session = lsp.new({}, function(msg) output[#output + 1] = msg end,
+                function(req, done) jobs[#jobs + 1] = { req = req, done = done }; return tostring(#jobs) end,
+                function() end, function() end)
+            local function send(method, params, id)
+                session:accept(xutils.json_pack({ jsonrpc = '2.0', method = method, params = params or {}, id = id }))
+            end
+            send('initialize', { rootUri = docs.uri(link), capabilities = {} }, 1)
+            send('initialized')
+            spec.equal(session.roots[1], real)
+            jobs[#jobs].done(true, true)
+            local uri, canonical = docs.uri(link .. '/linked.lua'), docs.uri(real .. '/linked.lua')
+            send('textDocument/didOpen', { textDocument = { uri = uri, languageId = 'lua', version = 1,
+                text = 'function linked() end' } })
+            send('textDocument/definition', { textDocument = { uri = uri }, position = { line = 0, character = 10 } }, 2)
+            local req = jobs[#jobs].req
+            spec.equal(req.root, real); spec.equal(req.uri, canonical); spec.equal(req.open[canonical], 1)
+            spec.truthy(req.changed[canonical])
+            local range = { start = { line = 0, character = 9 }, ['end'] = { line = 0, character = 15 } }
+            jobs[#jobs].done(true, { result = { { uri = canonical, range = range } } })
+            spec.equal(output[#output].id, 2); spec.equal(output[#output].result[1].uri, uri)
+            send('workspace/symbol', { query = 'linked' }, 3)
+            spec.equal(jobs[#jobs].req.exclude[paths.key(real .. '/linked.lua')], true)
+            send('textDocument/didSave', { textDocument = { uri = uri } })
+            spec.equal(jobs[#jobs].req.method, 'lsp_refresh')
+            spec.equal(jobs[#jobs].req.paths[1], real .. '/linked.lua')
+        end)
+        if paths.windows then os.execute('rmdir "' .. link:gsub('/', '\\') .. '"') else os.remove(link) end
+        if not ok then error(err, 0) end
     end)
     spec.it('reports busy navigation and incomplete completion until initial indexing finishes', function()
         local output, complete
@@ -421,8 +459,10 @@ spec.describe('shared entry and worker lifecycle', function()
             service.forget(root)
             graph.build = function() error('LSP must not build a call graph') end
             local worker = dofile('scripts/codeoutline/index_worker.lua')
+            -- Sessions send the worker canonical roots and paths.
+            local real = assert(require('codeoutline.path').canonical(root))
             local function run(id, req)
-                req.projectPath, req.allowedRoots, req.deadline = root, { root }, xtimer.now_ms() + 10000
+                req.projectPath, req.allowedRoots, req.deadline = real, { real }, xtimer.now_ms() + 10000
                 worker.__thread_handle(1, 'run', id, req)
                 spec.truthy(results[id], 'worker must complete directly without a continuation')
                 return results[id]
@@ -430,8 +470,8 @@ spec.describe('shared entry and worker lifecycle', function()
             spec.truthy(run('initial', { method = 'lsp_refresh' }).ok)
             local _, G = service.resident(root); spec.equal(G, nil)
             write(root .. '/a.lua', 'function worker_only() end\n')
-            spec.truthy(run('save', { method = 'lsp_refresh', paths = { root .. '/a.lua' } }).ok)
-            local symbols = run('symbols', { method = 'lsp_symbols', roots = { root },
+            spec.truthy(run('save', { method = 'lsp_refresh', paths = { real .. '/a.lua' } }).ok)
+            local symbols = run('symbols', { method = 'lsp_symbols', roots = { real },
                 query = 'worker_only', exclude = {}, limit = 200 })
             spec.truthy(symbols.ok); spec.equal(#symbols.result, 1)
             spec.equal(symbols.result[1].name, 'worker_only')
@@ -444,7 +484,7 @@ spec.describe('shared entry and worker lifecycle', function()
             local _, built = service.resident(root); spec.truthy(built)
             graph.build = function() error('built symbol tables are updated per file, not rebuilt') end
             write(root .. '/a.lua', 'function after_graph() end\n')
-            spec.truthy(run('changed', { method = 'lsp_refresh', paths = { root .. '/a.lua' } }).ok)
+            spec.truthy(run('changed', { method = 'lsp_refresh', paths = { real .. '/a.lua' } }).ok)
             local idx, current = service.resident(root)
             spec.equal(current, built); spec.truthy(current.by_name.after_graph)
             spec.nil_value(current.by_name.worker_only); spec.equal(current.generation, idx.generation)

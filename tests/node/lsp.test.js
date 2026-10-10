@@ -5,7 +5,7 @@ import { once } from 'node:events';
 import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { defaultRuntime, root } from './helpers.js';
 
 const frame = (message) => {
@@ -14,7 +14,8 @@ const frame = (message) => {
 };
 
 async function start(t) {
-    const temp = await mkdtemp(join(tmpdir(), 'codeoutline-lsp-'));
+    // Exercise the tilde found in Windows CI's RUNNER~1 temporary directory.
+    const temp = await mkdtemp(join(tmpdir(), 'codeoutline-lsp~-'));
     const project = join(temp, 'workspace');
     await mkdir(project);
     await writeFile(join(project, 'sample.lua'), 'function saved() end\n');
@@ -124,7 +125,7 @@ test('LSP stdio navigates definitions, hover, references and calls over drafts',
     const at = (uri, line, character) => ({ textDocument: { uri }, position: { line, character } });
     const definition = await client.request('textDocument/definition', at(main, 1, 35));
     assert.equal(definition.length, 1);
-    assert.equal(definition[0].uri, util);
+    assert.equal(fileURLToPath(definition[0].uri), fileURLToPath(util));
     assert.deepEqual(definition[0].range, { start: { line: 1, character: 4 }, end: { line: 1, character: 10 } });
     const hover = await client.request('textDocument/hover', at(main, 1, 35));
     assert.match(hover.contents.value, /int helper\(int x\)/);
@@ -163,7 +164,7 @@ test('LSP stdio follows configurable literal arguments and reloads rules', { tim
     const params = { textDocument: { uri }, position: { line: 0, character: 25 } };
     const definition = await client.request('textDocument/definition', params);
     assert.equal(definition.length, 1);
-    assert.equal(definition[0].uri, target);
+    assert.equal(fileURLToPath(definition[0].uri), fileURLToPath(target));
     assert.deepEqual(definition[0].range, { start: { line: 0, character: 17 }, end: { line: 0, character: 39 } });
     client.notify('textDocument/didOpen', { textDocument: { uri: target, languageId: 'lua', version: 1,
         text: "\n\nxthread.register('xmysql_business_done', function() end)\n" } });
@@ -350,7 +351,7 @@ test('LSP indexing accepts split frames and deduplicates nested workspace roots'
         if (!symbols.length) await new Promise((resolve) => setTimeout(resolve, 20));
     }
     assert.equal(symbols.length, 1, client.logs());
-    assert.equal(symbols[0].location.uri, pathToFileURL(join(sub, 'nested.lua')).href);
+    assert.equal(fileURLToPath(symbols[0].location.uri), join(sub, 'nested.lua'));
     assert.equal(symbols[0].location.range.start.character, 9);
     client.notify('workspace/didChangeWorkspaceFolders', { event: { removed: [
         { uri: pathToFileURL(client.project).href }], added: [] } });

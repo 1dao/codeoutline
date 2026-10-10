@@ -7,6 +7,8 @@ local service = require('codeoutline.service')
 local control = require('codeoutline.control')
 local graph = require('codeoutline.graph')
 local root = assert(xutils.temp_file(os.getenv('TEMP') or os.getenv('TMPDIR') or '/tmp')):gsub('\\', '/')
+-- TMPDIR may end in a slash; temp_file can then return a doubled separator.
+root = assert(docs.path(docs.uri(root)))
 os.remove(root); assert(xutils.mkdir_p(root))
 local function write(path, source)
     local f = assert(io.open(path, 'wb')); assert(f:write(source)); assert(f:close())

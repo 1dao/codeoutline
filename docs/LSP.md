@@ -50,7 +50,7 @@ depend on the editor's working directory. Runtime logs must go to stderr.
 - Full-document open/change/close synchronization, monotonically increasing
   versions, session-local drafts and unsaved new files. Untitled documents support
   document symbols through `languageId`.
-- Nine parser modules expose zero-based, half-open declaration/name byte ranges.
+- Ten parser modules expose zero-based, half-open declaration/name byte ranges.
   Symbol positions use UTF-16, with UTF-8, CRLF, BOM and non-BMP handling. The cache
   schema version has changed, so earlier caches rebuild automatically.
 - Multi-root workspaces collapse nested roots within a session and deduplicate
@@ -126,7 +126,7 @@ overlay never writes to the resident tables.
   to their enclosing function. From a C/C++ prototype, definition goes to the
   bodies.
 - On an import line (`require`/`dofile` strings or names, `#include`, JS/TS module
-  strings, Python/Go/Java/Rust imports), definition goes to the loaded file,
+  strings, Python/Go/Java/Kotlin/Rust imports), definition goes to the loaded file,
   resolved by the same dependency rules as explore. C/C++ headers not in the
   project are searched in `initializationOptions.includePaths`, then INCLUDE/CPATH
   variables, then the compiler's list (`cc -E -v`) or, on Windows, the newest
@@ -192,6 +192,15 @@ and report truncation through `window/showMessage`. These rules affect definitio
 navigation only.
 
 ## Completion
+
+Kotlin files (`.kt`, `.kts`) and untitled documents with `languageId: kotlin`
+use the shared symbol, navigation, signature and completion handlers. Kotlin
+completion handles declared parameter/property/return types and `val`/`var`
+constructor initializers. The VS Code/Cursor and Zed clients include Kotlin in
+their language lists; the editor must also recognize Kotlin as a language.
+This is heuristic source indexing, not Kotlin compiler analysis: implicit
+lambda receivers, generated data-class members, Java interop, string-template
+expressions and coroutine/framework dispatch are not resolved.
 
 Completion also runs in the worker over the same overlay. It does not offer
 project-wide global names and leaves case-insensitive filtering to the editor.

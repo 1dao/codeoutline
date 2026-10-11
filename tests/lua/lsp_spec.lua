@@ -22,6 +22,7 @@ spec.describe('symbol byte ranges', function()
         { 'sample.cpp', 'int Box::sample(int sample) { return sample; }', 'sample' },
         { 'sample.py', '@decorate\ndef sample(sample):\n    return sample\n', 'sample' },
         { 'sample.java', 'class Box { int sample(int sample) { return sample; } }', 'sample' },
+        { 'sample.kt', 'class Box { fun sample(sample: Int): Int = sample }', 'sample' },
         { 'sample.lua', 'function Box:sample(sample) return sample end', 'sample' },
         { 'sample.go', 'package main\nfunc sample(sample int) int { return sample }', 'sample' },
         { 'sample.ts', 'export function sample(sample: number) { return sample; }', 'sample' },
@@ -64,6 +65,7 @@ spec.describe('symbol byte ranges', function()
         { 'calls.cpp', 'int f() { return ns::g(1) + obj.h(); }', { 'g', 'h' } },
         { 'calls.py', 'def f():\n    return g(1) + self.h()\n', { 'g', 'h' } },
         { 'calls.java', 'class A { int f() { return g(1) + new B().h(); } }', { 'g', 'B', 'h' } },
+        { 'calls.kt', 'class A { fun f() = g<Int>(1) + B().h() }', { 'g', 'B', 'h' } },
         { 'calls.lua', 'function f() return g(1) + obj:h() + M.k "s" end', { 'g', 'h', 'k' } },
         { 'calls.go', 'package main\nfunc f() int { return g(1) + obj.H() }', { 'g', 'H' } },
         { 'calls.ts', 'function f() { return g(1) + this.h(); }', { 'g', 'h' } },
@@ -525,6 +527,41 @@ end
 
 spec.describe('LSP navigation', function()
     service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+    spec.it('Kotlin definitions, aliased references, signatures and draft overlays', function()
+        nav_write('Service.kt', 'package sample\nfun execute(value: Int, label: String): Int = value\n')
+        nav_write('Client.kt', 'package client\nimport sample.execute as dispatch\nfun run() = dispatch(1, "x")\n')
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local uri = nav_uri('Client.kt')
+        local found = nav({ method = 'lsp_definition', uri = uri, position = { line = 2, character = 14 } })
+        spec.equal(#found, 1); spec.equal(found[1].uri, nav_uri('Service.kt'))
+        spec.equal(range_text('Service.kt', found[1].range), 'execute')
+        local sig = nav({ method = 'lsp_signature', uri = uri, position = { line = 2, character = 24 } })
+        spec.equal(#sig.signatures[1].parameters, 2)
+        spec.equal(sig.activeParameter, 1)
+        local uses = nav({ method = 'lsp_references', uri = nav_uri('Service.kt'), position = { line = 1, character = 6 },
+            includeDeclaration = false })
+        spec.equal(#uses, 1); spec.equal(range_text('Client.kt', uses[1].range), 'dispatch')
+        navigation.sync({ session = 'kotlin-draft', open = { [uri] = 1 }, changed = {
+            [uri] = { version = 1, language = 'kotlin', source = 'package client\nfun fresh() = 1\nfun run() = fresh()' } } })
+        local draft = nav({ method = 'lsp_definition', session = 'kotlin-draft', uri = uri,
+            position = { line = 2, character = 14 } })
+        spec.equal(#draft, 1); spec.equal(draft[1].range.start.line, 1)
+        navigation.close('kotlin-draft')
+        local untitled = docs.new('untitled:Kotlin', 'fun untitledFun() = 1', 1, 'kotlin')
+        spec.equal(untitled:parse().nodes[1].name, 'untitledFun')
+    end)
+    spec.it('Kotlin generic signatures keep type-argument commas inside one parameter', function()
+        local source = 'fun <T> lookup(values: Map<String, T>, fallback: T): T = fallback\n'
+            .. 'fun run() = lookup<Int>(emptyMap(), 1)\n'
+        nav_write('Generic.kt', source)
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local doc = docs.read(nav_root .. '/Generic.kt')
+        local sig = nav({ method = 'lsp_signature', uri = doc.uri,
+            position = doc:position(assert(source:find(', 1)', 1, true))) })
+        spec.equal(#sig.signatures[1].parameters, 2)
+        spec.equal(sig.signatures[1].parameters[1].label, 'values: Map<String, T>')
+        spec.equal(sig.activeParameter, 1)
+    end)
     spec.it('uses configurable literal argument rules and ignores unrelated strings and comments', function()
         local config = nav_root .. '/.codeoutline.json'
         nav_write('messages.lua', "xthread.post(nested(1, 2), 'xmysql_business_done', false)\n")
@@ -923,6 +960,10 @@ local comp_files = {
         .. 'int st() { return Box::@@; }\n',
     ['Box.java'] = 'class Box { int w; Box next() { return null; } static Box of(int k) { return new Box(); } }\n',
     ['Use.java'] = 'class Use { void run() { var x = Box.of(1); x.next().@@ } }\n',
+    ['KBox.kt'] = 'package model\nclass KBox(val width: Int) { fun next(): KBox = this }\n',
+    ['KUse.kt'] = 'package model\nfun use(box: KBox) { box.@@; val x = KBox(1); x.next().@@ }\n',
+    ['KAlias.kt'] = 'package client\nimport model.KBox as Alias\nfun use() { val x: Alias = Alias(1); x.@@ }\n',
+    ['KExtension.kt'] = 'package model\nfun KBox.inspect() { this.@@ }\n',
     ['pkg/store.py'] = 'class Store:\n    def __init__(self):\n        self.items = []\n    def save(self, item):\n        return self.@@\n',
     ['pkg/api.py'] = 'from pkg import store\nfrom .store import Store\ndef handle(req):\n    s = Store()\n    s.@@\n    store.@@\n'
         .. 'def later():@@\n    return "a.@@"\n',
@@ -979,6 +1020,10 @@ spec.describe('LSP completion', function()
         { 'box.cpp', 2, 'make,name,next,w', 'C++ pointer field chains' },
         { 'box.cpp', 3, 'make,name,next,w', 'C++ static access' },
         { 'Use.java', 1, 'next,of,w', 'Java var initializers and method return types' },
+        { 'KUse.kt', 1, 'next,width', 'Kotlin typed parameters and constructor properties' },
+        { 'KUse.kt', 2, 'next,width', 'Kotlin val constructors and return type chains' },
+        { 'KAlias.kt', 1, 'next,width', 'Kotlin imported type aliases' },
+        { 'KExtension.kt', 1, 'next,width', 'Kotlin explicit extension receivers' },
         { 'pkg/store.py', 1, '__init__,items,save', 'Python self with assigned attributes' },
         { 'pkg/api.py', 1, '__init__,items,save', 'Python constructor calls' },
         { 'pkg/api.py', 2, 'Store', 'Python submodule imports' },

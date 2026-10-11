@@ -202,9 +202,12 @@ local function resolve_deps(G, f)
                     if found then break end
                 end
             end
-        elseif rec.language == 'java' then
+        elseif rec.language == 'java' or rec.language == 'kotlin' then
             if path:sub(-2) == '.*' then
                 for _, g in ipairs(G.pkg_files[path:sub(1, -3)] or {}) do add(g) end
+                if rec.language == 'kotlin' then
+                    for _, id in ipairs(G.by_owner[path:sub(1, -3)] or {}) do add(G.node_file[id]) end
+                end
             else
                 for _, id in ipairs(G.by_qualified[path] or {}) do add(G.node_file[id]) end
             end
@@ -212,7 +215,7 @@ local function resolve_deps(G, f)
     end
     -- Java: the whole package is visible without imports; Go: the whole
     -- directory is one package; C#: the file's own namespaces.
-    if rec.language == 'java' and rec.package then
+    if (rec.language == 'java' or rec.language == 'kotlin') and rec.package then
         for _, g in ipairs(G.pkg_files[rec.package] or {}) do add(g) end
     elseif rec.language == 'go' then
         for _, g in ipairs(G.dir_files[here] or {}) do add(g) end
@@ -291,7 +294,7 @@ local function score(G, f, src_id, ref_kind, recv, cid, deps, paired, owner)
         -- method project-wide (str.format -> some format()) is mostly wrong,
         -- so only local candidates qualify.
         return nil
-    elseif ref_kind == 'call' and G.files[f].language == 'java' and src_id then
+    elseif ref_kind == 'call' and (G.files[f].language == 'java' or G.files[f].language == 'kotlin') and src_id then
         -- unqualified call inside a class: implicit this
         if owner and c.parent and G.id_of[cf][c.parent] == owner then s = s + 30 end
     end
@@ -309,6 +312,19 @@ local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired, accept)
     if kind == 'annotation' then return nil end
     accept = accept or (kind == 'new' and NEWABLE) or (kind == 'ref' and VALUE) or CALLABLE
     local cands = G.by_name[name]
+    if G.files[f].language == 'kotlin' and not recv then
+        for _, imp in ipairs(G.files[f].imports) do
+            if (imp.alias or imp.path:match('([^.]+)$')) == name then
+                cands = {}
+                -- by_name also includes unsaved LSP overlays; by_qualified is
+                -- a resident index and may still name the masked disk nodes.
+                for _, id in ipairs(G.by_name[imp.path:match('([^.]+)$')] or {}) do
+                    if G.nodes[id].qualified == imp.path then cands[#cands + 1] = id end
+                end
+                break
+            end
+        end
+    end
     if not cands then return nil end
     -- Score first: score() rejects other languages and statics of other
     -- files, so "is there a real definition?" is only asked among the
@@ -316,7 +332,7 @@ local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired, accept)
     -- same-named nodes let a Python `def work` hide the C prototype of
     -- `work`, after which the Python def was filtered out too.)
     local self_call = kind == 'member_call' and src_id and (recv == 'self' or recv == 'this' or recv == 'cls')
-    local owner = (self_call or (kind == 'call' and src_id and G.files[f].language == 'java'))
+    local owner = (self_call or (kind == 'call' and src_id and (G.files[f].language == 'java' or G.files[f].language == 'kotlin')))
         and owner_class(G, src_id) or nil
     -- score() rejects an unknown-receiver member call to an unrelated file;
     -- checking placement first skips most candidates of common method names.
@@ -569,13 +585,19 @@ function M.query(symbols, opts)
         local files = symbols.files
         for _, f in ipairs(symbols.file_order) do
             control.check()
+            local aliases = {}
+            if files[f].language == 'kotlin' then
+                for _, imp in ipairs(files[f].imports) do
+                    if imp.alias and names[imp.path:match('([^.]+)$')] then aliases[imp.alias] = true end
+                end
+            end
             local refs = files[f].refs
             local ref_names, froms = refs.name, refs.from
             local count = #ref_names
             for first = 1, count, 4096 do
                 if first > 1 then control.check() end
                 for i = first, math.min(count, first + 4095) do
-                    if names[ref_names[i]] and froms[i] > 0 then
+                    if (names[ref_names[i]] or aliases[ref_names[i]]) and froms[i] > 0 then
                         for _, dst in ipairs(targets(f, i) or {}) do
                             if wanted[dst] then
                                 push3(incoming, dst, symbols.id_of[f][froms[i]], refs.line[i], refs.kind[i])

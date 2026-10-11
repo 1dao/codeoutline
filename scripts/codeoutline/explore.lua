@@ -79,7 +79,7 @@ local function segments(name)
 end
 
 local SOURCE_EXT = {}
-for e in ('c h py pyi java lua cpp cc cxx hpp hh hxx'):gmatch('%a+') do SOURCE_EXT[e] = true end
+for e in ('c h py pyi java kt kts lua cpp cc cxx hpp hh hxx'):gmatch('%a+') do SOURCE_EXT[e] = true end
 
 -- Query -> candidate terms: qualified chains, identifiers, file names.
 local function terms(query)

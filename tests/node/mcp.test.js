@@ -59,6 +59,30 @@ test('official SDK stdio: discovery, source, incremental refresh, rebuild and er
     } finally { await c.close(); await f.cleanup(); }
 });
 
+test('official SDK Kotlin: kt/kts discovery, aliased call paths and incremental edits', { timeout: 30000 }, async () => {
+    const f = await fixture();
+    const transport = new StdioClientTransport({ command: defaultRuntime,
+        args: [main, 'STDIO=1', `PROJECT=${f.project}`], cwd: tmpdir(), stderr: 'pipe' });
+    transport.stderr?.on('data', () => {});
+    const c = client();
+    try {
+        await writeFile(join(f.project, 'Service.kt'), 'package demo\nfun kotlinLeaf() = 7\n');
+        await writeFile(join(f.project, 'Client.kts'), 'import demo.kotlinLeaf as invokeLeaf\nfun kotlinEntry() = invokeLeaf()\n');
+        await c.connect(transport);
+        const query = (query) => c.callTool({ name: 'codeoutline_explore', arguments: { query } });
+        const flow = await query('kotlinEntry kotlinLeaf');
+        assert.notEqual(flow.isError, true);
+        assert.match(flow.content[0].text, /kotlinEntry -> kotlinLeaf/);
+        assert.match(flow.content[0].text, /fun kotlinLeaf\(\) = 7/);
+        const file = await query('Service.kt');
+        assert.match(file.content[0].text, /kotlinLeaf/);
+        await writeFile(join(f.project, 'Service.kt'), 'package demo\nfun kotlinUpdated() = 17\n');
+        const edited = await query('kotlinUpdated');
+        assert.match(edited.content[0].text, /return|= 17/);
+        assert.match((await query('kotlinLeaf')).content[0].text, /No symbols matched/);
+    } finally { await c.close(); await f.cleanup(); }
+});
+
 test('official SDK HTTP: sessions, concurrency, refresh, path aliases and perimeter', { timeout: 30000 }, async () => {
     const f = await fixture();
     const worker = new LuaWorker();

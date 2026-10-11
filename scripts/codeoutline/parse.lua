@@ -19,6 +19,7 @@ M.EXTENSIONS = {
     c = 'c', h = 'c',
     py = 'python', pyi = 'python',
     java = 'java',
+    kt = 'kotlin', kts = 'kotlin',
     lua = 'lua',
     cpp = 'cpp', cc = 'cpp', cxx = 'cpp', hpp = 'cpp', hh = 'cpp', hxx = 'cpp', ipp = 'cpp',
     go = 'go',

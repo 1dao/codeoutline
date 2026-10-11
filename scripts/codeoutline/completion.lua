@@ -38,7 +38,7 @@ end
 local WRAPPERS = {}
 for word in ([[Option Box Rc Arc RefCell Cell Mutex RwLock Weak unique_ptr shared_ptr weak_ptr Ptr Ref
     Optional Nullable Promise Future Lazy]]):gmatch('%S+') do WRAPPERS[word] = true end
-local TYPE_AFTER = { go = true, rust = true, typescript = true, javascript = true, python = true }
+local TYPE_AFTER = { go = true, rust = true, typescript = true, javascript = true, python = true, kotlin = true }
 local DYNAMIC = { lua = true, python = true, javascript = true, typescript = true }
 
 -- Full parses of type files, keyed by the index record they correspond to.
@@ -109,7 +109,7 @@ local function declared(node, language)
             rest = rest:sub(#params + 1):gsub('^%s+', '')
             if rest:sub(1, 1) == '(' then rest = rest:match('^%((.-)[,%)]') or '' end
             return normalize(rest)
-        elseif language == 'typescript' or language == 'javascript' then
+        elseif language == 'typescript' or language == 'javascript' or language == 'kotlin' then
             local after = sig:match('%)%s*:%s*([^{=]+)$')
             return after and normalize(after)
         elseif language == 'lua' then
@@ -311,12 +311,13 @@ local function declarations(T, a, b, language, skip, out)
                     local k = i + 1
                     while T.k[k] == 'id' do add(k); if is(T, k + 1, ',') then k = k + 2 else break end end
                 elseif kw(T, i, 'as') and T.k[i + 1] == 'id' then add(i + 1) end
-            elseif language == 'javascript' or language == 'typescript' then
-                if (kw(T, i, 'let') or kw(T, i, 'const') or kw(T, i, 'var')) and T.k[i + 1] == 'id' then
+            elseif language == 'javascript' or language == 'typescript' or language == 'kotlin' then
+                if (kw(T, i, 'let') or kw(T, i, 'const') or kw(T, i, 'var') or kw(T, i, 'val')) and T.k[i + 1] == 'id' then
                     local k, type = i + 2, nil
                     if is(T, k, ':') then
                         local e = k + 1
-                        while e <= b and not is(T, e, '=') and not is(T, e, ';') and not is(T, e, ',') do e = e + 1 end
+                        while e <= b and not is(T, e, '=') and not is(T, e, ';') and not is(T, e, ',')
+                            and not (language == 'kotlin' and e > k + 1 and T:line(e) > T:eline(e - 1)) do e = e + 1 end
                         type = span(T, k + 1, e - 1); k = e
                     end
                     add(i + 1, type, is(T, k, '=') and k + 1 or nil)
@@ -470,7 +471,7 @@ function Completion:types(name, f)
     for _, id in ipairs(found) do
         local q = self.V.nodes[id].qualified
         local family = graph.family(self.V.files[self.V.node_file[id]].language)
-        for _, cid in ipairs(self.V.by_name[name] or {}) do
+        for _, cid in ipairs(self.V.by_name[self.V.nodes[id].name] or {}) do
             local c = self.V.nodes[cid]
             if not set[cid] and accept[c.kind] and c.qualified == q
                 and graph.family(self.V.files[self.V.node_file[cid]].language) == family then
@@ -662,6 +663,7 @@ function Completion:self_types()
     if owner then return { self.V.id_of[self.f][owner] } end
     if not fn then return {} end
     local node = self.rec.nodes[fn]
+    if self.language == 'kotlin' and node.receiver then return self:types(normalize(node.receiver)) end
     local prefix = node.qualified:match('^(.*)::[%w_]+$') or node.qualified:match('^(.*)[%.:][%w_]+$')
     if not prefix and self.language == 'go' then
         prefix = (node.sig or ''):match('^func%s*%(%s*[%w_]*%s*%*?%s*([%w_]+)')
@@ -854,8 +856,29 @@ function M.complete(req)
         end
         for alias in pairs(self.aliases) do entries[#entries + 1] = { name = alias, kind = 'namespace', detail = 'module' } end
         for _, node in ipairs(self.rec.nodes) do
-            if not node.parent and not node.qualified:find('[%.:]') then
+            if not node.parent and (self.language == 'kotlin' or not node.qualified:find('[%.:]')) then
                 entries[#entries + 1] = { name = node.name, kind = node.kind, node = node, file = f }
+            end
+        end
+        if self.language == 'kotlin' then
+            local direct = navigation.deps(V, f)
+            for g in pairs(direct) do
+                if self:expired() then break end
+                local rec = V.files[g]
+                if rec.language == 'kotlin' then
+                    for _, node in ipairs(rec.nodes) do
+                        local visible = not node.parent and rec.package == self.rec.package and node.name or nil
+                        for _, imp in ipairs(self.rec.imports) do
+                            if node.qualified == imp.path then visible = imp.alias or node.name
+                            elseif imp.path:sub(-2) == '.*' and graph.owner(node.qualified) == imp.path:sub(1, -3) then
+                                visible = node.name
+                            end
+                        end
+                        if visible and not node.static then
+                            entries[#entries + 1] = { name = visible, kind = node.kind, node = node, file = g }
+                        end
+                    end
+                end
             end
         end
         if self.language == 'c' or self.language == 'cpp' then

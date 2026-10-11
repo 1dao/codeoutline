@@ -28,7 +28,7 @@ local INDEX_PARSE = { ranges = false }
 M.VERSION = (function()
     local parts = {}
     for _, m in ipairs({ 'xscan', 'text', 'common', 'parse', 'lang.c', 'lang.cpp', 'lang.lua', 'lang.python',
-        'lang.java', 'lang.go', 'lang.js', 'lang.csharp', 'lang.rust' }) do
+        'lang.java', 'lang.kotlin', 'lang.go', 'lang.js', 'lang.csharp', 'lang.rust' }) do
         local file = package.searchpath and package.searchpath('codeoutline.' .. m, package.path)
         local h = file and io.open(file, 'rb')
         if h then parts[#parts + 1] = h:read('a'); h:close() end

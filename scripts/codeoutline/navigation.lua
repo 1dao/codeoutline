@@ -412,11 +412,17 @@ local function scan(V, targets, name)
         control.check()
         local refs = V.files[f].refs
         local names = refs.name
+        local aliases = {}
+        if V.files[f].language == 'kotlin' then
+            for _, imp in ipairs(V.files[f].imports) do
+                if imp.alias and imp.path:match('([^.]+)$') == name then aliases[imp.alias] = true end
+            end
+        end
         for i = 1, #names do
             if i % 4096 == 0 then control.check() end
-            if names[i] == name then
+            if names[i] == name or aliases[names[i]] then
                 if os.clock() > deadline then return hits, true end
-                for _, dst in ipairs(resolve_site(V, f, refs.from[i], name, refs.kind[i], refs.recv[i])) do
+                for _, dst in ipairs(resolve_site(V, f, refs.from[i], names[i], refs.kind[i], refs.recv[i])) do
                     if targets[dst] then hits[#hits + 1] = { f, i }; break end
                 end
                 if #hits >= M.MAX_RESULTS then return hits, true end
@@ -766,12 +772,25 @@ function handlers.lsp_signature(req)
         end
     end
     local call
+    local kotlin = doc:parse().language == 'kotlin'
     for i = #stack, 1, -1 do
         local entry = stack[i]
-        if entry.delimiter == '(' and T.k[entry.token - 1] == 'id' then call = entry; break end
+        local name_token = entry.token - 1
+        if kotlin and entry.delimiter == '(' and T:text(name_token) == '>' then
+            local depth, k = 1, name_token - 1
+            while k > 1 and depth > 0 do
+                local s = T:text(k)
+                if s == '>' then depth = depth + 1 elseif s == '<' then depth = depth - 1 end
+                k = k - 1
+            end
+            if depth == 0 then name_token = k end
+        end
+        if entry.delimiter == '(' and T.k[name_token] == 'id' then
+            call = entry; call.name_token = name_token; break
+        end
     end
     if not call then return false end
-    local name_token = call.token - 1
+    local name_token = call.name_token
     local query = {}
     for key, value in pairs(req) do query[key] = value end
     query.position = doc:position(T.s[name_token] - 1)
@@ -790,10 +809,14 @@ function handlers.lsp_signature(req)
             end
             local ending = opening and S.m[opening]
             if ending then
-                local parameters, start, i = {}, S.e[opening] + 1, opening + 1
+                local parameters, start, i, angle_depth = {}, S.e[opening] + 1, opening + 1, 0
                 while i <= ending do
                     local s = S:text(i)
-                    if i == ending or s == ',' then
+                    if kotlin and S.k[i] == 'op' then
+                        if s == '<' then angle_depth = angle_depth + 1
+                        elseif s == '>' then angle_depth = math.max(0, angle_depth - 1) end
+                    end
+                    if i == ending or (s == ',' and angle_depth == 0) then
                         local parameter = label:sub(start, S.s[i] - 1):match('^%s*(.-)%s*$')
                         if parameter ~= '' and parameter ~= 'void' then parameters[#parameters + 1] = { label = parameter } end
                         start = S.e[i] + 1
@@ -905,7 +928,8 @@ function handlers.lsp_references(req)
         set[id] = true
     end
     set = expand(V, set)
-    local hits, incomplete = scan(V, set, c.name)
+    local name = V.files[V.node_file[targets[1]]].language == 'kotlin' and V.nodes[targets[1]].name or c.name
+    local hits, incomplete = scan(V, set, name)
     local result, t0 = {}, os.clock()
     if req.includeDeclaration then
         for _, id in ipairs(sorted(set)) do result[#result + 1] = (location(V, id)) end

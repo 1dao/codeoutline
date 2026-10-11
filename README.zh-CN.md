@@ -95,7 +95,10 @@ Linux 上解码 GBK 源码需要系统 iconv 的 GBK 模块；EL8/EL9 最小安�
 
 ## 支持的语言
 
-C、C++、C#、Go、Java、JavaScript / TypeScript（含 JSX/TSX）、Lua、Python、Rust。
+C、C++、C#、Go、Java、JavaScript / TypeScript（含 JSX/TSX）、Kotlin（`.kt` / `.kts`）、Lua、Python、Rust。
+
+Kotlin 支持声明、主构造器属性、扩展函数、表达式函数体、包导入与别名，以及普通、泛型和尾随 lambda 调用。
+关系解析仍是启发式的；不建模编译器生成成员、lambda 隐式接收者、字符串模板内的表达式、Java 互操作或协程/框架分派。
 
 ## 命令行
 

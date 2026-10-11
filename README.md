@@ -95,7 +95,12 @@ On Linux, decoding GBK sources needs the GBK module of the system iconv. Minimal
 
 ## Supported languages
 
-C, C++, C#, Go, Java, JavaScript / TypeScript (including JSX/TSX), Lua, Python, and Rust.
+C, C++, C#, Go, Java, JavaScript / TypeScript (including JSX/TSX), Kotlin (`.kt` / `.kts`), Lua, Python, and Rust.
+
+Kotlin includes declarations, constructor properties, extension functions, expression bodies,
+package imports (including aliases), and ordinary, generic and trailing-lambda calls.
+Resolution is heuristic: compiler-generated members, implicit lambda receivers, string-template
+expressions, Java interop and coroutine/framework dispatch are not modeled.
 
 ## Command line
 

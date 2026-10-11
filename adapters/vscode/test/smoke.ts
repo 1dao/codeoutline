@@ -49,6 +49,20 @@ export async function run(): Promise<void> {
     const completions = await vscode.commands.executeCommand<vscode.CompletionList>(
         'vscode.executeCompletionItemProvider', completionUri, new vscode.Position(1, 4), '.');
     assert.ok(completions.items.some(item => item.label === 'width'), 'member completion is registered');
+    const kotlinUri = vscode.Uri.joinPath(folder, 'KClient.kt');
+    const kotlinDoc = await vscode.workspace.openTextDocument(kotlinUri);
+    assert.equal(kotlinDoc.languageId, 'kotlin', 'kt files activate the Kotlin selector without another extension');
+    await vscode.window.showTextDocument(kotlinDoc);
+    const kotlinDefinitions = await eventually(() => vscode.commands.executeCommand<vscode.Location[]>(
+        'vscode.executeDefinitionProvider', kotlinUri, new vscode.Position(1, 22)),
+        value => value?.some(loc => loc.uri.path.endsWith('/KService.kt')));
+    assert.equal(kotlinDefinitions.length, 1);
+    const kotlinSymbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
+        'vscode.executeDocumentSymbolProvider', kotlinUri);
+    assert.ok(kotlinSymbols.some(symbol => symbol.name === 'kotlinRun'));
+    const kotlinSignature = await vscode.commands.executeCommand<vscode.SignatureHelp>(
+        'vscode.executeSignatureHelpProvider', kotlinUri, new vscode.Position(1, 29), '(');
+    assert.ok(kotlinSignature.signatures.some(signature => signature.label.includes('kotlinWork')));
     const other = await eventually(() => vscode.commands.executeCommand<vscode.SymbolInformation[]>(
         'vscode.executeWorkspaceSymbolProvider', 'other_root'), value => value?.some(symbol => symbol.name === 'other_root'));
     assert.ok(other.some(symbol => symbol.location.uri.path.includes('second')));

@@ -60,6 +60,97 @@ spec.describe('xscan', function()
     end)
 end)
 
+spec.describe('kotlin', function()
+    spec.it('extracts packages, primary properties, objects, interfaces and expression functions', function()
+        local r = ci.parse('Box.kt', [[package demo.model
+import demo.api.load as fetch
+import demo.shared.*
+@Serializable
+data class Box<T>(val value: T, private var size: Int = initial()) : Base(), Sized {
+    companion object { fun create(): Box<Int> = Box(1) }
+    override fun count(): Int = size
+    fun work(n: Int = initial()): Int {
+        fun localHelper() = fetch()
+        return localHelper() + count()
+    }
+    val label: String
+        get() = render()
+}
+interface Sized { fun count(): Int }
+sealed class Base
+object Registry { val box = Box(2) }
+typealias Identifier = String
+fun String.trimmed(): String = trim()
+]])
+        local n = names(r)
+        spec.contains(n, 'class demo.model.Box@4')
+        spec.contains(n, 'property demo.model.Box.value@5')
+        spec.contains(n, 'class demo.model.Box.Companion@6')
+        spec.contains(n, 'method demo.model.Box.Companion.create@6')
+        spec.equal(r.package, 'demo.model')
+        spec.equal(r.imports[1].alias, 'fetch')
+        spec.equal(r.imports[2].path, 'demo.shared.*')
+        spec.contains(n, 'function demo.model.Box.work.localHelper@9')
+        spec.contains(n, 'interface demo.model.Sized@15')
+        spec.contains(n, 'class demo.model.Base@16')
+        spec.contains(n, 'class demo.model.Registry@17')
+        spec.contains(n, 'typedef demo.model.Identifier@18')
+        spec.contains(n, 'function demo.model.trimmed@19')
+        spec.contains(refs(r), 'localHelper->fetch')
+        spec.contains(refs(r), 'label->render')
+        spec.contains(refs(r), 'work->initial')
+    end)
+    spec.it('keeps multiline expressions, generic calls, lambdas and escaped identifiers', function()
+        local src = [[/* outer /* fun phantom() {} */ still comment */
+fun <T> collect(block: () -> T): T = block()
+fun `odd name`(): String = """fun fake() { }"""
+fun run() = collect<String> {
+    helper()
+}
+fun more(): Int =
+    first() +
+    second()
+val text = "fake()"
+enum class State { OPEN, CLOSED; fun label() = name }
+]]
+        local r = ci.parse('script.kts', src)
+        spec.contains(names(r), 'function collect@2')
+        spec.contains(names(r), 'function odd name@3')
+        spec.contains(names(r), 'function more@7')
+        spec.contains(names(r), 'enum_member State.CLOSED@11')
+        spec.contains(refs(r), 'run->collect')
+        spec.contains(refs(r), 'run->helper')
+        spec.contains(refs(r), 'more->second')
+        spec.truthy(not names(r):find('phantom') and not names(r):find('fake'))
+        spec.truthy(not refs(r):find('fake'))
+        for _, n in ipairs(r.nodes) do
+            if n.name == 'odd name' then spec.equal(src:sub(n.name_start + 1, n.name_end), n.name) end
+        end
+    end)
+    spec.it('does not let nested template quotes or accessor syntax swallow following declarations', function()
+        local src = [==[val label = "${render("}", "${nested("{")}")}"
+val raw = """${render("\"", "}")} fun phantom() {}"""
+val String.last: Char get() = get(lastIndex)
+typealias Callback<T> = (T) -> Unit
+class Item(val size: Int) {
+    init { register() }
+    constructor() : this(1) { finish() }
+}
+fun real() = label
+]==]
+        local r = ci.parse('Templates.kt', src)
+        spec.contains(names(r), 'variable last@3')
+        spec.contains(names(r), 'typedef Callback@4')
+        spec.contains(names(r), 'constructor Item.Item@7')
+        spec.contains(names(r), 'function real@9')
+        spec.truthy(not names(r):find('phantom'))
+        spec.truthy(not refs(r):find('render') and not refs(r):find('%->init'))
+        spec.contains(refs(r), 'Item->register')
+        spec.contains(refs(r), 'Item->finish')
+        for _, node in ipairs(r.nodes) do spec.truthy(node.end_byte <= #src) end
+    end)
+end)
+
 spec.describe('c', function()
     spec.it('extracts functions, structs, typedefs, macros, globals', function()
         local r = ci.parse('x.c', table.concat({
@@ -500,6 +591,21 @@ spec.describe('review regressions', function()
         return table.concat(es, ' ')
     end
 
+    spec.it('Kotlin package, explicit, wildcard and aliased imports connect both directions', function()
+        local G = build({
+            ['model/Service.kt'] = 'package api\nfun execute() = helper()\nfun helper() = 1',
+            ['client/Main.kt'] = 'package client\nimport api.execute as dispatch\nfun run() = dispatch()',
+            ['client/Other.kt'] = 'package client\nimport api.*\nfun other() = execute()',
+            ['unrelated/False.kt'] = 'package unrelated\nfun dispatch() = 0\nfun execute() = 0',
+        })
+        local Q = graph_mod.query(G)
+        local id = G.by_qualified['api.execute'][1]
+        local run = G.by_qualified['client.run'][1]
+        spec.equal(Q.out[run][1], id)
+        spec.equal(Q.out[G.by_qualified['client.other'][1]][1], id)
+        spec.equal(#Q.inn[id], 2 * graph_mod.EDGE)
+        spec.equal(Q.out[id][1], G.by_qualified['api.helper'][1])
+    end)
     spec.it('C++ static members stay callable from other files', function()
         local G = build({ ['api.hpp'] = 'struct Api { static void work() {} };',
             ['main.cpp'] = '#include "api.hpp"\nvoid run() { Api::work(); }' })

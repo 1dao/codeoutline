@@ -48,6 +48,13 @@
     "typescript": "^5.9.0"
   },
   "contributes": {
+    "languages": [
+      {
+        "id": "kotlin",
+        "aliases": ["Kotlin", "kotlin"],
+        "extensions": [".kt", ".kts"]
+      }
+    ],
     "commands": [
       {
         "command": "codeoutline.restart",
@@ -106,6 +113,7 @@
               "java",
               "javascript",
               "javascriptreact",
+              "kotlin",
               "lua",
               "python",
               "rust",
@@ -121,6 +129,7 @@
             "java",
             "javascript",
             "javascriptreact",
+            "kotlin",
             "lua",
             "python",
             "rust",

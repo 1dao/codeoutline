@@ -73,6 +73,7 @@ local function view(session, root)
     local G = idx:symbols()
     local V = setmetatable({ root = root, idx = idx, drafts = {}, disk = {}, dep_cache = {}, new_files = {},
         next_file = G.next_file, next_node = G.next_node, next_dir = G.next_dir }, { __index = G })
+    V.js_context = require('codeoutline.js_resolution').context(V)
     for _, name in ipairs({ 'files', 'nodes', 'node_file', 'id_of', 'file_index', 'file_dir' }) do
         V[name] = setmetatable({}, { __index = G[name] })
     end
@@ -142,7 +143,7 @@ end
 local function deps(V, f)
     local entry = V.dep_cache[f]
     if not entry then
-        local direct, paired = graph.dependencies(V, f)
+        local direct, paired = graph.dependencies(V, f, V.js_context)
         if C_FAMILY[V.files[f].language] then
             local queue = {}
             for g in pairs(direct) do queue[#queue + 1] = g end
@@ -180,13 +181,13 @@ local function recursive(node, recv)
 end
 
 -- Targets of one occurrence of name in file f, enclosed by node index from.
-local function resolve_site(V, f, from, name, kind, recv)
+local function resolve_site(V, f, from, name, kind, recv, evidence)
     local src = from > 0 and V.id_of[f][from] or nil
     local direct, paired = deps(V, f)
     local rkind, accept = kind, nil
     if kind == 'symbol' then rkind, accept = 'call', ANY
     elseif kind == 'member_symbol' then rkind, accept = 'member_call', ANY end
-    local targets = graph.resolve(V, f, src, name, rkind, recv or nil, direct, paired, accept) or {}
+    local targets = graph.resolve(V, f, src, name, rkind, recv or nil, direct, paired, accept, evidence, V.js_context) or {}
     if kind == 'symbol' then
         local kept = {}
         for _, id in ipairs(targets) do
@@ -204,7 +205,7 @@ local function resolve_site(V, f, from, name, kind, recv)
     -- Definitions too far apart to choose between: a visible prototype still
     -- names the function, and going to its definition lists them all.
     if #targets == 0 and (kind == 'call' or kind == 'ref') then
-        targets = graph.resolve(V, f, src, name, kind, recv or nil, direct, paired, PROTOTYPE) or {}
+        targets = graph.resolve(V, f, src, name, kind, recv or nil, direct, paired, PROTOTYPE, evidence, V.js_context) or {}
     end
     if C_FAMILY[V.files[f].language] then
         -- C binds only what its includes make visible; a lone far definition
@@ -235,6 +236,7 @@ local function find_cursor(doc, offset, strict)
             local a = refs.start[i]
             if a and inside(a, refs.stop[i]) then
                 return { from = refs.from[i], name = refs.name[i], kind = refs.kind[i], recv = refs.recv[i],
+                    evidence = refs.js_receiver and refs.js_receiver[i],
                     first = a, last = refs.stop[i] }
             end
         end
@@ -413,6 +415,7 @@ local function scan(V, targets, name)
         local refs = V.files[f].refs
         local names = refs.name
         local aliases = {}
+        for _, binding in ipairs(V.files[f].js_imports or {}) do aliases[binding.local_name] = true end
         if V.files[f].language == 'kotlin' then
             for _, imp in ipairs(V.files[f].imports) do
                 if imp.alias and imp.path:match('([^.]+)$') == name then aliases[imp.alias] = true end
@@ -420,9 +423,9 @@ local function scan(V, targets, name)
         end
         for i = 1, #names do
             if i % 4096 == 0 then control.check() end
-            if names[i] == name or aliases[names[i]] then
+            if names[i] == name or aliases[names[i]] or aliases[refs.recv[i]] then
                 if os.clock() > deadline then return hits, true end
-                for _, dst in ipairs(resolve_site(V, f, refs.from[i], names[i], refs.kind[i], refs.recv[i])) do
+                for _, dst in ipairs(resolve_site(V, f, refs.from[i], names[i], refs.kind[i], refs.recv[i], refs.js_receiver and refs.js_receiver[i])) do
                     if targets[dst] then hits[#hits + 1] = { f, i }; break end
                 end
                 if #hits >= M.MAX_RESULTS then return hits, true end
@@ -711,7 +714,7 @@ local function at(req)
     local c = cursor(doc, offset)
     local targets = {}
     if c and c.decl then targets = { V.id_of[f][c.decl] }
-    elseif c then targets = resolve_site(V, f, c.from, c.name, c.kind, c.recv) end
+    elseif c then targets = resolve_site(V, f, c.from, c.name, c.kind, c.recv, c.evidence) end
     return V, doc, c, targets, f, offset
 end
 
@@ -902,7 +905,7 @@ function handlers.lsp_outgoing(req)
     for i = 1, #refs.name do
         if i % 128 == 0 then control.check() end
         if refs.from[i] == from then
-            for _, dst in ipairs(resolve_site(V, f, from, refs.name[i], refs.kind[i], refs.recv[i])) do
+            for _, dst in ipairs(resolve_site(V, f, from, refs.name[i], refs.kind[i], refs.recv[i], refs.js_receiver and refs.js_receiver[i])) do
                 local group = groups[dst]
                 if not group then
                     group = { to = item(V, dst), fromRanges = {} }

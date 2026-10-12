@@ -132,17 +132,21 @@ end
 -- Drop parser-internal fields so the result is plain data.
 function M.finish(r, T)
     M.assign_refs(r)
+    if T then require('codeoutline.js_evidence').collect(r, T) end
     if T then require('codeoutline.indirect').collect(r, T) end
     local name, from, kind, line, recv = {}, {}, {}, {}, {}
+    local js_receiver = r.js_imports and {}
     local start, stop = r.ranges and T and {}, r.ranges and T and {}
     for i, ref in ipairs(r.refs) do
         name[i], from[i], kind[i], line[i], recv[i] = ref.name, ref.from, ref.kind, ref.line, ref.recv or false
+        if js_receiver then js_receiver[i] = ref.js_receiver or '' end
         if start then
             local named = T:text(ref.tok) == ref.name
             start[i], stop[i] = named and T.s[ref.tok] - 1 or false, named and T.e[ref.tok] or false
         end
     end
     r.refs = { name = name, from = from, kind = kind, line = line, recv = recv, start = start or nil, stop = stop or nil }
+    r.refs.js_receiver = js_receiver
     for i, n in ipairs(r.nodes) do
         n.ti, n.tj = nil, nil
         if not r.ranges then

@@ -1144,6 +1144,113 @@ spec.describe('watched refresh', function()
     xutils.rmtree(wr)
 end)
 
+spec.describe('JS module and receiver resolution', function()
+    local function build(files, root)
+        local records = {}
+        for path, source in pairs(files) do records[path] = ci.parse(path, source) end
+        return graph.build({ root = root, files = records })
+    end
+    spec.it('binds renamed, default and namespace imports through explicit exports', function()
+        local G = build({
+            ['a.ts'] = 'export function save() {}\nexport default function main() {}',
+            ['barrel.ts'] = "export { save as store, default } from './a';",
+            ['b.ts'] = 'export function save() {}\nexport function store() {}\nexport function main() {}',
+            ['use.ts'] = "import boot, { store as persist } from './barrel';\nimport * as api from './a';\nfunction run() { persist(); boot(); api.save(); }",
+        })
+        spec.equal(edges_from(G, 'run'), 'main@a.ts save@a.ts save@a.ts')
+        local Q = graph.query(G)
+        spec.equal(#Q.inn[G.by_name.save[1]], 6)
+    end)
+    spec.it('uses constructor and parameter types instead of same-named methods', function()
+        local G = build({
+            ['a.ts'] = 'export class Store { save() {} }',
+            ['b.ts'] = 'export class Store { save() {} }',
+            ['use.ts'] = "import { Store as Chosen } from './b';\nfunction run() { const s = new Chosen(); s.save(); }\nfunction typed(s: Chosen) { s.save(); }",
+        })
+        spec.contains(edges_from(G, 'run'), 'save@b.ts')
+        spec.truthy(not edges_from(G, 'run'):find('save@a.ts', 1, true))
+        spec.equal(edges_from(G, 'typed'), 'save@b.ts')
+    end)
+    spec.it('resolves default classes, namespace types and local export aliases', function()
+        local G = build({
+            ['lib.ts'] = 'class Store { save() {} }\nfunction actual() {}\nexport { Store as default, Store as Other, actual as renamed };',
+            ['use.ts'] = "import Selected from './lib'; import * as api from './lib';\nfunction run(s: Selected, t: api.Other) { s.save(); t.save(); api.renamed(); }",
+        })
+        spec.equal(edges_from(G, 'run'), 'actual@lib.ts save@lib.ts save@lib.ts')
+        spec.equal(#graph.query(G).inn[G.by_name.actual[1]], 3)
+    end)
+    spec.it('rejects unresolved imports, missing members, shadowing and reassignment', function()
+        local G = build({
+            ['a.ts'] = 'export class Store { save() {} }\nexport function absent() {}',
+            ['use.ts'] = [[import { Store } from './a';
+import { absent } from './missing';
+function run() { absent(); const s = new Store(); s.missing(); s = unknown; s.save(); }
+function shadow(Store) { Store.save(); }
+function block() { const s = new Store(); { const s = unknown; s.save(); } }
+function chained() { const s = new Store(); other.s.save(); factory().save(); }
+]],
+            ['false.ts'] = 'export function missing() {}\nexport class Wrong { save() {} }',
+        })
+        spec.equal(edges_from(G, 'run'), 'Store@a.ts')
+        spec.equal(edges_from(G, 'shadow'), '')
+        spec.equal(edges_from(G, 'block'), 'Store@a.ts')
+        spec.equal(edges_from(G, 'chained'), 'Store@a.ts')
+    end)
+    spec.it('retains ambiguous star exports and terminates export cycles', function()
+        local G = build({
+            ['a.ts'] = 'export function save() {}', ['b.ts'] = 'export function save() {}',
+            ['barrel.ts'] = "export * from './a'; export * from './b'; export * from './cycle';",
+            ['cycle.ts'] = "export * from './barrel';",
+            ['use.ts'] = "import { save } from './barrel'; function run() { save(); }",
+        })
+        spec.equal(edges_from(G, 'run'), 'save@a.ts save@b.ts')
+    end)
+    spec.it('preserves local callable bindings and nested function shadowing', function()
+        local G = build({
+            ['lib.ts'] = 'export function work() {}',
+            ['use.ts'] = [[import { work } from './lib';
+const arrow = () => {};
+function run() { arrow(); function work() {} work(); }
+function elsewhere() { work(); }
+]],
+        })
+        spec.equal(edges_from(G, 'run'), 'arrow@use.ts work@use.ts')
+        spec.equal(edges_from(G, 'elsewhere'), 'work@lib.ts')
+    end)
+    spec.it('resolves inherited JSONC paths and reloads config without reparsing', function()
+        local root = tmp_root .. '/js_aliases'
+        write(root .. '/config/base.json', [[{ // paths are relative to this config
+          "compilerOptions": { "paths": { "@/*": ["../src/*"], "@/special": ["../alternate"], }, },
+        }]])
+        write(root .. '/tsconfig.json', '{"extends":"./config/base"}')
+        local G = build({
+            ['src/api.ts'] = 'export function save() {}',
+            ['alternate.ts'] = 'export function save() {}',
+            ['use.ts'] = "import { save as chosen } from '@/api'; function run() { chosen(); }",
+            ['special.ts'] = "import { save } from '@/special'; function special() { save(); }",
+        }, root)
+        spec.equal(edges_from(G, 'run'), 'save@src/api.ts')
+        spec.equal(edges_from(G, 'special'), 'save@alternate.ts')
+        write(root .. '/tsconfig.json', '{"compilerOptions":{"paths":{"@/*":["alternate.ts"]}}}')
+        spec.equal(edges_from(G, 'run'), 'save@alternate.ts')
+    end)
+    spec.it('keeps bindings through cache reload and updates changed export targets', function()
+        local root = tmp_root .. '/js_cache'
+        write(root .. '/a.ts', 'export function save() {}')
+        write(root .. '/b.ts', 'export function save() {}')
+        write(root .. '/barrel.ts', "export { save as persist } from './a';")
+        write(root .. '/use.ts', "import { persist } from './barrel'; function run() { persist(); }")
+        local options = { cache_path = root .. '/cache.bin', lister = 'walk' }
+        local idx, G = svc.get(root, options); idx:save(); svc.forget(root)
+        idx, G = svc.get(root, options)
+        spec.equal(edges_from(G, 'run'), 'save@a.ts')
+        write(root .. '/barrel.ts', "export { save as persist } from './b';")
+        idx, G = svc.get(root, options)
+        spec.equal(edges_from(G, 'run'), 'save@b.ts')
+        svc.forget(root)
+    end)
+end)
+
 spec.describe('configured indirect dispatch', function()
     local rules = {
         { kind = 'event', language = 'lua', call = 'bus.emit', argument = 1,

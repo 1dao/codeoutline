@@ -562,6 +562,31 @@ spec.describe('LSP navigation', function()
         spec.equal(sig.signatures[1].parameters[1].label, 'values: Map<String, T>')
         spec.equal(sig.activeParameter, 1)
     end)
+    spec.it('resolves JS imported aliases and typed receivers in unsaved overlays', function()
+        nav_write('StoreA.ts', 'export class Store { save() {} }\nexport function persist() {}\n')
+        nav_write('StoreB.ts', 'export class Store { save() {} }\nexport function persist() {}\n')
+        local source = "import { Store as Selected, persist as write } from './StoreB';\nfunction run(s: Selected) { s.save(); write(); }\n"
+        nav_write('TypedClient.ts', source)
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local doc = docs.read(nav_root .. '/TypedClient.ts')
+        local function definition(text, session)
+            return nav({ method = 'lsp_definition', uri = doc.uri, session = session,
+                position = doc:position(assert(source:find(text, 1, true)) - 1) })
+        end
+        local found = definition('save()')
+        spec.equal(#found, 1); spec.equal(found[1].uri, nav_uri('StoreB.ts'))
+        found = definition('write()')
+        spec.equal(#found, 1); spec.equal(found[1].uri, nav_uri('StoreB.ts'))
+        local uses = nav({ method = 'lsp_references', uri = nav_uri('StoreB.ts'), position = { line = 1, character = 18 },
+            includeDeclaration = false })
+        spec.equal(#uses, 1); spec.equal(range_text('TypedClient.ts', uses[1].range), 'write')
+        local target = nav_uri('StoreB.ts')
+        navigation.sync({ session = 'js-typed', open = { [target] = 1 }, changed = {
+            [target] = { version = 1, language = 'typescript', source = '\n\nexport class Store { save() {} }\nexport function persist() {}' } } })
+        found = definition('save()', 'js-typed')
+        spec.equal(#found, 1); spec.equal(found[1].range.start.line, 2)
+        navigation.close('js-typed')
+    end)
     spec.it('uses configurable literal argument rules and ignores unrelated strings and comments', function()
         local config = nav_root .. '/.codeoutline.json'
         nav_write('messages.lua', "xthread.post(nested(1, 2), 'xmysql_business_done', false)\n")

@@ -27,6 +27,7 @@
 -- to MAX_TIES targets instead of guessing.
 
 local control = require('codeoutline.control')
+local js_resolution = require('codeoutline.js_resolution')
 local M = {}
 
 M.EDGE = 3
@@ -66,7 +67,7 @@ local function push3(t, k, a, b, c)
 end
 
 -- Files a file depends on, resolved from its #include / import records.
-local function resolve_deps(G, f)
+local function resolve_deps(G, f, js_context)
     local rec = G.files[f]
     local deps = {}
     local function add(g) if g and g ~= f then deps[g] = true end end
@@ -155,22 +156,7 @@ local function resolve_deps(G, f)
                 if hit then break end
             end
         elseif rec.language == 'javascript' or rec.language == 'typescript' then
-            -- relative specifiers only; bare package names live in node_modules
-            if path:sub(1, 1) == '.' then
-                local base = here
-                local rel = path
-                while true do
-                    if rel:sub(1, 2) == './' then rel = rel:sub(3)
-                    elseif rel:sub(1, 3) == '../' then base = dirname(base); rel = rel:sub(4)
-                    else break end
-                end
-                local stemp = (base ~= '' and (base .. '/') or '') .. rel
-                stemp = stemp:gsub('%.[mc]?js$', '')        -- TS sources imported as ./x.js
-                for _, ext in ipairs({ '', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.mts',
-                    '/index.ts', '/index.tsx', '/index.js', '/index.mjs' }) do
-                    add(G.file_index[stemp .. ext])
-                end
-            end
+            add(js_resolution.module(G, f, path, js_context))
         elseif rec.language == 'csharp' then
             for _, g in ipairs(G.ns_files[path] or {}) do add(g) end
         elseif rec.language == 'rust' then
@@ -308,9 +294,16 @@ local function is_decl(node) return node.kind == 'prototype' or node.decl end
 local scored_ids, scored_vals = {}, {}
 
 -- accept overrides the node kinds the ref kind may bind to (navigation only).
-local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired, accept)
+local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired, accept, evidence, js_context)
     if kind == 'annotation' then return nil end
     accept = accept or (kind == 'new' and NEWABLE) or (kind == 'ref' and VALUE) or CALLABLE
+    if evidence == '' then evidence = nil end
+    local exact = js_resolution.resolve(G, f, name, kind, recv, evidence, js_context)
+    if exact ~= nil then
+        local result = {}
+        for _, id in ipairs(exact) do if accept[G.nodes[id].kind] then result[#result + 1] = id end end
+        return result
+    end
     local cands = G.by_name[name]
     if G.files[f].language == 'kotlin' and not recv then
         for _, imp in ipairs(G.files[f].imports) do
@@ -526,11 +519,12 @@ function M.query(symbols, opts)
     local Q = setmetatable({ out = {}, inn = {},
         stats = { expanded = 0, incoming_scans = 0, resolved_refs = 0 }, incomplete = false }, { __index = symbols })
     local dependencies, references = {}, {}
+    local js_context = js_resolution.context(symbols)
     local indirect = require('codeoutline.indirect').edges(symbols, opts.dispatch_rules)
     local function deps(f)
         local entry = dependencies[f]
         if not entry then
-            local direct, paired = resolve_deps(symbols, f)
+            local direct, paired = resolve_deps(symbols, f, js_context)
             entry = { direct, paired }; dependencies[f] = entry
         end
         return entry[1], entry[2]
@@ -541,7 +535,7 @@ function M.query(symbols, opts)
         local direct, paired = deps(f)
         Q.stats.resolved_refs = Q.stats.resolved_refs + 1
         return resolve_ref(symbols, f, ids[refs.from[i]], refs.name[i], refs.kind[i],
-            refs.recv[i] or nil, direct, paired)
+            refs.recv[i] or nil, direct, paired, nil, refs.js_receiver and refs.js_receiver[i], js_context)
     end
     setmetatable(Q.out, { __index = function(cache, id)
         control.check()
@@ -600,6 +594,7 @@ function M.query(symbols, opts)
         for _, f in ipairs(symbols.file_order) do
             control.check()
             local aliases = {}
+            for _, binding in ipairs(files[f].js_imports or {}) do aliases[binding.local_name] = true end
             if files[f].language == 'kotlin' then
                 for _, imp in ipairs(files[f].imports) do
                     if imp.alias and names[imp.path:match('([^.]+)$')] then aliases[imp.alias] = true end
@@ -611,7 +606,7 @@ function M.query(symbols, opts)
             for first = 1, count, 4096 do
                 if first > 1 then control.check() end
                 for i = first, math.min(count, first + 4095) do
-                    if (names[ref_names[i]] or aliases[ref_names[i]]) and froms[i] > 0 then
+                    if (names[ref_names[i]] or aliases[ref_names[i]] or aliases[refs.recv[i]]) and froms[i] > 0 then
                         for _, dst in ipairs(targets(f, i) or {}) do
                             if wanted[dst] then
                                 push3(incoming, dst, symbols.id_of[f][froms[i]], refs.line[i], refs.kind[i])

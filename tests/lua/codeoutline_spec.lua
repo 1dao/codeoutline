@@ -1144,6 +1144,96 @@ spec.describe('watched refresh', function()
     xutils.rmtree(wr)
 end)
 
+spec.describe('configured indirect dispatch', function()
+    local rules = {
+        { kind = 'event', language = 'lua', call = 'bus.emit', argument = 1,
+            register = 'bus.on', keyArgument = 1, handlerArgument = 2 },
+        { kind = 'callback', call = 'schedule', argument = 2 },
+        { kind = 'target', call = 'worker.post', argument = 2 },
+    }
+    local function symbols()
+        return graph.build({ files = {
+            ['send.lua'] = ci.parse('send.lua', [[
+function send() bus.emit('tick'); other.emit('tick'); bus.emit(dynamic) end
+function later() schedule(make(1, 2), handle) end
+function post() worker.post(1, 'handle') end
+function ignored() schedule(1, object.factory()); worker.post(1, handle) end
+]]),
+            ['receive.lua'] = ci.parse('receive.lua', [[
+function handle() finish() end
+function finish() end
+bus.on('tick', handle)
+bus.on('other', finish)
+]]),
+        } })
+    end
+    spec.it('connects messages, callbacks and named dispatch in both directions', function()
+        local G = symbols()
+        local Q = graph.query(G, { dispatch_rules = rules })
+        local handle = G.by_name.handle[1]
+        for _, name in ipairs({ 'send', 'later', 'post' }) do
+            local edges = Q.out[G.by_name[name][1]]
+            spec.equal(edges[1], handle)
+            spec.contains(edges[3], 'indirect:')
+        end
+        spec.equal(#Q.inn[handle], 9)
+        local ignored = Q.out[G.by_name.ignored[1]]
+        for i = 3, #ignored, graph.EDGE do spec.truthy(not ignored[i]:match('^indirect:')) end
+        spec.equal(#graph.query(G).out[G.by_name.send[1]], 0)
+    end)
+    spec.it('shows dispatch evidence and traverses through handlers in explore', function()
+        local G = symbols()
+        local text = explore.run(G, { root = tmp_root, query_source = function() return '', false end }, 'send handle', { dispatch_rules = rules })
+        spec.contains(text, 'indirect:event#1')
+        spec.contains(text, 'send -> handle')
+    end)
+    spec.it('isolates event buses and reads project rules on every query', function()
+        local root = tmp_root .. '/dispatch'
+        xutils.mkdir_p(root)
+        local G = symbols(); G.root = root
+        write(root .. '/.codeoutline.json', xutils.json_pack({ dispatchRules = rules }))
+        spec.equal(#graph.query(G).out[G.by_name.send[1]], 3)
+        write(root .. '/.codeoutline.json', '{"dispatchRules":[]}')
+        spec.equal(#graph.query(G).out[G.by_name.send[1]], 0)
+        spec.equal(pcall(graph.query, G, { dispatch_rules = {{ kind = 'callback', call = '*.on', argument = 1 }} }), false)
+    end)
+    spec.it('refreshes registrations without retaining stale edges', function()
+        local G = symbols()
+        graph.remove_file(G, 'receive.lua')
+        graph.add_file(G, 'receive.lua', ci.parse('receive.lua', "function replacement() end\nbus.on('tick', replacement)"))
+        local Q = graph.query(G, { dispatch_rules = rules })
+        spec.equal(Q.out[G.by_name.send[1]][1], G.by_name.replacement[1])
+    end)
+    spec.it('keeps dispatch sites through disk cache and displays real handler source', function()
+        local root = tmp_root .. '/dispatch_cache'
+        write(root .. '/send.lua', "function publish() bus.emit('tick') end")
+        write(root .. '/receive.lua', "function consume() return 42 end\nbus.on('tick', consume)")
+        write(root .. '/.codeoutline.json', xutils.json_pack({ dispatchRules = rules }))
+        local options = { cache_path = root .. '/cache.bin' }
+        local idx, G = svc.get(root, options)
+        idx:save()
+        svc.forget(root)
+        idx, G = svc.get(root, options)
+        local output = explore.run(G, idx, 'publish consume')
+        spec.contains(output, 'publish -> consume')
+        spec.contains(output, 'return 42')
+        spec.contains(output, 'indirect:event#1')
+        svc.forget(root)
+    end)
+    spec.it('recognizes C function addresses without inventing dynamic callbacks', function()
+        local G = graph.build({ files = { ['cb.c'] = ci.parse('cb.c', [[
+void done(void) {}
+void run(void) { schedule(1, &done); }
+void dynamic(void) { schedule(1, choose()); }
+]]) } })
+        local Q = graph.query(G, { dispatch_rules = { rules[2] } })
+        local edges = Q.out[G.by_name.run[1]]
+        spec.equal(edges[1], G.by_name.done[1])
+        spec.equal(edges[3], 'indirect:callback#1')
+        spec.equal(#Q.out[G.by_name.dynamic[1]], 0)
+    end)
+end)
+
 xutils.rmtree(tmp_root)
 os.remove(cache)
 

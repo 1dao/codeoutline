@@ -504,6 +504,7 @@ end
 -- build is simply discarded.
 function M.build(idx)
     local G = M.new()
+    G.root = idx.root
     local paths = {}
     for rel in pairs(idx.files) do paths[#paths + 1] = rel end
     table.sort(paths)
@@ -525,6 +526,7 @@ function M.query(symbols, opts)
     local Q = setmetatable({ out = {}, inn = {},
         stats = { expanded = 0, incoming_scans = 0, resolved_refs = 0 }, incomplete = false }, { __index = symbols })
     local dependencies, references = {}, {}
+    local indirect = require('codeoutline.indirect').edges(symbols, opts.dispatch_rules)
     local function deps(f)
         local entry = dependencies[f]
         if not entry then
@@ -557,6 +559,11 @@ function M.query(symbols, opts)
             references[f] = grouped
         end
         local edges = {}
+        for _, edge in ipairs(indirect[id] or {}) do
+            edges[#edges + 1] = edge.target
+            edges[#edges + 1] = edge.line
+            edges[#edges + 1] = edge.kind
+        end
         for _, i in ipairs(grouped[id] or {}) do
             control.check()
             for _, dst in ipairs(targets(f, i) or {}) do
@@ -579,6 +586,13 @@ function M.query(symbols, opts)
         if not found then return end
         local incoming = {}
         for id in pairs(wanted) do incoming[id] = {} end
+        for _, f in ipairs(symbols.file_order) do
+            for _, src in ipairs(symbols.id_of[f]) do
+                for _, edge in ipairs(indirect[src] or {}) do
+                    if wanted[edge.target] then push3(incoming, edge.target, src, edge.line, edge.kind) end
+                end
+            end
+        end
         self.stats.incoming_scans = self.stats.incoming_scans + 1
         -- Hot loop over every reference: numeric loops, hoisted fields, and the
         -- selective name test first. Checkpoints run per file and per chunk.

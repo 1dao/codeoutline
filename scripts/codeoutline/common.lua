@@ -132,6 +132,7 @@ end
 -- Drop parser-internal fields so the result is plain data.
 function M.finish(r, T)
     M.assign_refs(r)
+    if T then require('codeoutline.indirect').collect(r, T) end
     local name, from, kind, line, recv = {}, {}, {}, {}, {}
     local start, stop = r.ranges and T and {}, r.ranges and T and {}
     for i, ref in ipairs(r.refs) do

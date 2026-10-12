@@ -479,6 +479,7 @@ function M.run(G, idx, query, opts)
             if not seen_in[src] and #callers < M.LIST_CAP then
                 seen_in[src] = true
                 callers[#callers + 1] = string.format('%s (%s:%d)', G.nodes[src].name, G.files[G.node_file[src]].path, inn[i + 1])
+                    .. (inn[i + 2]:match('^indirect:') and (' [' .. inn[i + 2] .. ']') or '')
             end
         end
         for i = 1, #out, graph.EDGE do
@@ -486,6 +487,7 @@ function M.run(G, idx, query, opts)
             if not seen_out[dst] and #callees < M.LIST_CAP then
                 seen_out[dst] = true
                 callees[#callees + 1] = G.nodes[dst].name .. ' (' .. graph.where(G, dst) .. ')'
+                    .. (out[i + 2]:match('^indirect:') and (' [' .. out[i + 2] .. ']') or '')
             end
         end
         if #callers > 0 or #callees > 0 then

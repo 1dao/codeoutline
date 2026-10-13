@@ -46,3 +46,20 @@ caller symbol and do not create edges. Missing edges do not prove non-reachabili
 
 Lua embeddings can pass the same rule array as `dispatch_rules` to `graph.query`
 or `explore.run`. With no rules configured, no indirect dispatch edges are added.
+
+The resident index stores only distinct dispatch API names per file, not every
+call's arguments. Outgoing edges are resolved when a caller is expanded. Incoming
+queries examine all project files matching the configured APIs; event registration
+searches also cover the entire project. Candidate files are checksum-checked and
+reparsed on demand. Source changes during a query cause an explicit retry error,
+not a silently incomplete caller list.
+
+Parsed call sites live only for the current query, with a FIFO cache capped at
+16 files and an estimated 8 MiB source/site budget. Large files can be processed
+without caching; eviction affects speed, not matching coverage. No source or
+tokens are retained in this cache, and rule/source changes cannot reuse it across
+queries. Old disk caches are invalidated by the parser checksum.
+
+For in-memory embeddings without a project root, parse with `{ dispatch = true }`
+to supply explicit call-site data. Normal parsing and index builds use compact
+candidates by default.

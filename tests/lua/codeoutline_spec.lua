@@ -1251,6 +1251,91 @@ function elsewhere() { work(); }
     end)
 end)
 
+spec.describe('Lua module return bindings', function()
+    local function build(files, root)
+        local records = {}
+        for path, source in pairs(files) do records[path] = ci.parse(path, source) end
+        return graph.build({ root = root, files = records })
+    end
+    spec.it('pins dofile receivers to returned tables, including normalized paths', function()
+        local G = build({
+            ['a.lua'] = 'local M = {}\nfunction M.save() end\nreturn M',
+            ['b.lua'] = 'local M = {}\nfunction M.save() end\nreturn M',
+            ['nested/main.lua'] = "local a = dofile('./folder/../a.lua')\nlocal b = dofile('b.lua')\nfunction run() a.save() end\nfunction other() b:save() end",
+        })
+        spec.equal(edges_from(G, 'run'), 'save@a.lua')
+        spec.equal(edges_from(G, 'other'), 'save@b.lua')
+        spec.equal(#graph.query(G).inn[G.by_name.save[1]], 3)
+    end)
+    spec.it('resolves require and returned table aliases to their actual functions', function()
+        local G = build({
+            ['scripts/lib.lua'] = 'local function actual() end\nreturn { save = actual, close = function() end }',
+            ['main.lua'] = "local lib = require 'lib'\nfunction run() lib.save(); lib.close() end",
+        })
+        spec.equal(edges_from(G, 'run'), 'actual@scripts/lib.lua close@scripts/lib.lua')
+        spec.equal(#graph.query(G).inn[G.by_name.actual[1]], 3)
+    end)
+    spec.it('does not infer dynamic paths, loadfile tables or shadowed loaders and receivers', function()
+        local G = build({
+            ['a.lua'] = 'local M = {}\nfunction M.save() end\nreturn M',
+            ['main.lua'] = [[local a = dofile('a.lua')
+local dynamic = dofile('a.lua' .. suffix)
+local chunk = loadfile('a.lua')
+function run(a) a.save() end
+function unknown() dynamic.save(); chunk.save() end
+function shadow() local a = {}; a.save() end
+function replaced() local a = dofile('a.lua'); a = other; a.save() end
+function custom(dofile) local a = dofile('a.lua'); a.save() end
+]],
+        })
+        for _, name in ipairs({ 'run', 'unknown', 'shadow', 'replaced', 'custom' }) do spec.equal(edges_from(G, name), '') end
+    end)
+    spec.it('rejects conditional returns and replaced module tables', function()
+        local G = build({
+            ['a.lua'] = 'local M = {}\nfunction M.save() end\nif flag then return M end\nreturn M',
+            ['b.lua'] = 'local M = {}\nfunction M.save() end\nM = factory()\nreturn M',
+            ['main.lua'] = "local a = dofile('a.lua')\nlocal b = dofile('b.lua')\nfunction run() a.save(); b.save() end",
+        })
+        spec.equal(edges_from(G, 'run'), '')
+    end)
+    spec.it('reloads the configured runtime directory and preserves cache bindings', function()
+        local root = tmp_root .. '/lua_bindings'
+        write(root .. '/a.lua', 'local M = {}\nlocal function actual() end\nM.save = actual\nreturn M')
+        write(root .. '/sub/a.lua', 'return { save = function() end }')
+        write(root .. '/main.lua', "local a = dofile('a.lua')\nfunction run() a.save() end")
+        local options = { cache_path = root .. '/cache.bin', lister = 'walk' }
+        local idx, G = svc.get(root, options); idx:save(); svc.forget(root)
+        idx, G = svc.get(root, options)
+        spec.equal(edges_from(G, 'run'), 'actual@a.lua')
+        write(root .. '/.codeoutline.json', '{"luaRuntimeDirectory":"sub"}')
+        spec.equal(edges_from(G, 'run'), 'save@sub/a.lua')
+        write(root .. '/sub/a.lua', 'return {}')
+        idx, G = svc.get(root, options)
+        spec.equal(edges_from(G, 'run'), '')
+        svc.forget(root)
+    end)
+    spec.it('keeps same-file local table scopes separate and tolerates incomplete tables', function()
+        local G = build({ ['main.lua'] = [[local M = {}
+function M.save() end
+function run() local M = {}; M.save() end
+function valid() M.save() end
+return M
+]] })
+        spec.equal(edges_from(G, 'run'), '')
+        spec.equal(edges_from(G, 'valid'), 'save@main.lua')
+        local incomplete = ci.parse('broken.lua', 'local M = {\nreturn M')
+        spec.equal(next(incomplete.lua_exports), nil)
+    end)
+    spec.it('does not retain members from a replaced table or overwritten export', function()
+        local G = build({
+            ['a.lua'] = 'local M = {}\nfunction M.save() end\nM = {}\nreturn M',
+            ['b.lua'] = 'local M = {}\nfunction M.save() end\nM.save = nil\nreturn M',
+            ['main.lua'] = "local a = dofile('a.lua')\nlocal b = dofile('b.lua')\nfunction run() a.save(); b.save() end",
+        })
+        spec.equal(edges_from(G, 'run'), '')
+    end)
+end)
+
 spec.describe('configured indirect dispatch', function()
     local rules = {
         { kind = 'event', language = 'lua', call = 'bus.emit', argument = 1,
@@ -1258,15 +1343,18 @@ spec.describe('configured indirect dispatch', function()
         { kind = 'callback', call = 'schedule', argument = 2 },
         { kind = 'target', call = 'worker.post', argument = 2 },
     }
+    local function dispatch_parse(path, source)
+        return ci.parse(path, source, { dispatch = true })
+    end
     local function symbols()
         return graph.build({ files = {
-            ['send.lua'] = ci.parse('send.lua', [[
+            ['send.lua'] = dispatch_parse('send.lua', [[
 function send() bus.emit('tick'); other.emit('tick'); bus.emit(dynamic) end
 function later() schedule(make(1, 2), handle) end
 function post() worker.post(1, 'handle') end
 function ignored() schedule(1, object.factory()); worker.post(1, handle) end
 ]]),
-            ['receive.lua'] = ci.parse('receive.lua', [[
+            ['receive.lua'] = dispatch_parse('receive.lua', [[
 function handle() finish() end
 function finish() end
 bus.on('tick', handle)
@@ -1307,11 +1395,11 @@ bus.on('other', finish)
     spec.it('refreshes registrations without retaining stale edges', function()
         local G = symbols()
         graph.remove_file(G, 'receive.lua')
-        graph.add_file(G, 'receive.lua', ci.parse('receive.lua', "function replacement() end\nbus.on('tick', replacement)"))
+        graph.add_file(G, 'receive.lua', dispatch_parse('receive.lua', "function replacement() end\nbus.on('tick', replacement)"))
         local Q = graph.query(G, { dispatch_rules = rules })
         spec.equal(Q.out[G.by_name.send[1]][1], G.by_name.replacement[1])
     end)
-    spec.it('keeps dispatch sites through disk cache and displays real handler source', function()
+    spec.it('keeps compact candidates through disk cache and parses sites only on demand', function()
         local root = tmp_root .. '/dispatch_cache'
         write(root .. '/send.lua', "function publish() bus.emit('tick') end")
         write(root .. '/receive.lua', "function consume() return 42 end\nbus.on('tick', consume)")
@@ -1321,14 +1409,45 @@ bus.on('other', finish)
         idx:save()
         svc.forget(root)
         idx, G = svc.get(root, options)
+        for _, rec in pairs(idx.files) do spec.equal(rec.dispatch_sites, nil) end
+        spec.equal(idx.files['send.lua'].dispatch_calls[1], 'bus.emit')
         local output = explore.run(G, idx, 'publish consume')
         spec.contains(output, 'publish -> consume')
         spec.contains(output, 'return 42')
         spec.contains(output, 'indirect:event#1')
+        local Q = graph.query(G)
+        spec.equal(#Q.inn[G.by_name.consume[1]], 3)
+        write(root .. '/receive.lua', "function replacement() return 7 end\nbus.on('tick', replacement)")
+        idx, G = svc.get(root, options)
+        Q = graph.query(G)
+        spec.equal(Q.out[G.by_name.publish[1]][1], G.by_name.replacement[1])
+        svc.forget(root)
+    end)
+    spec.it('does not read sources without rules and fails explicitly for stale candidates', function()
+        local root = tmp_root .. '/lazy_sources'
+        write(root .. '/a.lua', "function send() bus.emit('tick') end\nfunction handle() end\nbus.on('tick', handle)")
+        local idx, G = svc.get(root, { cache_path = root .. '/cache.bin' })
+        os.remove(root .. '/a.lua')
+        spec.truthy(graph.query(G, { dispatch_rules = {} }).out[G.by_name.send[1]])
+        local Q = graph.query(G, { dispatch_rules = rules }) -- construction does not read candidates
+        spec.equal(pcall(function() return Q.out[G.by_name.send[1]] end), false)
+        svc.forget(root)
+    end)
+    spec.it('keeps all cross-file event edges after the query cache evicts files', function()
+        local root = tmp_root .. '/dispatch_eviction'
+        for i = 1, 20 do
+            write(root .. '/' .. i .. '.lua', "function send" .. i .. "() bus.emit('tick') end\nfunction handle" .. i .. "() end\nbus.on('tick', handle" .. i .. ")")
+        end
+        local _, G = svc.get(root, { cache_path = root .. '/cache.bin' })
+        local Q = graph.query(G, { dispatch_rules = rules })
+        for i = 1, 20 do
+            spec.equal(#Q.out[G.by_name['send' .. i][1]], 60)
+            spec.equal(#Q.inn[G.by_name['handle' .. i][1]], 60)
+        end
         svc.forget(root)
     end)
     spec.it('recognizes C function addresses without inventing dynamic callbacks', function()
-        local G = graph.build({ files = { ['cb.c'] = ci.parse('cb.c', [[
+        local G = graph.build({ files = { ['cb.c'] = dispatch_parse('cb.c', [[
 void done(void) {}
 void run(void) { schedule(1, &done); }
 void dynamic(void) { schedule(1, choose()); }

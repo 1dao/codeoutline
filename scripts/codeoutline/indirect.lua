@@ -24,8 +24,9 @@ local function value(T, a, b)
 end
 
 function M.collect(r, T)
-    local sites = {}
-    for _, ref in ipairs(r.refs) do
+    local sites, calls = {}, {}
+    for index, ref in ipairs(r.refs) do
+        if index % 128 == 0 then control.check() end
         local x = ref.tok
         if (ref.kind == 'call' or ref.kind == 'member_call') and T:text(x + 1) == '(' then
             local close = T:match(x + 1)
@@ -33,6 +34,8 @@ function M.collect(r, T)
                 local first = x
                 while first > 2 and member[T:text(first - 1)] and T.k[first - 2] == 'id' do first = first - 2 end
                 local call = value(T, first, x)
+                if call then calls[call.symbol] = true end
+                if not r.collect_dispatch or (type(r.collect_dispatch) == 'table' and not r.collect_dispatch[call and call.symbol]) then goto next_ref end
                 local args, a, i = {}, x + 2, x + 2
                 while i <= close do
                     if i == close or T:text(i) == ',' then
@@ -44,7 +47,12 @@ function M.collect(r, T)
                 if call then sites[#sites + 1] = { call = call.symbol, args = args, from = ref.from, line = ref.line } end
             end
         end
+        ::next_ref::
     end
+    local names = {}
+    for name in pairs(calls) do names[#names + 1] = name end
+    table.sort(names)
+    if #names > 0 then r.dispatch_calls = names end
     if #sites > 0 then r.dispatch_sites = sites end
 end
 
@@ -74,11 +82,47 @@ local function rules_for(G, rules)
     return rules
 end
 
-function M.edges(G, rules)
+function M.query(G, rules)
     rules = rules_for(G, rules)
-    local out = {}
-    if #rules == 0 then return out end
+    if #rules == 0 then return { outgoing = function() return {} end, incoming = function() return {} end } end
     local graph = require('codeoutline.graph')
+    local names, cache, order, bytes, registrations_by_rule = {}, {}, {}, 0, {}
+    for _, rule in ipairs(rules) do names[rule.call] = true; if rule.register then names[rule.register] = true end end
+    local function candidate(rec, call)
+        if rec.dispatch_sites then return true end -- explicit in-memory parse option
+        for _, name in ipairs(rec.dispatch_calls or {}) do if name == call then return true end end
+        return false
+    end
+    local function sites(f)
+        local rec = G.files[f]
+        if rec.dispatch_sites then return rec.dispatch_sites end
+        if cache[f] then return cache[f].sites end
+        assert(G.root, 'indirect resolution requires a project root or explicit dispatch parse data')
+        local file = assert(io.open(G.root .. '/' .. rec.path, 'rb'), 'cannot read indirect source: ' .. rec.path)
+        local raw = file:read('a'); file:close()
+        local crc = xcompress and xcompress.crc32 and xcompress.crc32(raw) or xutils.sha256_hex(raw)
+        assert(#raw == rec.size and crc == rec.crc, 'source changed during query; retry: ' .. rec.path)
+        local source = raw
+        if rec.encoding ~= 'utf-8' and rec.encoding ~= 'utf-8-bom' then
+            source = assert(xutils.to_utf8(raw, rec.encoding == 'gbk' and 'gbk' or 'auto'))
+        end
+        local parsed = assert(require('codeoutline.parse').parse(rec.path, source, { ranges = false, dispatch = names }))
+        assert(#parsed.nodes == #rec.nodes, 'source encoding changed; refresh index before indirect query: ' .. rec.path)
+        for i, n in ipairs(parsed.nodes) do
+            assert(n.qualified == rec.nodes[i].qualified and n.line == rec.nodes[i].line,
+                'source encoding changed; refresh index before indirect query: ' .. rec.path)
+        end
+        local result = parsed.dispatch_sites or {}
+        local weight = #source + #result * 512
+        -- Query-local FIFO: no retained source/tokens and no cross-query invalidation.
+        while #order > 0 and (#order >= 16 or bytes + weight > 8 * 1024 * 1024) do
+            local old = table.remove(order, 1); bytes = bytes - cache[old].weight; cache[old] = nil
+        end
+        if weight <= 8 * 1024 * 1024 then
+            cache[f] = { sites = result, weight = weight }; order[#order + 1] = f; bytes = bytes + weight
+        end
+        return result
+    end
     local function targets(f, site, arg, literal)
         local name
         if arg then
@@ -97,14 +141,15 @@ function M.edges(G, rules)
         end
         return graph.resolve(view, f, G.id_of[f][site.from], short, 'ref', nil, deps, paired) or {}
     end
-    for ri, rule in ipairs(rules) do
+    local function registrations(ri, rule)
+        if registrations_by_rule[ri] then return registrations_by_rule[ri] end
         local registrations = {}
         if rule.kind == 'event' then
             for _, f in ipairs(G.file_order) do
                 control.check()
                 local rec = G.files[f]
-                if not rule.language or rule.language == rec.language then
-                    for _, site in ipairs(rec.dispatch_sites or {}) do
+                if (not rule.language or rule.language == rec.language) and candidate(rec, rule.register) then
+                    for _, site in ipairs(sites(f)) do
                         local key = site.args[rule.keyArgument]
                         if site.call == rule.register and key and key.literal then
                             local bucket = rec.language .. '\0' .. key.literal
@@ -117,28 +162,40 @@ function M.edges(G, rules)
                 end
             end
         end
-        for _, f in ipairs(G.file_order) do
-            control.check()
-            local rec = G.files[f]
-            if not rule.language or rule.language == rec.language then
-                for _, site in ipairs(rec.dispatch_sites or {}) do
-                    if site.call == rule.call and site.from > 0 then
-                        local ids, arg = {}, site.args[rule.argument]
-                        if rule.kind == 'event' then
-                            for id in pairs(arg and arg.literal and registrations[rec.language .. '\0' .. arg.literal] or {}) do ids[#ids + 1] = id end
-                            table.sort(ids, function(a, b) return graph.before(G, a, b) end)
-                        else ids = targets(f, site, arg, rule.kind == 'target') end
-                        local src = G.id_of[f][site.from]
-                        for _, id in ipairs(ids) do
-                            out[src] = out[src] or {}
-                            out[src][#out[src] + 1] = { target = id, line = site.line, kind = 'indirect:' .. rule.kind .. '#' .. ri }
+        registrations_by_rule[ri] = registrations
+        return registrations
+    end
+    local function scan(only, wanted)
+        local out = {}
+        for ri, rule in ipairs(rules) do
+            local files = only and { G.node_file[only] } or G.file_order
+            for _, f in ipairs(files) do
+                control.check()
+                local rec = G.files[f]
+                if (not rule.language or rule.language == rec.language) and candidate(rec, rule.call) then
+                    for _, site in ipairs(sites(f)) do
+                        if site.call == rule.call and site.from > 0 and (not only or G.id_of[f][site.from] == only) then
+                            local ids, arg = {}, site.args[rule.argument]
+                            if rule.kind == 'event' then
+                                local registered = registrations(ri, rule)
+                                for id in pairs(arg and arg.literal and registered[rec.language .. '\0' .. arg.literal] or {}) do ids[#ids + 1] = id end
+                                table.sort(ids, function(a, b) return graph.before(G, a, b) end)
+                            else ids = targets(f, site, arg, rule.kind == 'target') end
+                            local src = G.id_of[f][site.from]
+                            for _, id in ipairs(ids) do
+                                if not wanted or wanted[id] then
+                                out[src] = out[src] or {}
+                                out[src][#out[src] + 1] = { target = id, line = site.line, kind = 'indirect:' .. rule.kind .. '#' .. ri }
+                                end
+                            end
                         end
                     end
                 end
             end
         end
+        return out
     end
-    return out
+    return { outgoing = function(id) return scan(id)[id] or {} end, incoming = function(wanted) return scan(nil, wanted) end }
 end
 
 return M

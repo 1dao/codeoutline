@@ -74,6 +74,7 @@ local function view(session, root)
     local V = setmetatable({ root = root, idx = idx, drafts = {}, disk = {}, dep_cache = {}, new_files = {},
         next_file = G.next_file, next_node = G.next_node, next_dir = G.next_dir }, { __index = G })
     V.js_context = require('codeoutline.js_resolution').context(V)
+    V.js_context.lua = require('codeoutline.lua_bindings').context(V)
     for _, name in ipairs({ 'files', 'nodes', 'node_file', 'id_of', 'file_index', 'file_dir' }) do
         V[name] = setmetatable({}, { __index = G[name] })
     end
@@ -236,7 +237,7 @@ local function find_cursor(doc, offset, strict)
             local a = refs.start[i]
             if a and inside(a, refs.stop[i]) then
                 return { from = refs.from[i], name = refs.name[i], kind = refs.kind[i], recv = refs.recv[i],
-                    evidence = refs.js_receiver and refs.js_receiver[i],
+                    evidence = refs.lua_binding and refs.lua_binding[i] or refs.js_receiver and refs.js_receiver[i],
                     first = a, last = refs.stop[i] }
             end
         end
@@ -423,9 +424,9 @@ local function scan(V, targets, name)
         end
         for i = 1, #names do
             if i % 4096 == 0 then control.check() end
-            if names[i] == name or aliases[names[i]] or aliases[refs.recv[i]] then
+            if names[i] == name or aliases[names[i]] or aliases[refs.recv[i]] or (refs.lua_binding and refs.lua_binding[i] ~= '') then
                 if os.clock() > deadline then return hits, true end
-                for _, dst in ipairs(resolve_site(V, f, refs.from[i], names[i], refs.kind[i], refs.recv[i], refs.js_receiver and refs.js_receiver[i])) do
+                for _, dst in ipairs(resolve_site(V, f, refs.from[i], names[i], refs.kind[i], refs.recv[i], refs.lua_binding and refs.lua_binding[i] or refs.js_receiver and refs.js_receiver[i])) do
                     if targets[dst] then hits[#hits + 1] = { f, i }; break end
                 end
                 if #hits >= M.MAX_RESULTS then return hits, true end
@@ -989,7 +990,7 @@ function handlers.lsp_outgoing(req)
     for i = 1, #refs.name do
         if i % 128 == 0 then control.check() end
         if refs.from[i] == from then
-            for _, dst in ipairs(resolve_site(V, f, from, refs.name[i], refs.kind[i], refs.recv[i], refs.js_receiver and refs.js_receiver[i])) do
+            for _, dst in ipairs(resolve_site(V, f, from, refs.name[i], refs.kind[i], refs.recv[i], refs.lua_binding and refs.lua_binding[i] or refs.js_receiver and refs.js_receiver[i])) do
                 local group = groups[dst]
                 if not group then
                     group = { to = item(V, dst), fromRanges = {} }

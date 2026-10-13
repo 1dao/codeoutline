@@ -28,6 +28,7 @@
 
 local control = require('codeoutline.control')
 local js_resolution = require('codeoutline.js_resolution')
+local lua_bindings = require('codeoutline.lua_bindings')
 local M = {}
 
 M.EDGE = 3
@@ -126,19 +127,7 @@ local function resolve_deps(G, f, js_context)
             -- require 'a.b' -> a/b.lua or a/b/init.lua anywhere under the root
             -- (package.path prefixes like scripts/?.lua vary per project);
             -- dofile/loadfile take a path.
-            local wants
-            if imp.kind == 'require' then
-                local sub = path:gsub('%.', '/')
-                wants = { sub .. '.lua', sub .. '/init.lua' }
-            else
-                wants = { (path:gsub('\\', '/'):gsub('^%./', '')) }
-            end
-            for _, want in ipairs(wants) do
-                for _, g in ipairs(G.by_base[basename(want)] or {}) do
-                    local p = G.files[g].path
-                    if p == want or p:sub(-(#want + 1)) == '/' .. want then add(g) end
-                end
-            end
+            for _, g in ipairs(lua_bindings.modules(G, imp, js_context and js_context.lua)) do add(g) end
         elseif rec.language == 'go' then
             -- import "github.com/org/repo/pkg/sub": the package is the directory
             -- whose path ends with the longest matching suffix of the import
@@ -299,6 +288,7 @@ local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired, accept,
     accept = accept or (kind == 'new' and NEWABLE) or (kind == 'ref' and VALUE) or CALLABLE
     if evidence == '' then evidence = nil end
     local exact = js_resolution.resolve(G, f, name, kind, recv, evidence, js_context)
+    if exact == nil then exact = lua_bindings.resolve(G, f, name, evidence, js_context and js_context.lua) end
     if exact ~= nil then
         local result = {}
         for _, id in ipairs(exact) do if accept[G.nodes[id].kind] then result[#result + 1] = id end end
@@ -520,7 +510,8 @@ function M.query(symbols, opts)
         stats = { expanded = 0, incoming_scans = 0, resolved_refs = 0 }, incomplete = false }, { __index = symbols })
     local dependencies, references = {}, {}
     local js_context = js_resolution.context(symbols)
-    local indirect = require('codeoutline.indirect').edges(symbols, opts.dispatch_rules)
+    js_context.lua = lua_bindings.context(symbols)
+    local indirect = require('codeoutline.indirect').query(symbols, opts.dispatch_rules)
     local function deps(f)
         local entry = dependencies[f]
         if not entry then
@@ -535,7 +526,7 @@ function M.query(symbols, opts)
         local direct, paired = deps(f)
         Q.stats.resolved_refs = Q.stats.resolved_refs + 1
         return resolve_ref(symbols, f, ids[refs.from[i]], refs.name[i], refs.kind[i],
-            refs.recv[i] or nil, direct, paired, nil, refs.js_receiver and refs.js_receiver[i], js_context)
+            refs.recv[i] or nil, direct, paired, nil, refs.lua_binding and refs.lua_binding[i] or refs.js_receiver and refs.js_receiver[i], js_context)
     end
     setmetatable(Q.out, { __index = function(cache, id)
         control.check()
@@ -553,7 +544,7 @@ function M.query(symbols, opts)
             references[f] = grouped
         end
         local edges = {}
-        for _, edge in ipairs(indirect[id] or {}) do
+        for _, edge in ipairs(indirect.outgoing(id)) do
             edges[#edges + 1] = edge.target
             edges[#edges + 1] = edge.line
             edges[#edges + 1] = edge.kind
@@ -580,9 +571,10 @@ function M.query(symbols, opts)
         if not found then return end
         local incoming = {}
         for id in pairs(wanted) do incoming[id] = {} end
+        local indirect_incoming = indirect.incoming(wanted)
         for _, f in ipairs(symbols.file_order) do
             for _, src in ipairs(symbols.id_of[f]) do
-                for _, edge in ipairs(indirect[src] or {}) do
+                for _, edge in ipairs(indirect_incoming[src] or {}) do
                     if wanted[edge.target] then push3(incoming, edge.target, src, edge.line, edge.kind) end
                 end
             end
@@ -606,7 +598,7 @@ function M.query(symbols, opts)
             for first = 1, count, 4096 do
                 if first > 1 then control.check() end
                 for i = first, math.min(count, first + 4095) do
-                    if (names[ref_names[i]] or aliases[ref_names[i]] or aliases[refs.recv[i]]) and froms[i] > 0 then
+                    if (names[ref_names[i]] or aliases[ref_names[i]] or aliases[refs.recv[i]] or (refs.lua_binding and refs.lua_binding[i] ~= '')) and froms[i] > 0 then
                         for _, dst in ipairs(targets(f, i) or {}) do
                             if wanted[dst] then
                                 push3(incoming, dst, symbols.id_of[f][froms[i]], refs.line[i], refs.kind[i])

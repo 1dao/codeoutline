@@ -214,6 +214,8 @@ function M.parse(path, src, language, opts)
         if not defs[ref.tok] then kept[#kept + 1] = ref end
     end
     r.refs = kept
+    common.assign_refs(r)
+    require('codeoutline.lua_bindings').collect(r, T, bm)
     r.member_ops = nil
     return common.finish(r, T), T
 end

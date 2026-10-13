@@ -541,14 +541,33 @@ local function definition_rules(root)
     for _, rule in ipairs(rules) do
         assert(type(rule) == 'table' and (rule.language == nil or rule.language == 'lua'),
             'definitionRules currently support language lua')
-        for _, key in ipairs({ 'call', 'target' }) do
-            assert(type(rule[key]) == 'string' and rule[key]:match('^[%a_][%w_%.:]*$'),
-                'definitionRules.' .. key .. ' must be a qualified function name')
-        end
-        for _, key in ipairs({ 'argument', 'targetArgument' }) do
-            local n = rule[key]
-            assert(type(n) == 'number' and n >= 1 and n <= 32 and n % 1 == 0,
-                'definitionRules.' .. key .. ' must be an integer from 1 to 32')
+        assert(type(rule.call) == 'string' and rule.call:match('^[%a_][%w_%.:]*$'),
+            'definitionRules.call must be a qualified function name')
+        assert(type(rule.argument) == 'number' and rule.argument >= 1 and rule.argument <= 32
+            and rule.argument % 1 == 0,
+            'definitionRules.argument must be an integer from 1 to 32')
+        local kind = rule.targetKind or 'call'
+        assert(kind == 'call' or kind == 'declaration' or kind == 'key',
+            "definitionRules.targetKind must be 'call', 'declaration' or 'key'")
+        if kind ~= 'call' then
+            assert(rule.target == nil and rule.targetArgument == nil,
+                'declaration and key rules must not set target or targetArgument')
+            if rule.qualifiers ~= nil then
+                assert(type(rule.qualifiers) == 'table', 'definitionRules.qualifiers must be an array of names')
+                local qualifiers = {}
+                for _, q in ipairs(rule.qualifiers) do
+                    assert(type(q) == 'string' and q:match('^[%a_][%w_]*$'),
+                        'definitionRules.qualifiers must contain plain names')
+                    qualifiers[q] = true
+                end
+                rule.qualifiers = qualifiers
+            end
+        else
+            assert(type(rule.target) == 'string' and rule.target:match('^[%a_][%w_%.:]*$'),
+                'definitionRules.target must be a qualified function name')
+            assert(type(rule.targetArgument) == 'number' and rule.targetArgument >= 1
+                and rule.targetArgument <= 32 and rule.targetArgument % 1 == 0,
+                'definitionRules.targetArgument must be an integer from 1 to 32')
         end
     end
     return rules
@@ -633,6 +652,33 @@ local function literal_argument(T, call, argument)
     end
 end
 
+local DECLARABLE = { ['function'] = true, method = true }
+
+-- A string literal being written as a table key: t["name"] = ... or { ["name"] = ... }.
+-- Returns the decoded value and the owner identifier for assignments (nil in constructors).
+local function key_literal(T, i)
+    if i < 3 or i + 2 > T.n or T.k[i] ~= 'str' then return nil end
+    if T:text(i - 1) ~= '[' or T:text(i + 1) ~= ']' or T:text(i + 2) ~= '=' then return nil end
+    local value = string_value(T:text(i))
+    if not value then return nil end
+    local owner
+    if T.k[i - 2] == 'id' and T:text(i - 3) ~= '.' and T:text(i - 3) ~= ':' then
+        owner = T:text(i - 2)
+    end
+    return value, owner
+end
+
+local function qualifier_matches(rule, owner)
+    return not rule.qualifiers or (owner ~= nil and rule.qualifiers[owner])
+end
+
+-- A rule name also binds colon calls by their method segment: self:callCluster matches callCluster.
+local function call_matches(name, rule_name)
+    if not name then return false end
+    if name == rule_name then return true end
+    return name:find(':') ~= nil and name:match('([%w_]+)$') == rule_name
+end
+
 local function configured_definition(V, doc, offset)
     if doc:parse().language ~= 'lua' then return nil end
     local rules = definition_rules(V.root)
@@ -643,7 +689,7 @@ local function configured_definition(V, doc, offset)
         if i % 128 == 0 then control.check() end
         local name = call_name(tokens, i)
         for _, rule in ipairs(rules) do
-            if name == rule.call then
+            if call_matches(name, rule.call) then
                 local value, first, last = literal_argument(tokens, i, rule.argument)
                 if value and first <= offset and offset < last then matched[#matched + 1] = { rule, value } end
             end
@@ -651,18 +697,48 @@ local function configured_definition(V, doc, offset)
     end
     if #matched == 0 then return nil end
     local result, seen, files = {}, {}, {}
+    local function add(loc)
+        local start = loc.range.start
+        local key = loc.uri .. ':' .. start.line .. ':' .. start.character
+        if not seen[key] then
+            seen[key] = true
+            result[#result + 1] = loc
+        end
+        return #result >= M.MAX_RESULTS
+    end
+    local calls, keys = {}, {}
+    local deadline = os.clock() + M.SCAN_SECONDS
+    for _, match in ipairs(matched) do
+        if match[1].targetKind == 'declaration' then
+            for _, id in ipairs(V.by_name[match[2]]) do
+                control.check()
+                if os.clock() > deadline then return result, true end
+                local node = V.nodes[id]
+                if DECLARABLE[node.kind] and V.files[V.node_file[id]].language == 'lua' then
+                    local owner = graph.owner(node.qualified or node.name)
+                    if qualifier_matches(match[1], owner) and add(location(V, id)) then
+                        return result, true
+                    end
+                end
+            end
+        elseif match[1].targetKind == 'key' then
+            keys[#keys + 1] = match
+        else
+            calls[#calls + 1] = match
+        end
+    end
+    if #calls == 0 and #keys == 0 then return result, false end
     for _, f in ipairs(V.file_order) do files[#files + 1] = f end
     for _, f in ipairs(V.new_files) do files[#files + 1] = f end
     table.sort(files, function(a, b) return V.files[a].path < V.files[b].path end)
-    local deadline = os.clock() + M.SCAN_SECONDS
     for _, f in ipairs(files) do
         control.check()
         if os.clock() > deadline then return result, true end
         if V.files[f].language == 'lua' then
             local target = source_doc(V, f)
             if target then
-                local candidate = false
-                for _, match in ipairs(matched) do
+                local candidate = #keys > 0
+                for _, match in ipairs(calls) do
                     local tail = match[1].target:match('([%w_]+)$')
                     if target.source:find(tail, 1, true) then candidate = true; break end
                 end
@@ -674,15 +750,23 @@ local function configured_definition(V, doc, offset)
                             if os.clock() > deadline then return result, true end
                         end
                         local name = call_name(T, i)
-                        for _, match in ipairs(matched) do
-                            if name == match[1].target then
+                        for _, match in ipairs(calls) do
+                            if call_matches(name, match[1].target) then
                                 local value, first, last = literal_argument(T, i, match[1].targetArgument)
                                 if value == match[2] then
-                                    local key = target.uri .. ':' .. first
-                                    if not seen[key] then
-                                        seen[key] = true
-                                        result[#result + 1] = { uri = target.uri, range = target:range(first, last) }
-                                        if #result >= M.MAX_RESULTS then return result, true end
+                                    if add({ uri = target.uri, range = target:range(first, last) }) then
+                                        return result, true
+                                    end
+                                end
+                            end
+                        end
+                        if #keys > 0 then
+                            local value, owner = key_literal(T, i)
+                            if value then
+                                for _, match in ipairs(keys) do
+                                    if value == match[2] and qualifier_matches(match[1], owner)
+                                        and add({ uri = target.uri, range = target:range(T.s[i] - 1, T.e[i]) }) then
+                                        return result, true
                                     end
                                 end
                             end

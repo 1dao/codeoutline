@@ -176,8 +176,41 @@ With this rule, Go to Definition on `'xmysql_business_done'` in
 The destination selects the matching string at the registration site. Multiple
 registrations return multiple locations; thread routing is not inferred.
 
+`"targetKind": "declaration"` instead maps the literal to a function or method
+declaration whose name equals the literal, resolved through the symbol tables:
+
+```json
+{
+  "definitionRules": [
+    {
+      "language": "lua",
+      "call": "dservice.send",
+      "argument": 2,
+      "targetKind": "declaration",
+      "qualifiers": ["CMD", "Ntf"]
+    }
+  ]
+}
+```
+
+With this rule, Go to Definition on `"raw_execute_n"` in
+`dservice.send(pool, "raw_execute_n", sql)` finds `function Ntf.raw_execute_n`
+in the same workspace root. `qualifiers` is optional and restricts matches to
+declarations whose owner table (`T` in `function T.name` or `function T:name`)
+is listed; without it any same-named function or method matches. Declaration
+rules must not set `target` or `targetArgument`.
+
+`"targetKind": "key"` maps the literal to a string table key being written:
+`t["name"] = ...` assignments and `{ ["name"] = ... }` constructor fields.
+For key rules `qualifiers` restricts assignments to the named table (`t` in
+`t["name"] = ...`). Only plain table identifiers bind qualifiers;
+`other.t["name"]` does not bind the qualifier `t`. Constructor keys have no owner and only match when
+`qualifiers` is absent.
+
 Argument numbers start at 1 and count explicit arguments in the source, including
-for colon calls. Function names must match the written name exactly. Calls must
+for colon calls. Function names must match the written name exactly, except
+that a rule naming only the method segment also binds colon calls
+(`self:callCluster` matches the rule `callCluster`). Calls must
 use parentheses, and matching arguments must be single string literals; quoted
 escapes and Lua long strings are compared by value. Variables, computed strings
 and function aliases are not resolved. Nested calls and anonymous functions in

@@ -646,6 +646,76 @@ spec.describe('LSP navigation', function()
         navigation.close('message-draft'); os.remove(config)
         if not ok then error(err, 0) end
     end)
+    spec.it('resolves declaration targets with optional qualifiers and colon call names', function()
+        local config = nav_root .. '/.codeoutline.json'
+        nav_write('rpc_call.lua', 'dservice.send(pool, "raw_execute_n", sql)\n'
+            .. 'local ret = self:callCluster(node, "FriendSrv", "req_friend", 1)\n')
+        nav_write('rpc_impl.lua', 'function Ntf.raw_execute_n(sql) end\n'
+            .. 'function friMgr:req_friend(uid) end\nfunction raw_execute_n() end\n')
+        write(config, '{"definitionRules":[{"call":"dservice.send","argument":2,"targetKind":"declaration",'
+            .. '"qualifiers":["Ntf"]},{"call":"callCluster","argument":3,"targetKind":"declaration"}]}')
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local ok, err = pcall(function()
+            local doc = docs.read(nav_root .. '/rpc_call.lua')
+            local result = nav({ method = 'lsp_definition', uri = doc.uri,
+                position = { line = 0, character = 29 } })
+            spec.equal(#result, 1, 'qualified declaration only, bare function excluded')
+            spec.equal(result[1].uri, nav_uri('rpc_impl.lua'))
+            spec.equal(range_text('rpc_impl.lua', result[1].range), 'raw_execute_n')
+            local colon = nav({ method = 'lsp_definition', uri = doc.uri, position = { line = 1, character = 53 } })
+            spec.equal(#colon, 1, 'self:callCluster binds the callCluster rule')
+            spec.equal(range_text('rpc_impl.lua', colon[1].range), 'req_friend')
+        end)
+        os.remove(config)
+        if not ok then error(err, 0) end
+    end)
+    spec.it('resolves string key targets in assignments and table constructors', function()
+        local config = nav_root .. '/.codeoutline.json'
+        nav_write('key_call.lua', 'update_message_time("login.KeyResp", "login.KeyResp")\n')
+        nav_write('key_def.lua', 'local protocols = {}\nprotocols["login.KeyResp"] = 1004\n'
+            .. 'local wait_log = { ["login.KeyResp"] = true }\n')
+        nav_write('key_read.lua', 'local t = protocols["login.KeyResp"]\n')
+        write(config, '{"definitionRules":[{"call":"update_message_time","argument":1,"targetKind":"key",'
+            .. '"qualifiers":["protocols"]}]}')
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local ok, err = pcall(function()
+            local doc = docs.read(nav_root .. '/key_call.lua')
+            local req = { method = 'lsp_definition', uri = doc.uri, position = { line = 0, character = 25 } }
+            local result = nav(req)
+            spec.equal(#result, 1, 'qualifier keeps the assignment only')
+            spec.equal(result[1].uri, nav_uri('key_def.lua'))
+            spec.equal(range_text('key_def.lua', result[1].range), '"login.KeyResp"')
+            write(config, '{"definitionRules":[{"call":"update_message_time","argument":1,"targetKind":"key"}]}')
+            spec.equal(#nav(req), 2, 'without qualifiers the constructor key matches too')
+            -- Reads and table lookups never bind; only the written key does.
+            spec.equal(#nav({ method = 'lsp_definition', uri = nav_uri('key_read.lua'),
+                position = { line = 0, character = 23 } }), 0)
+        end)
+        os.remove(config)
+        if not ok then error(err, 0) end
+    end)
+    spec.it('matches decoded keys and restricts qualifiers to plain table names', function()
+        local config = nav_root .. '/.codeoutline.json'
+        nav_write('decoded_call.lua', 'lookup("foo")\n')
+        nav_write('decoded_key.lua', 'protocols["\\102oo"] = 1\n'
+            .. 'protocols["\\x66oo"] = 2\nprotocols[ [=[foo]=] ] = 3\n')
+        nav_write('qualified_key.lua', 'other.protocols["foo"] = 4\n'
+            .. 'local keys = { ["foo"] = 5 }\n')
+        local rule = '{"call":"lookup","argument":1,"targetKind":"key","qualifiers":["protocols"]}'
+        write(config, '{"definitionRules":[' .. rule .. ',' .. rule .. ']}')
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local ok, err = pcall(function()
+            local req = { method = 'lsp_definition', uri = nav_uri('decoded_call.lua'),
+                position = { line = 0, character = 9 } }
+            local result = nav(req)
+            spec.equal(#result, 3, 'decoded keys match once each; qualified tables and constructors are excluded')
+            for _, loc in ipairs(result) do spec.equal(loc.uri, nav_uri('decoded_key.lua')) end
+            write(config, '{"definitionRules":[{"call":"lookup","argument":1,"targetKind":"key"}]}')
+            spec.equal(#nav(req), 5, 'without qualifiers all written keys match')
+        end)
+        os.remove(config)
+        if not ok then error(err, 0) end
+    end)
     spec.it('validates rule argument positions', function()
         local config = nav_root .. '/.codeoutline.json'
         write(config, '{"definitionRules":[{"call":"Bus.send","argument":0,"target":"Bus.on","targetArgument":1}]}')

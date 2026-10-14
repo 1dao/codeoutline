@@ -30,9 +30,15 @@ test('official SDK stdio: discovery, source, incremental refresh, rebuild and er
     const c = client();
     try {
         await c.connect(transport);
-        assert.equal((await c.listTools()).tools.length, 3);
+        assert.equal((await c.listTools()).tools.length, 4);
         const query = (query) => c.callTool({ name: 'codeoutline_explore', arguments: { query } });
         assert.match((await query('greet')).content[0].text, /你好世界/);
+        await writeFile(join(f.project, 'caller.lua'), 'function caller() greet() end\nfunction upper() caller() end\n');
+        const callers = await c.callTool({ name: 'codeoutline_callers', arguments: { query: 'greet', depth: 2 } });
+        assert.notEqual(callers.isError, true);
+        assert.match(callers.content[0].text, /Depth 2: upper/);
+        await assert.rejects(c.callTool({ name: 'codeoutline_callers', arguments: { query: 'greet', depth: 0 } }), /depth/);
+        await rm(join(f.project, 'caller.lua'));
         const status = JSON.parse((await c.callTool({ name: 'codeoutline_status' })).content[0].text);
         assert.equal(status.files, 1);
         assert.equal(status.refresh.parsed, 0);
@@ -92,7 +98,7 @@ test('official SDK HTTP: sessions, concurrency, refresh, path aliases and perime
     try {
         await c.connect(transport);
         await c2.connect(new StreamableHTTPClientTransport(new URL(endpoint.url)));
-        assert.equal((await c.listTools()).tools.length, 3);
+        assert.equal((await c.listTools()).tools.length, 4);
         const result = await Promise.all([c, c2].map((instance) => instance.callTool({ name: 'codeoutline_explore', arguments: { query: 'greet' } })));
         assert.ok(result.every((r) => /你好世界/.test(r.content[0].text)));
         const oldPid = endpoint.child.pid;

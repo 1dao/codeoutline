@@ -25,6 +25,10 @@ test('unified Lua CLI: commands, JSON output, failures and MCP startup', async (
         assert.equal(JSON.parse(success('status')).files, 1);
         assert.equal(JSON.parse(success('rebuild')).cacheLoaded, false);
         assert.match(success('explore', '--query=hello_world'), /return 7/);
+        await writeFile(join(project, 'caller.lua'), 'function invoke() hello_world() end\n');
+        assert.match(success('callers', '--query=hello_world', '--depth=2'), /Depth 1: invoke/);
+        assert.notEqual(run('callers', '--query=hello_world', '--depth=0').status, 0);
+        assert.notEqual(run('callers', '--query=hello_world', '--max-nodes=bad').status, 0);
         for (const args of [ ['wat'], ['status', '--port', '12'], ['explore'],
             ['explore', '--query'], ['explore', '--query=x', '--budget=nan'],
             ['serve'], ['serve', '--stdio', '--http'], ['serve', '--stdio=1'],

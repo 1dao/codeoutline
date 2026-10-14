@@ -57,8 +57,8 @@ local function execute(req)
         service.configure({ max_projects = lsp.MAX_ROOTS })
         service.refresh(root, { full_interval = 45, paths = req.paths })
         return true
-    elseif req.method == 'explore' then
-        local text, info = service.explore(root, req.query, { budget = req.budget })
+    elseif req.method == 'explore' or req.method == 'callers' then
+        local text, info = service[req.method](root, req.query, { budget = req.budget, depth = req.depth, max_nodes = req.max_nodes })
         return { text = text, truncated = info.truncated or false, refresh = info.refresh }
     elseif req.method == 'status' then return service.status(root)
     elseif req.method == 'rebuild' then return service.rebuild(root)

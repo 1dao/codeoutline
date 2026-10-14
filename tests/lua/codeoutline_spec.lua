@@ -1598,6 +1598,57 @@ end)
 xutils.rmtree(tmp_root)
 os.remove(cache)
 
+spec.describe('recursive callers', function()
+    local callers = require('codeoutline.callers')
+    spec.it('finds shortest reverse paths, handles cycles and reports depth and node limits', function()
+        local sources = {
+            ['a.lua'] = 'function leaf() loop() end\nfunction first() leaf() end\nfunction loop() first() end',
+            ['b.lua'] = 'function second() first() end\nfunction third() second() end\nfunction fourth() third() end',
+        }
+        local files = {}
+        for path, source in pairs(sources) do files[path] = ci.parse(path, source) end
+        local G = graph.build({ files = files })
+        local idx = { query_source = function(_, path) return sources[path], false end }
+        local output, info = callers.run(G, idx, 'leaf')
+        spec.equal(#info.callers, 4) -- first, loop, second, third; leaf is a seed
+        spec.equal(info.query_stats.incoming_scans, 3)
+        spec.truthy(info.depth_limit_reached)
+        spec.equal(#info.files, 2)
+        spec.contains(output, 'Depth 3: third')
+        spec.truthy(not output:find('fourth', 1, true))
+        for _, entry in ipairs(info.callers) do
+            spec.equal(#entry.path, entry.depth + 1)
+            spec.equal(entry.path[#entry.path].name, 'leaf')
+        end
+        output, info = callers.run(G, idx, 'leaf', { max_nodes = 1 })
+        spec.equal(#info.callers, 1); spec.truthy(info.node_limit_reached)
+        spec.contains(output, 'Node limit reached')
+        output, info = callers.run(G, idx, 'leaf', { budget = 256 })
+        spec.truthy(#output <= 256); spec.truthy(info.truncated)
+        spec.equal(G.inn, nil)
+        spec.equal(pcall(callers.run, G, idx, 'leaf', { depth = false }), false)
+        spec.equal(pcall(callers.run, G, idx, 'leaf', { max_nodes = 0 }), false)
+    end)
+    spec.it('includes configured event callers and refreshes after edits', function()
+        local root = tmp_root .. '/recursive_callers'
+        write(root .. '/a.lua', "function handler() end\nbus.on('tick', handler)\nfunction publish() bus.emit('tick') end\nfunction outer() publish() end")
+        write(root .. '/.codeoutline.json', xutils.json_pack({ dispatchRules = {
+            { kind = 'event', call = 'bus.emit', argument = 1, register = 'bus.on', keyArgument = 1, handlerArgument = 2 },
+        } }))
+        local opts = { cache_path = root .. '/cache.bin' }
+        local output, info = svc.callers(root, 'handler', opts)
+        spec.equal(#info.callers, 2)
+        spec.contains(output, 'indirect:event#1')
+        spec.contains(output, 'Depth 2: outer')
+        write(root .. '/a.lua', 'function handler() end\nfunction outer() end')
+        output, info = svc.callers(root, 'handler', opts)
+        spec.equal(#info.callers, 0)
+        output, info = svc.callers(root, 'missing', opts)
+        spec.equal(#info.targets, 0); spec.contains(output, 'No exact symbol matched')
+        svc.forget(root)
+    end)
+end)
+
 return {
     __init = function()
         local failed = spec.finish()

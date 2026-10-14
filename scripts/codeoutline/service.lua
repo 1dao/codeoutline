@@ -144,14 +144,14 @@ function M.resident(root)
     return p.idx, p.idx.symbol_tables
 end
 
-function M.explore(root, query, opts)
-    explore.validate(query, opts)
+local function run_query(engine, root, query, opts)
+    engine.validate(query, opts)
     local idx, _, stats = refresh(root, opts, true)
     idx.query_sources = {}
     local ok, result = pcall(function()
         while true do
             -- A GBK repair commits the decoded file, which renumbers its nodes.
-            local output, details = explore.run(idx:symbols(), idx, query, opts)
+            local output, details = engine.run(idx:symbols(), idx, query, opts)
             control.check()
             if not details.encoding_retry then return { text = output, info = details } end
         end
@@ -164,6 +164,14 @@ function M.explore(root, query, opts)
     end
     result.info.refresh = stats
     return result.text, result.info
+end
+
+function M.explore(root, query, opts)
+    return run_query(explore, root, query, opts)
+end
+
+function M.callers(root, query, opts)
+    return run_query(require('codeoutline.callers'), root, query, opts)
 end
 
 function M.status(root, opts)

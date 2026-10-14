@@ -56,6 +56,7 @@ Three tools are provided:
 | Tool | Purpose |
 | --- | --- |
 | `codeoutline_explore` | Query source, call paths, and callers/callees by symbol or file name (`query`; optional `projectPath`, `budget`) |
+| `codeoutline_callers` | [Find recursive callers and affected files](docs/CALLERS.md) for an exact symbol/qualified name (`query`; optional `projectPath`, `depth` default 3, `max_nodes` default 200, `budget`) |
 | `codeoutline_status` | Refresh and report index, cache, scanner, and parser statistics |
 | `codeoutline_rebuild` | Rebuild fully, bypassing the cache |
 

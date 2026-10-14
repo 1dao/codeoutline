@@ -82,7 +82,7 @@ local function rules_for(G, rules)
     return rules
 end
 
-function M.query(G, rules)
+function M.query(G, rules, report)
     rules = rules_for(G, rules)
     if #rules == 0 then return { outgoing = function() return {} end, incoming = function() return {} end } end
     local graph = require('codeoutline.graph')
@@ -162,7 +162,8 @@ function M.query(G, rules)
                             local bucket = rec.language .. '\0' .. key.literal
                             registrations[bucket] = registrations[bucket] or {}
                             for _, id in ipairs(targets(f, site, site.args[rule.handlerArgument])) do
-                                registrations[bucket][id] = true
+                                registrations[bucket][id] = registrations[bucket][id]
+                                    or (report and (rec.path .. ':' .. site.line) or true)
                             end
                         end
                     end
@@ -185,15 +186,28 @@ function M.query(G, rules)
                     file_sites = file_sites or sites(f)
                     for _, site in ipairs(file_sites) do
                         if site.call == rule.call and site.from > 0 and (not only or G.id_of[f][site.from] == only) then
-                            local ids, arg = {}, site.args[rule.argument]
+                            local ids, arg, registered = {}, site.args[rule.argument], nil
                             if rule.kind == 'event' then
-                                local registered = registrations(ri, rule)
+                                registered = registrations(ri, rule)
                                 for id in pairs(arg and arg.literal and registered[rec.language .. '\0' .. arg.literal] or {}) do ids[#ids + 1] = id end
                                 table.sort(ids, function(a, b) return graph.before(G, a, b) end)
                             else ids = targets(f, site, arg, rule.kind == 'target') end
                             local src = G.id_of[f][site.from]
+                            if report and only and #ids == 0 then
+                                local static = arg and (rule.kind == 'callback' and arg.symbol or rule.kind ~= 'callback' and arg.literal)
+                                report:add({ source = src, line = site.line, rule = ri, argument = rule.argument, call = rule.call,
+                                    reason = not static and 'dispatch argument is dynamic, unsupported or missing'
+                                        or rule.kind == 'event' and 'no resolved registration for event key'
+                                        or 'dispatch target unresolved or ambiguous' })
+                            end
                             for _, id in ipairs(ids) do
                                 if not wanted or wanted[id] then
+                                if report then
+                                    local bucket = registered and arg and arg.literal and registered[rec.language .. '\0' .. arg.literal]
+                                    report:add({ source = src, target = id, line = site.line, rule = ri, argument = rule.argument,
+                                        call = rule.call, kind = 'configured ' .. rule.kind,
+                                        registered_at = bucket and bucket[id] or nil })
+                                end
                                 out[src] = out[src] or {}
                                 out[src][#out[src] + 1] = { target = id, line = site.line, kind = 'indirect:' .. rule.kind .. '#' .. ri }
                                 end

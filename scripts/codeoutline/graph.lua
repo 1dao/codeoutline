@@ -287,12 +287,16 @@ local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired, accept,
     if kind == 'annotation' then return nil end
     accept = accept or (kind == 'new' and NEWABLE) or (kind == 'ref' and VALUE) or CALLABLE
     if evidence == '' then evidence = nil end
+    local strategy = 'js/ts binding'
     local exact = js_resolution.resolve(G, f, name, kind, recv, evidence, js_context)
-    if exact == nil then exact = lua_bindings.resolve(G, f, name, evidence, js_context and js_context.lua) end
+    if exact == nil then
+        strategy = 'lua binding'
+        exact = lua_bindings.resolve(G, f, name, evidence, js_context and js_context.lua)
+    end
     if exact ~= nil then
         local result = {}
         for _, id in ipairs(exact) do if accept[G.nodes[id].kind] then result[#result + 1] = id end end
-        return result
+        return result, #result == 0 and 'binding target unresolved' or strategy
     end
     local cands = G.by_name[name]
     if G.files[f].language == 'kotlin' and not recv then
@@ -308,7 +312,7 @@ local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired, accept,
             end
         end
     end
-    if not cands then return nil end
+    if not cands then return nil, 'no indexed target' end
     -- Score first: score() rejects other languages and statics of other
     -- files, so "is there a real definition?" is only asked among the
     -- candidates this call could actually reach. (Asking it over all
@@ -336,21 +340,27 @@ local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired, accept,
     end
     -- Prefer definitions: drop prototypes / in-class declarations when a
     -- reachable definition exists.
-    local best, ties = nil, {}
+    local best, ties, tie_count = nil, {}, 0
     for i = 1, n do
         local cid, s = scored_ids[i], scored_vals[i]
         if not (has_def and is_decl(G.nodes[cid])) then
             if not best or s > best then
-                best, ties = s, { cid }
-            elseif s == best and #ties < M.MAX_TIES then
-                ties[#ties + 1] = cid
+                best, ties, tie_count = s, { cid }, 1
+            elseif s == best then
+                tie_count = tie_count + 1
+                if #ties < M.MAX_TIES then ties[#ties + 1] = cid end
             end
         end
     end
     -- A lone candidate far away (score 0) is still a match for a unique
     -- name; many far candidates with nothing to separate them is a guess.
-    if best and best <= 0 and #ties > 1 then return nil end
-    return ties
+    if best and best <= 0 and #ties > 1 then
+        return nil, 'ambiguous name candidates' .. (#cands > M.MAX_CANDIDATES and '; candidate scan limit reached' or '')
+    end
+    local reason = #ties == 0 and 'no eligible target' or #ties > 1 and 'multiple name/locality candidates' or 'name/locality match'
+    if #cands > M.MAX_CANDIDATES then reason = reason .. '; candidate scan limit reached' end
+    if tie_count > M.MAX_TIES then reason = reason .. '; tied candidate limit reached' end
+    return ties, reason
 end
 
 -- Files compare by path; nodes by file path, then node order (ids ascend
@@ -511,7 +521,9 @@ function M.query(symbols, opts)
     local dependencies, references = {}, {}
     local js_context = js_resolution.context(symbols)
     js_context.lua = lua_bindings.context(symbols)
-    local indirect = require('codeoutline.indirect').query(symbols, opts.dispatch_rules)
+    local report = opts.explain and require('codeoutline.query_report').new() or nil
+    Q.report = report
+    local indirect = require('codeoutline.indirect').query(symbols, opts.dispatch_rules, report)
     local function deps(f)
         local entry = dependencies[f]
         if not entry then
@@ -520,13 +532,25 @@ function M.query(symbols, opts)
         end
         return entry[1], entry[2]
     end
-    local function targets(f, i)
+    local function targets(f, i, explain)
         local rec, ids = symbols.files[f], symbols.id_of[f]
         local refs = rec.refs
         local direct, paired = deps(f)
         Q.stats.resolved_refs = Q.stats.resolved_refs + 1
-        return resolve_ref(symbols, f, ids[refs.from[i]], refs.name[i], refs.kind[i],
+        local found, reason = resolve_ref(symbols, f, ids[refs.from[i]], refs.name[i], refs.kind[i],
             refs.recv[i] or nil, direct, paired, nil, refs.lua_binding and refs.lua_binding[i] or refs.js_receiver and refs.js_receiver[i], js_context)
+        if report and explain and (refs.kind[i] == 'call' or refs.kind[i] == 'member_call') then
+            if (not found or #found == 0) and explain == true then
+                report:add({ source = ids[refs.from[i]], line = refs.line[i], call = refs.name[i], reason = reason or 'unresolved reference' })
+            else
+                for _, dst in ipairs(found or {}) do
+                    if explain == true or explain[dst] then
+                        report:add({ source = ids[refs.from[i]], target = dst, line = refs.line[i], kind = reason })
+                    end
+                end
+            end
+        end
+        return found
     end
     setmetatable(Q.out, { __index = function(cache, id)
         control.check()
@@ -551,7 +575,7 @@ function M.query(symbols, opts)
         end
         for _, i in ipairs(grouped[id] or {}) do
             control.check()
-            for _, dst in ipairs(targets(f, i) or {}) do
+            for _, dst in ipairs(targets(f, i, true) or {}) do
                 edges[#edges + 1] = dst
                 edges[#edges + 1] = rec.refs.line[i]
                 edges[#edges + 1] = rec.refs.kind[i]
@@ -599,7 +623,7 @@ function M.query(symbols, opts)
                 if first > 1 then control.check() end
                 for i = first, math.min(count, first + 4095) do
                     if (names[ref_names[i]] or aliases[ref_names[i]] or aliases[refs.recv[i]] or (refs.lua_binding and refs.lua_binding[i] ~= '')) and froms[i] > 0 then
-                        for _, dst in ipairs(targets(f, i) or {}) do
+                        for _, dst in ipairs(targets(f, i, wanted) or {}) do
                             if wanted[dst] then
                                 push3(incoming, dst, symbols.id_of[f][froms[i]], refs.line[i], refs.kind[i])
                             end

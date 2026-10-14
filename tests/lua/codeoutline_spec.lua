@@ -1457,6 +1457,49 @@ bus.on('other', finish)
         local text = explore.run(G, { root = tmp_root, query_source = function() return '', false end }, 'send handle', { dispatch_rules = rules })
         spec.contains(text, 'indirect:event#1')
         spec.contains(text, 'send -> handle')
+        spec.contains(text, 'configured event via bus.emit')
+        spec.contains(text, 'registered at receive.lua:3')
+        spec.contains(text, 'dispatch argument is dynamic, unsupported or missing')
+    end)
+    spec.it('keeps explanations query-owned and preserves edges when enabled', function()
+        local G = symbols()
+        local plain = graph.query(G, { dispatch_rules = rules })
+        local explained = graph.query(G, { dispatch_rules = rules, explain = true })
+        for _, id in ipairs({ G.by_name.send[1], G.by_name.later[1], G.by_name.ignored[1] }) do
+            spec.equal(table.concat(plain.out[id], '|'), table.concat(explained.out[id], '|'))
+        end
+        spec.equal(plain.report, nil)
+        spec.equal(G.report, nil)
+        spec.truthy(#explained.report.entries > 0)
+        local output = require('codeoutline.query_report').render(explained.report, G)
+        spec.contains(output, 'configured callback via schedule')
+        spec.contains(output, 'no indexed target')
+    end)
+    spec.it('reports missing event registrations without inventing an edge', function()
+        local G = graph.build({ files = { ['a.lua'] = dispatch_parse('a.lua', "function publish() bus.emit('missing') end") } })
+        local Q = graph.query(G, { dispatch_rules = rules, explain = true })
+        spec.equal(#Q.out[G.by_name.publish[1]], 0)
+        spec.contains(require('codeoutline.query_report').render(Q.report, G), 'no resolved registration for event key')
+    end)
+    spec.it('reports evidence and path limits independently of output size', function()
+        local calls = {}
+        for i = 1, 70 do calls[#calls + 1] = 'unknown' .. i .. '()' end
+        local source = 'function entry() ' .. table.concat(calls, '; ') .. ' end\n'
+            .. 'function alpha() bravo() end\nfunction bravo() charlie() end\n'
+            .. 'function charlie() delta() end\nfunction delta() echo() end\n'
+            .. 'function echo() foxtrot() end\nfunction foxtrot() end'
+        local G = graph.build({ files = { ['a.lua'] = ci.parse('a.lua', source) } })
+        local idx = { root = tmp_root, query_source = function() return source, false end }
+        local output, info = explore.run(G, idx, 'entry', { budget = 262144 })
+        spec.equal(#info.evidence, 64)
+        spec.truthy(info.evidence_truncated)
+        spec.contains(output, 'Relationship explanations omitted')
+        output, info = explore.run(G, idx, 'alpha foxtrot')
+        spec.truthy(info.path_search_limited)
+        spec.contains(output, 'no path found is not proof')
+        output, info = explore.run(G, idx, 'entry', { budget = 256 })
+        spec.truthy(#output <= 256); spec.truthy(info.truncated)
+        spec.equal(pcall(explore.run, G, { root = tmp_root, query_source = function() return nil end }, 'entry'), false)
     end)
     spec.it('isolates event buses and reads project rules on every query', function()
         local root = tmp_root .. '/dispatch'

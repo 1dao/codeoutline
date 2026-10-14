@@ -69,3 +69,30 @@ persistent index fields or cross-query cache.
 For in-memory embeddings without a project root, parse with `{ dispatch = true }`
 to supply explicit call-site data. Normal parsing and index builds use compact
 candidates by default.
+
+### Query explanations
+
+`explore` includes a bounded relationship report. Configured dispatch matches
+name the API, rule number and argument position; event matches also show the
+first matching registration location. These are static rule matches, not proof
+that a callback runs at runtime. Ordinary calls distinguish JS/TS or Lua binding
+resolution from name/locality matching. Multiple candidates remain identified
+as candidates; explanations do not change edge selection.
+
+For expanded callers, failed configured dispatch reports a dynamic/unsupported
+or missing argument, an unresolved/ambiguous target, or the absence of a resolved
+registration for the event key. Ordinary unresolved references may be external
+APIs or missing index coverage, not necessarily broken code. This report covers
+indexed references and configured rules; it does not detect every unconfigured
+framework or computed call that the language parser cannot extract.
+
+The report retains at most 64 explanations per query and uses at most 4 KiB or
+one quarter of the output budget. Evidence omission, call-path depth/frontier
+limits and normal output truncation are reported separately. Source reads still
+fail explicitly on unreadable or changed files rather than returning a clean
+but incomplete result. Structured explore info includes `evidence`,
+`evidence_scope`, `evidence_truncated` and `path_search_limited`.
+
+Embedded graph queries can opt in with `graph.query(G, { explain = true })` and
+read `Q.report`. Normal graph queries do not retain reports. No explanation data
+is attached to resident symbol tables or saved to disk.

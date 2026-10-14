@@ -234,9 +234,10 @@ local function path_between(G, a, b, depth)
             end
         end
         frontier = next_frontier
-        if #frontier == 0 or #frontier > 20000 then break end
+        if #frontier == 0 then return nil end
+        if #frontier > 20000 then return nil, true end
     end
-    return nil
+    return nil, #frontier > 0
 end
 
 local file_cache = {}
@@ -245,7 +246,7 @@ local function file_lines(idx, rel)
     local lines = file_cache[key]
     if lines then return lines end
     lines = {}
-    local src = idx:query_source(rel)
+    local src = assert(idx:query_source(rel), 'cannot read source: ' .. rel)
     if src then
         for line in (src .. '\n'):gmatch('([^\n]*)\n') do lines[#lines + 1] = (line:gsub('\r$', '')) end
     end
@@ -293,7 +294,7 @@ local function node_block(G, idx, id, full)
             render_range(lines, b - M.CUT_TAIL + 1, b, out)
         end
     end
-    return table.concat(out, '\n')
+    return table.concat(out, '\n'), span > full
 end
 
 local function label(G, id)
@@ -307,7 +308,10 @@ function M.run(G, idx, query, opts)
     control.check()
     opts = opts or {}
     local budget = M.validate(query, opts)
-    G = graph.query(G, opts)
+    local query_opts = {}
+    for key, value in pairs(opts) do query_opts[key] = value end
+    query_opts.explain = true
+    G = graph.query(G, query_opts)
     file_cache = {}
     local ranked, named_files = find_seeds(G, query)
 
@@ -334,10 +338,12 @@ function M.run(G, idx, query, opts)
 
     -- Spine: nodes on call paths between seeds.
     local flows, spine, on_spine = {}, {}, {}
+    local path_limited = false
     for _, a in ipairs(seeds) do
         for _, b in ipairs(seeds) do
             if a ~= b then
-                local p = path_between(G, a, b, M.PATH_DEPTH)
+                local p, limited = path_between(G, a, b, M.PATH_DEPTH)
+                path_limited = path_limited or limited or false
                 if p then
                     local names = {}
                     for _, id in ipairs(p) do
@@ -429,10 +435,20 @@ function M.run(G, idx, query, opts)
         end
     end
     for f in pairs(selected) do
-        local _, repaired = idx:query_source(G.files[f].path)
+        local path = G.files[f].path -- a decoding repair replaces this file ID
+        local source, repaired = idx:query_source(path)
+        assert(source, 'cannot read source: ' .. path)
         changed = repaired or changed
     end
     if changed then return nil, { encoding_retry = true } end
+
+    local evidence_text = require('codeoutline.query_report').render(G.report, G)
+    local evidence_budget = math.min(4096, math.floor(budget / 4))
+    local evidence_cut = #evidence_text > evidence_budget
+    if evidence_budget >= 256 then
+        emit(text.limit(evidence_text, evidence_budget, G.report.truncated))
+    else evidence_cut = #G.report.entries > 0 end
+    omitted = omitted or evidence_cut or G.report.truncated or #flows > M.LIST_CAP
 
     local reserve = math.floor(budget * 0.15)     -- keep room for sections 3-4
     for _, f in ipairs(file_order) do
@@ -454,7 +470,8 @@ function M.run(G, idx, query, opts)
         end
         for _, item in ipairs(items) do
             if not shown[item.id] then
-                local block = node_block(G, idx, item.id, item.full)
+                local block, source_cut = node_block(G, idx, item.id, item.full)
+                omitted = omitted or source_cut
                 local need = #block + (wrote_header and 0 or #header + 1) + 1
                 if used + need < budget - reserve then
                     if not wrote_header then emit(header); wrote_header = true end
@@ -480,6 +497,7 @@ function M.run(G, idx, query, opts)
                 seen_in[src] = true
                 callers[#callers + 1] = string.format('%s (%s:%d)', G.nodes[src].name, G.files[G.node_file[src]].path, inn[i + 1])
                     .. (inn[i + 2]:match('^indirect:') and (' [' .. inn[i + 2] .. ']') or '')
+            elseif not seen_in[src] then omitted = true
             end
         end
         for i = 1, #out, graph.EDGE do
@@ -488,6 +506,7 @@ function M.run(G, idx, query, opts)
                 seen_out[dst] = true
                 callees[#callees + 1] = G.nodes[dst].name .. ' (' .. graph.where(G, dst) .. ')'
                     .. (out[i + 2]:match('^indirect:') and (' [' .. out[i + 2] .. ']') or '')
+            elseif not seen_out[dst] then omitted = true
             end
         end
         if #callers > 0 or #callees > 0 then
@@ -523,9 +542,17 @@ function M.run(G, idx, query, opts)
         table.insert(parts, 1, 'Call-path expansion limit reached; relationships are incomplete.')
         omitted = true
     end
+    if path_limited then
+        table.insert(parts, 1, 'Call-path search reached its depth/frontier limit; no path found is not proof of no runtime connection.')
+    end
+    if evidence_cut or G.report.truncated then
+        table.insert(parts, 1, 'Relationship explanations omitted due to evidence/output limits.')
+    end
     local result, truncated = text.limit(table.concat(parts, '\n'), budget, omitted or #pointers > 0)
     return result, { seeds = seeds, spine = spine, shown = shown, flows = flows, truncated = truncated,
-        relationships_incomplete = G.incomplete or false, query_stats = G.stats }
+        relationships_incomplete = G.incomplete or false, query_stats = G.stats,
+        evidence = G.report.entries, evidence_truncated = evidence_cut or G.report.truncated,
+        path_search_limited = path_limited, evidence_scope = G.report.scope }
 end
 
 return M

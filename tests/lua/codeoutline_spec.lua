@@ -1298,6 +1298,22 @@ function custom(dofile) local a = dofile('a.lua'); a.save() end
         })
         spec.equal(edges_from(G, 'run'), '')
     end)
+    spec.it('does not reset invalid return state or fall back to __exports', function()
+        for _, source in ipairs({
+            'local M = {}\nfunction M.save() end\nif flag then return M end',
+            'local M = {}\nfunction M.save() end\nif flag then return M end\nreturn M',
+            'local M = {}\nfunction M.save() end\nreturn M\nreturn M',
+            'function __exports.save() end\nif flag then return {} end',
+        }) do
+            local parsed = ci.parse('a.lua', source)
+            spec.equal(next(parsed.lua_exports or {}), nil)
+            local G = build({
+                ['a.lua'] = source,
+                ['main.lua'] = "local a = dofile('a.lua')\nfunction run() a.save() end",
+            })
+            spec.equal(edges_from(G, 'run'), '')
+        end
+    end)
     spec.it('reloads the configured runtime directory and preserves cache bindings', function()
         local root = tmp_root .. '/lua_bindings'
         write(root .. '/a.lua', 'local M = {}\nlocal function actual() end\nM.save = actual\nreturn M')

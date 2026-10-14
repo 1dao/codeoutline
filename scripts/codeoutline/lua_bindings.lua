@@ -117,8 +117,8 @@ function M.collect(r, T, bm)
         end
     end
     -- A single unconditional top-level return is the supported module contract.
-    -- Files that fail it (conditional returns, returns inside untracked blocks)
-    -- fall back to the return-less `__exports` contract below. Function depth
+    -- Files with no module-level return may use the `__exports` contract below;
+    -- conditional or multiple returns invalidate both contracts. Function depth
     -- comes from token blocks, so returns inside anonymous callbacks (which are
     -- not nodes) do not pose as module-level returns.
     local fn_close, depth = {}, 0
@@ -129,8 +129,7 @@ function M.collect(r, T, bm)
     for i = 1, T.n do
         if T.k[i] == 'kw' and T:text(i) == 'function' then depth = depth + 1 end
         if T:text(i) == 'return' and T.k[i] == 'kw' and depth == 0 then
-            if ret or scopes[i] ~= 0 then ret = false end
-            if not ret then ret = i end
+            if ret or scopes[i] ~= 0 then ret = false else ret = i end
         end
         if fn_close[i] then depth = depth - 1 end
         if ret == false then break end

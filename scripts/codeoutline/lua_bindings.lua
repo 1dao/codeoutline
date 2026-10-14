@@ -31,9 +31,9 @@ function M.collect(r, T, bm)
     r.lua_imports, r.lua_exports, r.lua_locals = {}, {}, {}
     local scopes, stack, params, bindings = {}, {}, {}, {}
     for i = 1, T.n do
-        if bm[i] and bm[i] > i then stack[#stack + 1] = i end
-        scopes[i] = stack[#stack] or 0
         if stack[#stack] and bm[stack[#stack]] == i then stack[#stack] = nil end
+        scopes[i] = stack[#stack] or 0
+        if bm[i] and bm[i] > i then stack[#stack + 1] = i end
         if T:text(i) == 'function' and T.k[i] == 'kw' then
             local p = i + 1
             while p < (bm[i] or i) and T:text(p) ~= '(' do p = p + 1 end
@@ -88,7 +88,7 @@ function M.collect(r, T, bm)
             if b.hint:match('^lua%-local:') then
                 local members = {}
                 for index, n in ipairs(r.nodes) do
-                    local scope = T:text(n.ti) == 'function' and scopes[n.ti - 1] or scopes[n.ti]
+                    local scope = scopes[n.ti]
                     if n.ti >= b.token and n.ti <= b.b and scope == b.a
                         and (n.qualified == name .. '.' .. n.name or n.qualified == name .. ':' .. n.name) then members[n.name] = index end
                 end

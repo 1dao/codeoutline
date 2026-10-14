@@ -1342,6 +1342,21 @@ return M
         local incomplete = ci.parse('broken.lua', 'local M = {\nreturn M')
         spec.equal(next(incomplete.lua_exports), nil)
     end)
+    spec.it('binds a member defined directly after a sibling block closes', function()
+        local G = build({
+            ['main.lua'] = 'local M = {}\nfunction M.save(x) return M.helper(x) end\nfunction M.helper(x) return x end\nreturn M\n',
+        })
+        spec.equal(edges_from(G, 'save'), 'helper@main.lua')
+        local nested = build({
+            ['other.lua'] = 'local M = {}\nfunction M.first() do local x = 1 end end\nfunction M.save() M.first() end\nreturn M\n',
+        })
+        spec.equal(edges_from(nested, 'save'), 'first@other.lua')
+        local shadowed = build({
+            ['deep.lua'] = 'local M = {}\nfunction M.save() end\n'
+                .. 'function run() local M = {} do local x = 1 end function M.save() end M.save() end\nreturn M\n',
+        })
+        spec.equal(edges_from(shadowed, 'run'), 'save@deep.lua')
+    end)
     spec.it('does not retain members from a replaced table or overwritten export', function()
         local G = build({
             ['a.lua'] = 'local M = {}\nfunction M.save() end\nM = {}\nreturn M',

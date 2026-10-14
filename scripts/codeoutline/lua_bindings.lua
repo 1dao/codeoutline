@@ -2,6 +2,22 @@
 local M = {}
 local control = require('codeoutline.control')
 local loaders = { require = true, dofile = true, loadfile = true }
+local EXPORT_OWNER = '__exports'
+-- Loader call at token j: a known loader name, or any dotted/plain name whose
+-- last segment ends in `import` (`ks.import`, `skynet_import`). Returns the
+-- kind recorded in lua_imports, the callee's last token, and the base name
+-- used for shadow checks.
+local function loader_call(T, j)
+    if T.k[j] ~= 'id' then return nil end
+    local k = j
+    while T.k[k + 1] == 'op' and T:text(k + 1) == '.' and T.k[k + 2] == 'id' do k = k + 2 end
+    local name = T:text(k)
+    if k == j and loaders[name] then return name, k, name end
+    if name:sub(-6) ~= 'import' then return nil end
+    local parts = {}
+    for x = j, k, 2 do parts[#parts + 1] = T:text(x) end
+    return table.concat(parts, '.'), k, T:text(j)
+end
 local function literal(T, i)
     if T.k[i] ~= 'str' then return nil end
     local s = T:text(i)
@@ -37,19 +53,21 @@ function M.collect(r, T, bm)
             elseif prev == 'local' or (next == '=' and prev ~= '.' and prev ~= ':' and prev ~= '{' and prev ~= ',') then
                 local hint = '?'
                 if next == '=' and T:text(i + 2) == '{' then hint = 'lua-local:' .. T:text(i) end
-                local imported = next == '=' and loaders[T:text(i + 2)]
-                if next == '=' and loaders[T:text(i + 2)] then
-                    local kind, call = T:text(i + 2), i + 2
+                local kind, call, base
+                if next == '=' then kind, call, base = loader_call(T, i + 2) end
+                local imported = kind ~= nil
+                if kind then
                     local arg = T:text(call + 1) == '(' and call + 2 or call + 1
                     local path = literal(T, arg)
                     local close = T:text(call + 1) == '(' and T.m[call + 1] or arg
-                    if close and ((close == arg) or (close == arg + 1)) and path then
+                    if close and ((close == arg) or (close == arg + 1)
+                        or (close > arg and T:text(arg + 1) == ',')) and path then
                         -- A concatenation/operation after the loader is not its return value.
                         local tail = T:text(close + 1)
                         if tail ~= '..' and tail ~= '.' and tail ~= ':' and tail ~= 'or' and tail ~= 'and'
                             and tail ~= '(' and tail ~= '[' and tail ~= '+' and tail ~= '-' and tail ~= '*' and tail ~= '/' then
                             local shadowed = false
-                            for _, b in ipairs(bindings[kind] or {}) do
+                            for _, b in ipairs(bindings[base] or {}) do
                                 if b.token < call and b.a <= call and b.b >= call then shadowed = true end
                             end
                             if not shadowed then
@@ -91,21 +109,59 @@ function M.collect(r, T, bm)
         end
     end
 
-    -- A single unconditional top-level return is the supported module contract.
-    local ret
-    for i = 1, T.n do
-        if T:text(i) == 'return' and T.k[i] == 'kw' then
-            local in_function = false
-            for _, n in ipairs(r.nodes) do
-                if (n.kind == 'function' or n.kind == 'method') and n.ti <= i and n.tj >= i then in_function = true; break end
-            end
-            if not in_function then
-                if ret or scopes[i] ~= 0 then r.lua_exports = {}; return end
-                ret = i
+    local function alias(key, target)
+        for index, n in ipairs(r.nodes) do
+            if not n.parent and n.name == target and n.qualified == target and (n.kind == 'function' or n.kind == 'method') then
+                r.lua_exports[key] = index
             end
         end
     end
-    if not ret then return end
+    -- A single unconditional top-level return is the supported module contract.
+    -- Files that fail it (conditional returns, returns inside untracked blocks)
+    -- fall back to the return-less `__exports` contract below. Function depth
+    -- comes from token blocks, so returns inside anonymous callbacks (which are
+    -- not nodes) do not pose as module-level returns.
+    local fn_close, depth = {}, 0
+    for i = 1, T.n do
+        if T.k[i] == 'kw' and T:text(i) == 'function' and bm[i] then fn_close[bm[i]] = true end
+    end
+    local ret
+    for i = 1, T.n do
+        if T.k[i] == 'kw' and T:text(i) == 'function' then depth = depth + 1 end
+        if T:text(i) == 'return' and T.k[i] == 'kw' and depth == 0 then
+            if ret or scopes[i] ~= 0 then ret = false end
+            if not ret then ret = i end
+        end
+        if fn_close[i] then depth = depth - 1 end
+        if ret == false then break end
+    end
+    if not ret then
+        -- Return-less module (kslua-style): top-level `__exports` members are the
+        -- contract, unless the file defines `__exports` itself.
+        if ret == false or bindings[EXPORT_OWNER] and #bindings[EXPORT_OWNER] > 0 then return end
+        local count = 0
+        for _, n in ipairs(r.nodes) do
+            if not n.parent and (n.kind == 'function' or n.kind == 'method')
+                and (n.qualified == EXPORT_OWNER .. '.' .. n.name or n.qualified == EXPORT_OWNER .. ':' .. n.name) then
+                count = count + 1
+            end
+        end
+        if count == 0 then return end
+        for index, n in ipairs(r.nodes) do
+            if not n.parent and (n.kind == 'function' or n.kind == 'method')
+                and (n.qualified == EXPORT_OWNER .. '.' .. n.name or n.qualified == EXPORT_OWNER .. ':' .. n.name) then
+                r.lua_exports[n.name] = index
+            end
+        end
+        for i = 1, T.n - 4 do
+            if scopes[i] == 0 and T.k[i] == 'id' and T:text(i) == EXPORT_OWNER and T:text(i + 1) == '.' and T.k[i + 2] == 'id'
+                and T:text(i + 3) == '=' and T:text(i + 4) ~= 'function' then
+                r.lua_exports[T:text(i + 2)] = nil
+                if T.k[i + 4] == 'id' and (T.l[i + 5] ~= T.l[i + 4] or T:text(i + 5) == ';') then alias(T:text(i + 2), T:text(i + 4)) end
+            end
+        end
+        return
+    end
     local owner, table_start
     if T.k[ret + 1] == 'id' and (ret + 1 == T.n or T:text(ret + 2) == ';') then
         owner = T:text(ret + 1)
@@ -121,16 +177,10 @@ function M.collect(r, T, bm)
         for i = table_start + 1, ret - 1 do
             if scopes[i] == 0 and T:text(i) == owner and T:text(i + 1) == '=' then r.lua_exports = {}; return end
         end
+        r.lua_owner = owner
         for index, n in ipairs(r.nodes) do
             if not n.parent and n.ti >= table_start and (n.qualified == owner .. '.' .. n.name or n.qualified == owner .. ':' .. n.name)
                 and (n.kind == 'function' or n.kind == 'method') then r.lua_exports[n.name] = index end
-        end
-    end
-    local function alias(key, target)
-        for index, n in ipairs(r.nodes) do
-            if not n.parent and n.name == target and n.qualified == target and (n.kind == 'function' or n.kind == 'method') then
-                r.lua_exports[key] = index
-            end
         end
     end
     if table_start then
@@ -197,6 +247,25 @@ function M.modules(G, imp, ctx)
         local path = normalize(ctx.directory .. '/' .. imp.path)
         local f = G.file_index[path]
         if f and G.files[f].language == 'lua' then result[1] = f end
+        if not result[1] and not loaders[imp.kind] then
+            -- `*import` pattern loader: bind when any indexed Lua file's path
+            -- ends with the quoted path, regardless of directory prefix.
+            local want = normalize(imp.path)
+            local base = want:match('([^/]+)$')
+            if base then
+                local candidates, seen = {}, {}
+                for _, g in ipairs(G.by_base[base] or {}) do candidates[#candidates + 1] = g end
+                for _, g in ipairs(G.new_files or {}) do candidates[#candidates + 1] = g end
+                for _, g in ipairs(candidates) do
+                    local rec = G.files[g]
+                    if rec and rec.language == 'lua' and not seen[g]
+                        and (rec.path == want or rec.path:sub(-#want - 1) == '/' .. want) then
+                        seen[g] = true
+                        result[#result + 1] = g
+                    end
+                end
+            end
+        end
     end
     ctx.modules[key] = result
     return result

@@ -192,6 +192,19 @@ function M.parse(path, src, language, opts)
                 local v = string_value(T, arg)
                 if v then r.imports[#r.imports + 1] = { path = v, line = T:line(i), kind = T:text(i) } end
             end
+        elseif k == 'id' and T:text(i):sub(-6) == 'import' and not is(T, i - 1, ':') then
+            -- `*import` loader pattern: `ks.import('path')`, `skynet_import 'path'`.
+            -- Path-based; resolution keeps it only when the file exists.
+            local paren = is(T, i + 1, '(')
+            local arg = paren and i + 2 or i + 1
+            if T.k[arg] == 'str' and (not paren or is(T, arg + 1, ')') or is(T, arg + 1, ',')) then
+                local v = string_value(T, arg)
+                if v then
+                    local kind = T:text(i)
+                    if is(T, i - 1, '.') and T.k[i - 2] == 'id' then kind = T:text(i - 2) .. '.' .. kind end
+                    r.imports[#r.imports + 1] = { path = v, line = T:line(i), kind = kind }
+                end
+            end
         end
     end
 
@@ -214,8 +227,10 @@ function M.parse(path, src, language, opts)
         if not defs[ref.tok] then kept[#kept + 1] = ref end
     end
     r.refs = kept
-    common.assign_refs(r)
-    require('codeoutline.lua_bindings').collect(r, T, bm)
+    if not r.dispatch_only then
+        common.assign_refs(r)
+        require('codeoutline.lua_bindings').collect(r, T, bm)
+    end
     r.member_ops = nil
     return common.finish(r, T), T
 end

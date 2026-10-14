@@ -60,6 +60,12 @@ without caching; eviction affects speed, not matching coverage. No source or
 tokens are retained in this cache, and rule/source changes cannot reuse it across
 queries. Old disk caches are invalidated by the parser checksum.
 
+Query parsing uses the normal declaration and call attribution logic, but skips
+Lua/JS binding evidence and compact index-record packing. Each candidate is
+processed against all applicable rules before moving to the next file, and
+dependency resolution is reused within the query. These optimizations add no
+persistent index fields or cross-query cache.
+
 For in-memory embeddings without a project root, parse with `{ dispatch = true }`
 to supply explicit call-site data. Normal parsing and index builds use compact
 candidates by default.

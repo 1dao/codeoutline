@@ -49,6 +49,8 @@ function M.parse_tokens(path, src, opts)
 end
 
 -- opts.ranges=false emits compact index nodes; default parsing retains positions.
+-- opts.dispatch_only=true is transient query data, not an index record: it
+-- retains parser nodes/refs and skips binding evidence and record packing.
 function M.parse(path, src, opts)
     return (M.parse_tokens(path, src, opts))
 end

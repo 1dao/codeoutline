@@ -1334,9 +1334,85 @@ return M
         })
         spec.equal(edges_from(G, 'run'), '')
     end)
+    spec.it('binds *import pattern loaders to existing files, by suffix when needed', function()
+        local G = build({
+            ['mods/lib.lua'] = 'local M = {}\nfunction M.save() end\nreturn M',
+            ['pub/deep/other.lua'] = 'local M = {}\nfunction M.close() end\nreturn M',
+            ['main.lua'] = "local a = ks.import('mods/lib.lua')\nlocal b = skynet_import('deep/other.lua')\n"
+                .. "local missing = qq.import('nope/lib.lua')\n"
+                .. "function run() a.save(); b.close(); missing.save() end",
+        })
+        spec.equal(edges_from(G, 'run'), 'close@pub/deep/other.lua save@mods/lib.lua')
+    end)
+    spec.it('resolves return-less __exports modules through pattern loaders', function()
+        local G = build({
+            ['svc.lua'] = 'local function impl() end\n__exports.direct = function() end\nfunction __exports.named() end\n'
+                .. '__exports.plain = impl\n__exports.value = 5\n',
+            ['main.lua'] = "local svc = ks.import('svc.lua')\nfunction run() svc.direct(); svc.named(); svc.plain(); svc.value() end",
+        })
+        spec.equal(edges_from(G, 'run'), 'direct@svc.lua impl@svc.lua named@svc.lua')
+    end)
+    spec.it('does not apply the __exports contract when the file owns the name or returns a table', function()
+        local G = build({
+            ['a.lua'] = 'local __exports = {}\nfunction __exports.save() end\n',
+            ['b.lua'] = 'local M = {}\nfunction M.save() end\n__exports.other = function() end\nreturn M',
+            ['main.lua'] = "local a = dofile('a.lua')\nlocal b = dofile('b.lua')\nfunction run() a.save(); b.other() end",
+        })
+        spec.equal(edges_from(G, 'run'), '')
+    end)
 end)
 
 spec.describe('configured indirect dispatch', function()
+    spec.it('preserves dispatch sites and node identities in query-only parsing', function()
+        local sources = {
+            ['a.lua'] = "local m = require('mod')\nfunction outer() local function inner() schedule(1, done) end; bus.emit('tick'); pcall(m.run) end\nbus.on('tick', outer)",
+            ['a.ts'] = "import {done} from './mod'; function outer() { schedule(1, done); const inner = () => bus.emit('tick'); } bus.on('tick', outer);",
+            ['a.c'] = "void done(void) {}\nvoid run(void) { schedule(1, &done); schedule(2, choose()); }",
+            ['a.py'] = "def run():\n    schedule(1, done)\nbus.on('tick', run)\n",
+            ['a.kt'] = "fun run() { schedule(1, done); bus.emit(\"tick\") }",
+        }
+        local function signature(r)
+            local rows = { names(r) }
+            for _, site in ipairs(r.dispatch_sites or {}) do
+                local row = { site.call, tostring(site.from), tostring(site.line) }
+                for _, arg in ipairs(site.args) do
+                    row[#row + 1] = arg and (arg.literal and 'literal:' .. arg.literal or 'symbol:' .. arg.symbol) or 'false'
+                end
+                rows[#rows + 1] = table.concat(row, '|')
+            end
+            return table.concat(rows, '\n')
+        end
+        for path, source in pairs(sources) do
+            local full = ci.parse(path, source, { ranges = false, dispatch = true })
+            local fast = ci.parse(path, source, { ranges = false, dispatch = true, dispatch_only = true })
+            spec.equal(signature(fast), signature(full), path)
+            spec.equal(fast.lua_imports, nil)
+            spec.equal(fast.js_imports, nil)
+        end
+    end)
+    spec.it('parses each candidate once across callback rules beyond the FIFO limit', function()
+        local root = tmp_root .. '/dispatch_batch'
+        for i = 1, 20 do
+            write(root .. '/' .. i .. '.lua', 'function handler' .. i .. '() end\nfunction run' .. i .. '() first(handler' .. i .. '); second(handler' .. i .. ') end')
+        end
+        local _, G = svc.get(root, { cache_path = root .. '/cache.bin' })
+        local original, count = ci.parse, 0
+        ci.parse = function(...) count = count + 1; return original(...) end
+        local ok, err = pcall(function()
+            local Q = graph.query(G, { dispatch_rules = {
+                { kind = 'callback', call = 'first', argument = 1 },
+                { kind = 'callback', call = 'second', argument = 1 },
+            } })
+            local ids = {}
+            for i = 1, 20 do ids[i] = G.by_name['handler' .. i][1] end
+            Q:load_incoming(ids)
+            for _, id in ipairs(ids) do spec.equal(#Q.inn[id], 6) end
+            spec.equal(count, 20)
+        end)
+        ci.parse = original
+        svc.forget(root)
+        assert(ok, err)
+    end)
     local rules = {
         { kind = 'event', language = 'lua', call = 'bus.emit', argument = 1,
             register = 'bus.on', keyArgument = 1, handlerArgument = 2 },

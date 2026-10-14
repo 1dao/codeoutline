@@ -87,6 +87,7 @@ function M.query(G, rules)
     if #rules == 0 then return { outgoing = function() return {} end, incoming = function() return {} end } end
     local graph = require('codeoutline.graph')
     local names, cache, order, bytes, registrations_by_rule = {}, {}, {}, 0, {}
+    local dependencies = {}
     for _, rule in ipairs(rules) do names[rule.call] = true; if rule.register then names[rule.register] = true end end
     local function candidate(rec, call)
         if rec.dispatch_sites then return true end -- explicit in-memory parse option
@@ -106,7 +107,8 @@ function M.query(G, rules)
         if rec.encoding ~= 'utf-8' and rec.encoding ~= 'utf-8-bom' then
             source = assert(xutils.to_utf8(raw, rec.encoding == 'gbk' and 'gbk' or 'auto'))
         end
-        local parsed = assert(require('codeoutline.parse').parse(rec.path, source, { ranges = false, dispatch = names }))
+        local parsed = assert(require('codeoutline.parse').parse(rec.path, source,
+            { ranges = false, dispatch = names, dispatch_only = true }))
         assert(#parsed.nodes == #rec.nodes, 'source encoding changed; refresh index before indirect query: ' .. rec.path)
         for i, n in ipairs(parsed.nodes) do
             assert(n.qualified == rec.nodes[i].qualified and n.line == rec.nodes[i].line,
@@ -130,7 +132,12 @@ function M.query(G, rules)
         end
         if not name or not name:match('^[%a_][%w_%.:>%-]*$') then return {} end
         local short = name:match('([%w_]+)$')
-        local deps, paired = graph.dependencies(G, f)
+        local dependency = dependencies[f]
+        if not dependency then
+            local deps, paired = graph.dependencies(G, f)
+            dependency = { deps, paired }; dependencies[f] = dependency
+        end
+        local deps, paired = dependency[1], dependency[2]
         local view = G
         if short ~= name then
             local filtered = {}
@@ -167,13 +174,16 @@ function M.query(G, rules)
     end
     local function scan(only, wanted)
         local out = {}
-        for ri, rule in ipairs(rules) do
-            local files = only and { G.node_file[only] } or G.file_order
-            for _, f in ipairs(files) do
-                control.check()
-                local rec = G.files[f]
+        local files = only and { G.node_file[only] } or G.file_order
+        for _, f in ipairs(files) do
+            control.check()
+            local rec, file_sites = G.files[f], nil
+            for ri, rule in ipairs(rules) do
                 if (not rule.language or rule.language == rec.language) and candidate(rec, rule.call) then
-                    for _, site in ipairs(sites(f)) do
+                    -- Process every applicable rule while this file is available,
+                    -- even if event registration scans evict it from the FIFO.
+                    file_sites = file_sites or sites(f)
+                    for _, site in ipairs(file_sites) do
                         if site.call == rule.call and site.from > 0 and (not only or G.id_of[f][site.from] == only) then
                             local ids, arg = {}, site.args[rule.argument]
                             if rule.kind == 'event' then

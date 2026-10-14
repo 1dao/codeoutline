@@ -211,7 +211,7 @@ local function parameters(T, a, b, language, out)
 end
 
 -- Initializer starting at token j: a type name, a module path, or a call chain.
-local function initializer(T, j, stop)
+local function initializer(T, j, stop, language)
     if not j or j > stop then return {} end
     if kw(T, j, 'new') or (T.k[j] == 'id' and text_of(T, j) == 'new') then
         local k, last = j + 1, nil
@@ -225,6 +225,21 @@ local function initializer(T, j, stop)
     if T.k[j] == 'id' and text_of(T, j) == 'require' then
         local k = is(T, j + 1, '(') and j + 2 or j + 1
         if T.k[k] == 'str' then return { module = text_of(T, k):gsub('^[%a]*["\'%[=]+', ''):gsub('["\'%]=]+$', '') } end
+    end
+    if language == 'lua' and T.k[j] == 'id' then
+        -- Lua `*import` loaders: `ks.import('path.lua')`, `skynet_import 'path.lua'`.
+        local k = j
+        while is(T, k + 1, '.') and T.k[k + 2] == 'id' do k = k + 2 end
+        local name = text_of(T, k)
+        if name:sub(-6) == 'import' then
+            local a = is(T, k + 1, '(') and k + 2 or k + 1
+            if T.k[a] == 'str' and (not is(T, k + 1, '(') or is(T, a + 1, ')')) then
+                local path = text_of(T, a):gsub('^[%a]*["\'%[=]+', ''):gsub('["\'%]=]+$', '')
+                local parts = {}
+                for x = j, k, 2 do parts[#parts + 1] = text_of(T, x) end
+                return { module = path, module_kind = table.concat(parts, '.') }
+            end
+        end
     end
     local chain, k = {}, j
     while k <= stop and (T.k[k] == 'id' or (T.k[k] == 'kw' and SELF[text_of(T, k)])) do
@@ -262,9 +277,10 @@ local function declarations(T, a, b, language, skip, out)
         local entry = { name = text_of(T, name_tok), type = normalize(type), at = name_tok }
         if init then
             local stop = statement_end(init)
-            local value = initializer(T, init, stop)
+            local value = initializer(T, init, stop, language)
             entry.type = entry.type or normalize(value.type)
             entry.module, entry.chain = value.module, value.chain
+            entry.module_kind = value.module_kind
         end
         out[#out + 1] = entry
     end
@@ -382,8 +398,10 @@ local function module_aliases(T, language)
     local out = {}
     for i = 1, T.n do
         if language == 'lua' and kw(T, i, 'local') and T.k[i + 1] == 'id' and is(T, i + 2, '=') then
-            local value = initializer(T, i + 3, math.min(T.n, i + 6))
-            if value.module then out[text_of(T, i + 1)] = { kind = 'require', path = value.module } end
+            local value = initializer(T, i + 3, math.min(T.n, i + 8), 'lua')
+            if value.module then
+                out[text_of(T, i + 1)] = { kind = value.module_kind or 'require', path = value.module }
+            end
         elseif language == 'python' and kw(T, i, 'import') then
             local from, k = nil, i - 1
             while k >= 1 and T.k[k] ~= 'nl' and not kw(T, k, 'from') do k = k - 1 end
@@ -598,12 +616,29 @@ function Completion:module_members(files)
         local rec = self.V.files[g]
         local language = rec.language
         local exported
+        local lua_contract = language == 'lua' and rec.lua_exports and next(rec.lua_exports) ~= nil
         if language == 'lua' then
-            -- The table a Lua module returns names its members.
-            local _, T = full(self.V, g)
-            if T then
-                for i = T.n - 1, 1, -1 do
-                    if kw(T, i, 'return') and T.k[i + 1] == 'id' then exported = text_of(T, i + 1); break end
+            -- The verified module contract names the returned table's members.
+            exported = rec.lua_owner
+            if not exported and not lua_contract then
+                local _, T = full(self.V, g)
+                if T then
+                    for i = T.n - 1, 1, -1 do
+                        if kw(T, i, 'return') and T.k[i + 1] == 'id' then exported = text_of(T, i + 1); break end
+                    end
+                end
+            end
+            if not exported and lua_contract then
+                -- Return-less `__exports` contract: the recorded exports are the members.
+                for name, n in pairs(rec.lua_exports) do
+                    local node = rec.nodes[n]
+                    if node then out[#out + 1] = { name = name, kind = node.kind, node = node, file = g } end
+                end
+            elseif not exported then
+                for _, node in ipairs(rec.nodes) do
+                    if not node.parent and not node.qualified:find('[%.:]') then
+                        out[#out + 1] = { name = node.name, kind = node.kind, node = node, file = g }
+                    end
                 end
             end
         end
@@ -611,7 +646,8 @@ function Completion:module_members(files)
             if exported then
                 local member = node.qualified:match('^' .. exported:gsub('%p', '%%%0') .. '[%.:]([%w_]+)$')
                 if member then out[#out + 1] = { name = member, kind = node.kind, node = node, file = g } end
-            elseif not node.parent and not node.qualified:find('[%.:]') and (language ~= 'go' or node.name:match('^%u')) then
+            elseif language ~= 'lua' and not node.parent and not node.qualified:find('[%.:]')
+                and (language ~= 'go' or node.name:match('^%u')) then
                 out[#out + 1] = { name = node.name, kind = node.kind, node = node, file = g }
             end
         end
@@ -729,7 +765,7 @@ function Completion:receiver(item, depth)
     local entry = find_local(self:locals(), name)
     if entry then
         if entry.module then
-            return { modules = import_files(self.V, self.f, { kind = 'require', path = entry.module }) }
+            return { modules = import_files(self.V, self.f, { kind = entry.module_kind or 'require', path = entry.module }) }
         elseif entry.type then
             local ids = self:types(entry.type)
             if #ids > 0 then return { types = ids } end

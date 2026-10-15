@@ -267,6 +267,39 @@ local function fake_submit(req, done)
 end
 
 spec.describe('LSP sessions', function()
+    spec.it('runs query RPC waits in separate coroutines and cleans up transport failures', function()
+        local output, waits, cancelled = {}, {}, {}
+        local session = lsp.new({}, function(msg) output[#output + 1] = msg end, fake_submit,
+            function(id) cancelled[id] = true end, function() end,
+            function(req, started)
+                local co, main = coroutine.running()
+                spec.truthy(co); spec.truthy(not main)
+                waits[#waits + 1] = co
+                started(tostring(#waits))
+                return coroutine.yield()
+            end)
+        local function send(method, params, id)
+            session:accept(xutils.json_pack({ jsonrpc = '2.0', method = method, params = params or {}, id = id }))
+        end
+        send('initialize', { capabilities = {} }, 1); send('initialized')
+        send('workspace/symbol', { query = '' }, 2)
+        send('workspace/symbol', { query = '' }, 3)
+        spec.equal(#waits, 2)
+        spec.truthy(waits[1] ~= waits[2])
+        send('$/cancelRequest', { id = 2 })
+        spec.truthy(cancelled['1'])
+        local before = #output
+        assert(coroutine.resume(waits[1], true, {}))
+        spec.equal(#output, before)
+        assert(coroutine.resume(waits[2], false, 'rpc timeout'))
+        spec.equal(output[#output].id, 3)
+        spec.equal(output[#output].error.code, -32603)
+        spec.equal(next(session.pending), nil)
+        send('workspace/symbol', { query = '' }, 4)
+        assert(coroutine.resume(waits[3], true, {}))
+        spec.equal(output[#output].id, 4)
+        spec.equal(#output[#output].result, 0)
+    end)
     spec.it('cancels immediately and discards a late result even when an ID is reused', function()
         local output, jobs, cancelled = {}, {}, {}
         local session = lsp.new({}, function(msg) output[#output + 1] = msg end,
@@ -586,6 +619,52 @@ spec.describe('LSP navigation', function()
         found = definition('save()', 'js-typed')
         spec.equal(#found, 1); spec.equal(found[1].range.start.line, 2)
         navigation.close('js-typed')
+    end)
+    spec.it('connects Lua native module exports to C definitions, hover and completion', function()
+        local native = [[static int native_save(lua_State *L) { int id = luaL_checkinteger(L, 1); luaL_checkstring(L, 2); int count = luaL_optinteger(L, 3, 10); return 0; }
+static int hidden(lua_State *L) { return 0; }
+static const luaL_Reg api[] = { {"save", native_save}, {NULL, NULL} };
+static const luaL_Reg methods[] = { {"hidden", hidden}, {NULL, NULL} };
+int luaopen_native_test(lua_State *L) { luaL_setfuncs(L, methods, 0); luaL_newlib(L, api); return 1; }
+]]
+        nav_write('NativeTest.c', native)
+        local source = "local m = require('native_test')\nm.save()\nnative_test.save()\nm.save(1, 'value', 3)\n"
+        nav_write('NativeClient.lua', source)
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local doc = docs.read(nav_root .. '/NativeClient.lua')
+        for _, line in ipairs({1, 2}) do
+            local character = line == 1 and 3 or 13
+            local found = nav({ method = 'lsp_definition', uri = doc.uri, position = { line = line, character = character } })
+            spec.equal(#found, 1)
+            spec.equal(found[1].uri, nav_uri('NativeTest.c'))
+            spec.equal(range_text('NativeTest.c', found[1].range), 'native_save')
+            local hover = nav({ method = 'lsp_hover', uri = doc.uri, position = { line = line, character = character } })
+            spec.contains(hover.contents.value, 'native_save')
+            spec.contains(hover.contents.value, 'save(id:int, arg2:string, count?:int = 10)')
+            spec.nil_value(hover.contents.value:find('lua_State', 1, true))
+            local result = nav({ method = 'lsp_completion', uri = doc.uri,
+                position = { line = line, character = line == 1 and 2 or 12 } })
+            spec.equal(#result.items, 1)
+            spec.equal(result.items[1].label, 'save')
+            spec.equal(result.items[1].detail, 'save(id:int, arg2:string, count?:int = 10)')
+            local sig = nav({ method = 'lsp_signature', uri = doc.uri,
+                position = { line = line, character = line == 1 and 7 or 17 } })
+            spec.equal(sig.signatures[1].label, result.items[1].detail)
+            spec.equal(#sig.signatures[1].parameters, 3)
+        end
+        local host_hover = nav({ method = 'lsp_hover', uri = nav_uri('NativeTest.c'), position = { line = 0, character = 13 } })
+        spec.contains(host_hover.contents.value, 'lua_State')
+        local active = nav({ method = 'lsp_signature', uri = doc.uri, position = { line = 3, character = 10 } })
+        spec.equal(active.activeParameter, 1)
+        spec.equal(active.signatures[1].parameters[2].label, 'arg2:string')
+        local target = nav_uri('NativeTest.c')
+        navigation.sync({ session = 'native-overlay', open = { [target] = 1 }, changed = {
+            [target] = { version = 1, language = 'c', source = '\n' .. native:gsub('luaL_checkinteger', 'luaL_checknumber') } } })
+        local found = nav({ method = 'lsp_definition', uri = doc.uri, session = 'native-overlay', position = { line = 1, character = 3 } })
+        spec.equal(found[1].range.start.line, 1)
+        local hover = nav({ method = 'lsp_hover', uri = doc.uri, session = 'native-overlay', position = { line = 1, character = 3 } })
+        spec.contains(hover.contents.value, 'save(id:number, arg2:string, count?:int = 10)')
+        navigation.close('native-overlay')
     end)
     spec.it('resolves Lua dofile returned members and unsaved export aliases', function()
         nav_write('LuaModule.lua', 'local M = {}\nlocal function actual() end\nM.save = actual\nreturn M')
@@ -1089,7 +1168,7 @@ spec.describe('LSP navigation requests', function()
             position = { line = 0, character = 0 } }, 6), '"result":[]')
     end)
     spec.it('applies drafts in the worker even when the request is cancelled', function()
-        local saved = { xthread = xthread, xshared = xshared }
+        local saved = { xthread = xthread, xshared = xshared, replys = _thread_replys }
         local ok, err = pcall(function()
             local results = {}
             local flags = { ['cancel:nav-cancelled'] = true }
@@ -1097,6 +1176,11 @@ spec.describe('LSP navigation requests', function()
                 get = function(_, key) return flags[key] end,
                 delete = function(_, key) flags[key] = nil end } end }
             xthread = { post = function(_, _, id, success, result) results[id] = { ok = success, result = result }; return true end }
+            _thread_replys = { ['xthread:1'] = function(co, sk, method, success, result)
+                spec.equal(co, 123); spec.equal(sk, 0); spec.equal(method, 'run_rpc')
+                results['nav-cancelled'] = { ok = success, result = result }
+                return true
+            end }
             local worker = dofile('scripts/codeoutline/index_worker.lua')
             local lua = nav_uri('m.lua')
             local base = { method = 'lsp_definition', session = 'worker', root = nav_root, uri = lua,
@@ -1106,7 +1190,7 @@ spec.describe('LSP navigation requests', function()
             first.open = { [lua] = 2 }
             first.changed = { [lua] = { version = 2, language = 'lua',
                 source = 'function M_go() return renamed() end\nfunction renamed() return 1 end\n' } }
-            worker.__thread_handle(1, 'run', 'nav-cancelled', first)
+            worker.__thread_handle('xthread:1', 123, 0, 'run_rpc', 'nav-cancelled', first)
             spec.equal(results['nav-cancelled'].ok, false)
             base.open, base.changed = { [lua] = 2 }, {}
             worker.__thread_handle(1, 'run', 'nav-next', base)
@@ -1116,7 +1200,7 @@ spec.describe('LSP navigation requests', function()
                 deadline = xtimer.now_ms() + 10000, projectPath = nav_root, allowedRoots = { nav_root } })
             spec.truthy(results['nav-close'].ok)
         end)
-        xthread, xshared = saved.xthread, saved.xshared
+        xthread, xshared, _thread_replys = saved.xthread, saved.xshared, saved.replys
         service.configure({ watch = false, max_projects = 8 })
         if not ok then error(err, 0) end
     end)

@@ -62,8 +62,15 @@ depend on the editor's working directory. Runtime logs must go to stderr.
   from the worker with the request's draft symbols. Navigation
   requests during initial indexing receive RequestFailed (-32803); completion
   returns an empty incomplete list.
+- LSP queries run in individual main-thread Lua coroutines. Queries that need
+  INDEX results wait through `xthread.rpc`; stdin framing, document notifications,
+  cancellation and lifecycle messages stay on the main loop. Each query captures
+  its draft versions before yielding. Cancelled requests suppress late replies;
+  worker waits have a 120-second deadline and share the 64-job transport limit.
+  MCP explore/callers and background refresh retain their callback/post transport.
 - The INDEX worker exclusively owns resident indexes and executes requests
-  directly, without coroutine slices. LSP refreshes only index records and scans
+  serially. A task may yield while waiting for parser threads, but subsequent
+  tasks stay queued until it finishes. LSP refreshes only index records and scans
   those records for workspace symbols; it does not build symbol tables. Once a
   consumer has built them, every refresh keeps them current file by file.
 - Navigation (see below): `textDocument/definition`, `textDocument/hover`,
@@ -261,6 +268,32 @@ limit, names starting with the typed prefix come first.
   512 KB. Each request has a 300 ms budget and 500 items; exceeding either marks
   the list incomplete. Trigger characters outside member operators, and positions
   inside strings, return nothing.
+
+Lua native modules also support definition, hover and member completion when
+their C/C++ sources are indexed in the same workspace. Static `luaL_Reg` entries
+connected by `luaL_newlib`, `luaL_setfuncs`, or `luaL_register` inside
+`luaopen_NAME` map Lua export names to C implementations in that file.
+Both `local m = require('NAME'); m.method()` and an unshadowed `NAME.method()`
+use this mapping (the latter assumes the host exposes that module globally).
+Hover, signature help and completion detail show the guest interface, while
+definition still opens the C implementation. For example, `luaL_checkinteger(L, 1)`
+assigned to `id` contributes `id:int`; an unnamed read uses `arg1:int`.
+Literal positive argument indices, common `luaL_check*`, `luaL_opt*`, `lua_to*`
+and `lua_is*` calls supply types. Optional arguments retain literal defaults,
+missing slots use `unknown`, and dynamic indices add an unknown argument tail.
+Upvalues, negative stack indices and other Lua states are excluded. C documents
+keep the original C signature. Return values and helper-mediated argument reads
+are not inferred. This is a static registration heuristic, not a Lua stack interpreter:
+custom registration macros, helper-driven registration, dynamic table mutation,
+and userdata instance methods are not inferred. Restart the language server
+after updating its scripts; the parser checksum invalidates older disk caches.
+
+The shared `foreign` model stores exports by guest language and module, and
+stores structured guest parameters separately from host signatures. Registration,
+module lookup and LSP signature formatting are shared; `foreign_lua` is the
+current binding API adapter. JS (for example N-API or QuickJS) and Python
+(CPython) need their own registration and argument-reading adapters and resolver
+integration; those adapters are not implemented yet.
 
 Unlike the original plan, dependencies are not pre-parsed on `didOpen`; type files
 are parsed when a completion first needs them. On a 56,661-file tree, 200 sampled

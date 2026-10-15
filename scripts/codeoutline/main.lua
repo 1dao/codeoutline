@@ -77,6 +77,21 @@ local function submit(req, done)
     return id
 end
 local function cancel(id) if id and jobs[id] then shared:set('cancel:' .. id, true) end end
+-- LSP queries wait in their own coroutine. MCP and background refresh jobs
+-- retain the callback/post transport above.
+local function await_worker(req, started)
+    if job_count >= 64 then return false, 'Request queue is full; retry later' end
+    next_id = next_id + 1
+    local id = tostring(next_id)
+    req.deadline = xtimer.now_ms() + 120000
+    jobs[id], job_count = { request = req, rpc = true, waiter = coroutine.running() }, job_count + 1
+    started(id)
+    if not worker_ready then coroutine.yield() end
+    local called, ok, result = pcall(xthread.rpc, 2, 'run_rpc', math.max(1, req.deadline - xtimer.now_ms()), id, req)
+    jobs[id], job_count = nil, job_count - 1
+    if not called then return false, tostring(ok) end
+    return ok, result
+end
 local function send(response)
     if response then
         io.stdout:write(lsp_mode and lsp.frame(response) or (xutils.json_pack(response) .. '\n'))
@@ -119,7 +134,8 @@ return {
             assert(xutils.read_stdin, 'Rebuild runtime for nonblocking stdin support')
             if lsp_mode then
                 assert(xutils.stdout_binary and xutils.stdout_binary(), 'Rebuild runtime for binary stdout support')
-                stdio = lsp.new(config, send, submit, cancel, stop)
+                xtimer.init(16) -- RPC deadlines use the runtime's timer callbacks.
+                stdio = lsp.new(config, send, submit, cancel, stop, await_worker)
             else stdio = mcp.new(config, submit, cancel) end
         else
             -- Packages ship the codec as lib/xhttp_codec.lua; a source checkout
@@ -150,8 +166,13 @@ return {
             table.sort(waiting, function(a, b) return tonumber(a) < tonumber(b) end)
             for _, job_id in ipairs(waiting) do
                 local job = jobs[job_id]
-                local posted, err = xthread.post(2, 'run', job_id, job.request)
-                if not posted then jobs[job_id], job_count = nil, job_count - 1; job.done(false, tostring(err)) end
+                if job.rpc then
+                    local resumed, err = coroutine.resume(job.waiter)
+                    if not resumed then error(err) end
+                else
+                    local posted, err = xthread.post(2, 'run', job_id, job.request)
+                    if not posted then jobs[job_id], job_count = nil, job_count - 1; job.done(false, tostring(err)) end
+                end
             end
         elseif op == 'worker_result' then
             local job = jobs[id]

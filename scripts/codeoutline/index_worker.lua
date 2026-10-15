@@ -70,7 +70,7 @@ end
 -- threads; jobs arriving meanwhile queue behind it.
 local queue, active = {}, nil
 
-local function run(id, req)
+local function run(id, req, reply)
     -- Draft text applies even to a cancelled request: the session counts it as sent.
     if req.session and req.open then
         local synced, err = pcall(navigation.sync, req)
@@ -84,7 +84,11 @@ local function run(id, req)
     control.callback = nil
     if not ok then result = tostring(result) end
     shared:delete('cancel:' .. id)
-    assert(xthread.post(1, 'worker_result', id, ok, result))
+    if reply then
+        assert(_thread_replys[reply.router](reply.co, reply.sk, 'run_rpc', ok, result))
+    else
+        assert(xthread.post(1, 'worker_result', id, ok, result))
+    end
 end
 
 local function resume(...)
@@ -98,7 +102,7 @@ local function pump()
         local item = table.remove(queue, 1)
         active = coroutine.create(run)
         pool.bind(active)
-        resume(item[1], item[2])
+        resume(item[1], item[2], item[3])
     end
 end
 
@@ -115,8 +119,12 @@ return {
         pool.sweep()
         if not active then service.sweep(); service.collect() end
     end,
-    __thread_handle = function(_, op, id, req, failure)
-        if op == 'run' then
+    __thread_handle = function(router, op, id, req, failure, rpc_request)
+        if type(router) == 'string' and req == 'run_rpc' then
+            -- RPC wire: router, coroutine id, session key, method, job id, request.
+            queue[#queue + 1] = { failure, rpc_request, { router = router, co = op, sk = id } }
+            pump()
+        elseif op == 'run' then
             queue[#queue + 1] = { id, req }
             pump()
         elseif op == 'parsed' then

@@ -113,6 +113,29 @@ const indexed = async (client) => {
     assert.ok(client.notifications.some((msg) => msg.params?.value?.kind === 'end'), client.logs());
 };
 
+test('LSP coroutine queries retain ordered draft snapshots while RPCs are pending', { timeout: 30000 }, async (t) => {
+    const client = await start(t);
+    await initialize(client, [client.project]);
+    await indexed(client);
+    const at = (uri, line, character) => ({ textDocument: { uri }, position: { line, character } });
+    const uri = pathToFileURL(join(client.project, 'sample.lua')).href;
+    client.notify('textDocument/didOpen', { textDocument: { uri, languageId: 'lua', version: 1,
+        text: 'local function target(initial) end\ntarget()\n' } });
+    const replies = [];
+    for (let version = 2; version <= 21; version++) {
+        client.notify('textDocument/didChange', { textDocument: { uri, version },
+            contentChanges: [{ text: `local function target(arg${version}) end\ntarget()\n` }] });
+        replies.push(client.request('textDocument/hover', at(uri, 1, 2)));
+    }
+    const results = await Promise.all(replies);
+    for (let i = 0; i < results.length; i++) {
+        assert.ok(results[i], `missing hover ${i}`);
+        assert.match(results[i].contents.value, new RegExp(`target\\(arg${i + 2}\\)`));
+    }
+    const final = await client.request('textDocument/definition', at(uri, 1, 2));
+    assert.equal(final[0].range.start.line, 0);
+});
+
 test('LSP stdio navigates definitions, hover, references and calls over drafts', { timeout: 30000 }, async (t) => {
     const client = await start(t);
     await writeFile(join(client.project, 'util.h'), 'int helper(int x);\n');

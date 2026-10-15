@@ -89,7 +89,7 @@ local feature_of = { ['textDocument/documentSymbol'] = 'documentSymbol', ['works
     ['textDocument/completion'] = 'completion', ['textDocument/signatureHelp'] = 'signatureHelp' }
 local sessions = 0
 
-function M.new(config, emit, submit, cancel, stop)
+function M.new(config, emit, submit, cancel, stop, await_worker)
     config = config or {}
     sessions = sessions + 1
     local self = { state = 'new', documents = {}, roots = {}, pending = {}, scans = {}, ready = {},
@@ -360,27 +360,41 @@ function M.new(config, emit, submit, cancel, stop)
         local doc = document(params)
         reply(id, doc and M.document_symbols(doc, self.hierarchical) or array())
     end
-    -- One worker job per request; late results of cancelled requests are dropped.
-    local function request(id, req, finish)
+    -- Callback transports remain usable by embedders/tests. Production LSP
+    -- supplies an RPC transport; both expose the same yielding interface.
+    await_worker = await_worker or function(req, started)
+        local co = assert(coroutine.running())
+        local waiting, completed, outcome, value = false, false, nil, nil
+        local id, err = submit(req, function(ok, result)
+            completed, outcome, value = true, ok, result
+            if waiting then assert(coroutine.resume(co)) end
+        end)
+        if not id then return false, err end
+        started(id)
+        if not completed then waiting = true; coroutine.yield() end
+        return outcome, value
+    end
+    -- Each query owns a coroutine; cancelled/replaced requests discard replies.
+    local function request(id, req, started)
         local count = 0
         for _ in pairs(self.pending) do count = count + 1 end
         assert(count < M.MAX_PENDING, 'too many pending requests')
-        local job = {}
+        local job = { coroutine = coroutine.running() }
         self.pending[id] = job
-        local job_id, err = submit(req, function(ok, result)
-            if self.pending[id] ~= job then return end
-            self.pending[id] = nil
-            if not ok then
-                if req.changed then self.synced = {} end -- resend drafts with the next request
-                error_response(id, -32603, tostring(result)); return
-            end
-            finish(result)
+        local called, ok, result = pcall(await_worker, req, function(job_id)
+            job.id = job_id
+            if started then started() end
         end)
-        job.id = job_id
-        if not job_id and self.pending[id] == job then
-            self.pending[id] = nil; error_response(id, -32603, err)
+        if not called then result, ok = ok, false end
+        -- Even a cancelled request may fail before its drafts reach the worker.
+        if not ok and req.changed then self.synced = {} end
+        if self.pending[id] ~= job then return nil, false end
+        self.pending[id] = nil
+        if not ok then
+            error_response(id, -32603, tostring(result))
+            return nil, false
         end
-        return job_id ~= nil
+        return result, true
     end
     handlers['workspace/symbol'] = function(id, params)
         assert(id ~= nil, 'symbol query must be a request')
@@ -406,11 +420,11 @@ function M.new(config, emit, submit, cancel, stop)
         for _, root in ipairs(self.roots) do
             if not self.ready[root] then reply(id, result); return end
         end
-        request(id, { method = 'lsp_symbols', roots = self.roots, exclude = exclude,
-            query = params.query, limit = M.MAX_SYMBOLS - #result }, function(symbols)
-            for _, symbol in ipairs(to_client(symbols)) do result[#result + 1] = symbol end
-            reply(id, result)
-        end)
+        local symbols, ok = request(id, { method = 'lsp_symbols', roots = self.roots, exclude = exclude,
+            query = params.query, limit = M.MAX_SYMBOLS - #result })
+        if not ok then return end
+        for _, symbol in ipairs(to_client(symbols)) do result[#result + 1] = symbol end
+        reply(id, result)
     end
     -- Navigation runs in the worker against the session's drafts: every request
     -- carries the open set and the text of versions the worker has not seen.
@@ -429,17 +443,18 @@ function M.new(config, emit, submit, cancel, stop)
         end
         req.session, req.open, req.changed = self.session, open, changed
         req.includePaths = self.include_paths
-        local submitted = request(id, req, function(value)
-            if value.error then error_response(id, -32803, value.error); return end
-            if value.incomplete then
-                emit({ jsonrpc = '2.0', method = 'window/showMessage', params = { type = 2,
-                    message = 'CodeOutline: results were truncated; too many matching references' } })
-            end
-            reply(id, to_client(finish(value.result)))
-        end)
-        if submitted then
+        local value, ok = request(id, req, function()
+            -- Record submission before yielding so subsequent requests send only
+            -- newer drafts. The worker applies drafts even to cancelled jobs.
             for uri, version in pairs(sent) do self.synced[uri] = version end
+        end)
+        if not ok then return end
+        if value.error then error_response(id, -32803, value.error); return end
+        if value.incomplete then
+            emit({ jsonrpc = '2.0', method = 'window/showMessage', params = { type = 2,
+                message = 'CodeOutline: results were truncated; too many matching references' } })
         end
+        reply(id, to_client(finish(value.result)))
     end
     -- Worker results lose array metatables in transit; empty lists must stay JSON arrays.
     local function list(value) return array(value or nil) end
@@ -562,11 +577,20 @@ function M.new(config, emit, submit, cancel, stop)
             error_response(object(msg) and valid_id(msg.id) and msg.id or nil, -32600, 'Invalid JSON-RPC request'); return
         end
         if (msg.method == 'initialize' or msg.method == 'shutdown') and msg.id == nil then return end
-        local dispatched, err = pcall(dispatch, msg)
-        if not dispatched then
-            if msg.id ~= nil then error_response(msg.id, -32602, tostring(err))
-            else io.stderr:write('[codeoutline lsp] ', tostring(err), '\n') end
+        local function handle()
+            local dispatched, err = pcall(dispatch, msg)
+            if not dispatched then
+                if msg.id ~= nil then error_response(msg.id, -32602, tostring(err))
+                else io.stderr:write('[codeoutline lsp] ', tostring(err), '\n') end
+            end
         end
+        -- Lifecycle and document notifications remain ordered on the main loop.
+        -- Queries run immediately up to their first wait, capturing that state.
+        if msg.id ~= nil and feature_of[msg.method] then
+            local co = coroutine.create(handle)
+            local resumed, err = coroutine.resume(co)
+            if not resumed then error_response(msg.id, -32603, tostring(err)) end
+        else handle() end
     end
     return self
 end

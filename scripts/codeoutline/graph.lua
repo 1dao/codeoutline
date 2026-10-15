@@ -291,7 +291,7 @@ local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired, accept,
     local exact = js_resolution.resolve(G, f, name, kind, recv, evidence, js_context)
     if exact == nil then
         strategy = 'lua binding'
-        exact = lua_bindings.resolve(G, f, name, evidence, js_context and js_context.lua)
+        exact = lua_bindings.resolve(G, f, name, evidence, js_context and js_context.lua, recv)
     end
     if exact ~= nil then
         local result = {}

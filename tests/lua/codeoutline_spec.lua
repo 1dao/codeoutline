@@ -25,6 +25,64 @@ local function refs(r)
     return table.concat(out, ' ')
 end
 
+spec.describe('native Lua exports', function()
+    spec.it('infers the real xthread guest signature without changing its C signature', function()
+        local f = assert(io.open('xnet2lua/xlua/lua_xthread.c', 'rb'))
+        local source = f:read('a'); f:close()
+        local rec = ci.parse('lua_xthread.c', source, { ranges = false })
+        local node = rec.nodes[rec.foreign_exports.lua.xthread.create_thread]
+        local signature = require('codeoutline.foreign').signature(node, 'lua', 'create_thread')
+        spec.equal(signature.label, 'create_thread(id:int, name:string, script_path:string)')
+        spec.contains(node.sig, 'lua_State')
+        spec.nil_value(require('codeoutline.foreign').signature(node, 'c', 'create_thread'))
+    end)
+    spec.it('retains positional gaps, checked types, defaults and unknown dynamic indices', function()
+        local rec = ci.parse('native.c', [[
+static int call(lua_State *state) {
+    luaL_checkinteger(state, lua_upvalueindex(1));
+    luaL_checkstring(state, -1);
+    luaL_checkinteger(other, 7);
+    luaL_checktype(state, 2, LUA_TTABLE);
+    const char *text = luaL_optstring(state, 3, "hello");
+    luaL_checknumber(state, index);
+    return 0;
+}
+static const luaL_Reg api[] = {{"call", call}, {NULL, NULL}};
+int luaopen_test(lua_State *L) { luaL_newlib(L, api); return 1; }
+]])
+        local node = rec.nodes[rec.foreign_exports.lua.test.call]
+        spec.equal(require('codeoutline.foreign').signature(node, 'lua', 'call').label,
+            'call(arg1:unknown, arg2:table, text?:string = "hello", ...:unknown)')
+    end)
+    spec.it('keeps modules separate and ignores unregistered C functions in C and C++', function()
+        local source = [[
+static int first(lua_State *L) { return 0; }
+static int second(lua_State *L) { return 0; }
+static const luaL_Reg one[] = {{"run", first}, {NULL, NULL}};
+static const luaL_Reg two[] = {{"run", second}, {NULL, NULL}};
+int luaopen_one(lua_State *L) { luaL_newlib(L, one); return 1; }
+int luaopen_two(lua_State *L) { lua_newtable(L); luaL_setfuncs(L, two, 0); return 1; }
+int luaopen_old(lua_State *L) { luaL_register(L, "old", one); return 1; }
+]]
+        for _, ext in ipairs({ 'c', 'cpp' }) do
+            local rec = ci.parse('native.' .. ext, source, { ranges = false })
+            spec.equal(rec.nodes[rec.foreign_exports.lua.one.run].name, 'first')
+            spec.equal(rec.nodes[rec.foreign_exports.lua.two.run].name, 'second')
+            spec.equal(rec.nodes[rec.foreign_exports.lua.old.run].name, 'first')
+            spec.nil_value(rec.foreign_exports.lua.one.first)
+        end
+    end)
+    spec.it('extracts the real xscan module without leaking metatable methods', function()
+        local f = assert(io.open('xnet2lua/xlua/lua_xscan.c', 'rb'))
+        local source = f:read('a'); f:close()
+        local rec = ci.parse('lua_xscan.c', source)
+        local exports = assert(rec.foreign_exports.lua.xscan)
+        spec.truthy(exports.lang)
+        spec.nil_value(exports.tokenize)
+        spec.nil_value(exports.text)
+    end)
+end)
+
 spec.describe('xscan', function()
     local L = xscan.lang({ keywords = { 'if' }, ops = { '->', '>>=' }, line_comment = { '//' },
         block_comment = { { '/*', '*/' } }, strings = { { '"', '"', escape = '\\' } } })

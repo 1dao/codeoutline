@@ -895,8 +895,13 @@ function handlers.lsp_signature(req)
     local signatures, seen = {}, {}
     for _, id in ipairs(targets) do
         local node = V.nodes[id]
+        local foreign = require('codeoutline.foreign').signature(node, doc:parse().language, T:text(name_token))
         local label = node.sig
-        if REFERENCE[node.kind] and label and not seen[label] then
+        if foreign and not seen[foreign.label] then
+            foreign.activeParameter = #foreign.parameters > 0 and math.min(call.argument, #foreign.parameters - 1) or nil
+            signatures[#signatures + 1] = foreign
+            seen[foreign.label] = true
+        elseif not foreign and REFERENCE[node.kind] and label and not seen[label] then
             local sig_doc = documents.new(uri_of(V, V.node_file[id]), label, 0)
             local S = sig_doc:tokens()
             local opening
@@ -936,7 +941,9 @@ function handlers.lsp_hover(req)
     for k, id in ipairs(targets) do
         if k > M.MAX_HOVER then break end
         local node, rec = V.nodes[id], V.files[V.node_file[id]]
-        parts[#parts + 1] = '```' .. (rec.language or '') .. '\n' .. (node.sig or node.qualified) .. '\n```'
+        local foreign = require('codeoutline.foreign').signature(node, doc:parse().language, doc.source:sub(c.first + 1, c.last))
+        parts[#parts + 1] = '```' .. (foreign and doc:parse().language or rec.language or '') .. '\n'
+            .. (foreign and foreign.label or node.sig or node.qualified) .. '\n```'
         parts[#parts + 1] = node.kind .. ' `' .. node.qualified .. '` — ' .. rec.path .. ':' .. node.line
     end
     return { contents = { kind = 'markdown', value = table.concat(parts, '\n\n') }, range = doc:range(c.first, c.last) }

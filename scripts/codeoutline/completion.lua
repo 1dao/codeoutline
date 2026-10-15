@@ -609,12 +609,19 @@ function Completion:assigned(name)
 end
 
 -- Top-level members of module files.
-function Completion:module_members(files)
+function Completion:module_members(files, module_name)
     local out = {}
     for _, g in ipairs(files) do
         if self:expired() then break end
         local rec = self.V.files[g]
         local language = rec.language
+        local native = rec.foreign_exports and rec.foreign_exports[self.language]
+        if native then
+            for name, n in pairs(native[module_name] or {}) do
+                local node = rec.nodes[n]
+                out[#out + 1] = { name = name, kind = node.kind, node = node, file = g }
+            end
+        end
         local exported
         local lua_contract = language == 'lua' and rec.lua_exports and next(rec.lua_exports) ~= nil
         if language == 'lua' then
@@ -646,7 +653,7 @@ function Completion:module_members(files)
             if exported then
                 local member = node.qualified:match('^' .. exported:gsub('%p', '%%%0') .. '[%.:]([%w_]+)$')
                 if member then out[#out + 1] = { name = member, kind = node.kind, node = node, file = g } end
-            elseif language ~= 'lua' and not node.parent and not node.qualified:find('[%.:]')
+            elseif not native and language ~= 'lua' and not node.parent and not node.qualified:find('[%.:]')
                 and (language ~= 'go' or node.name:match('^%u')) then
                 out[#out + 1] = { name = node.name, kind = node.kind, node = node, file = g }
             end
@@ -765,7 +772,7 @@ function Completion:receiver(item, depth)
     local entry = find_local(self:locals(), name)
     if entry then
         if entry.module then
-            return { modules = import_files(self.V, self.f, { kind = entry.module_kind or 'require', path = entry.module }) }
+            return { modules = import_files(self.V, self.f, { kind = entry.module_kind or 'require', path = entry.module }), module_name = entry.module }
         elseif entry.type then
             local ids = self:types(entry.type)
             if #ids > 0 then return { types = ids } end
@@ -779,7 +786,11 @@ function Completion:receiver(item, depth)
     local alias = self.aliases[name]
     if alias then
         local files = import_files(self.V, self.f, alias)
-        if #files > 0 then return { modules = files } end
+        if #files > 0 then return { modules = files, module_name = alias.path } end
+    end
+    if self.language == 'lua' and not entry then
+        local files = require('codeoutline.lua_bindings').native_modules(self.V, name, self.V.js_context.lua)
+        if #files > 0 then return { modules = files, module_name = name } end
     end
     local ids = self:types(name)
     if #ids > 0 then return { types = ids, static = true } end
@@ -791,7 +802,7 @@ end
 
 function Completion:entries(target)
     if not target then return {} end
-    if target.modules then return self:module_members(target.modules) end
+    if target.modules then return self:module_members(target.modules, target.module_name) end
     if target.owner then
         local out = target.local_only and {} or self:owned(target.owner, graph.family(self.language))
         for _, entry in ipairs(self:assigned(target.owner)) do out[#out + 1] = entry end
@@ -847,8 +858,9 @@ end
 
 local function item_for(entry, language)
     local node = entry.node
+    local foreign = node and require('codeoutline.foreign').signature(node, language, entry.name)
     return { label = entry.name, kind = ITEM[entry.kind] or 6,
-        detail = node and (node.sig or (node.type and (node.type .. ' ' .. entry.name))) or entry.detail }
+        detail = foreign and foreign.label or (node and (node.sig or (node.type and (node.type .. ' ' .. entry.name))) or entry.detail) }
 end
 
 -- Completion items at the cursor of req.uri.

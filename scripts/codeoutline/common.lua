@@ -132,6 +132,9 @@ end
 
 -- Drop parser-internal fields so the result is plain data.
 function M.finish(r, T)
+    if T and (r.language == 'c' or r.language == 'cpp') then
+        require('codeoutline.foreign').collect(r, T)
+    end
     M.assign_refs(r)
     -- Query-only parse: preserve normal declaration/call attribution, but do
     -- not build binding evidence or compact records that will be discarded.

@@ -287,6 +287,7 @@ function M.modules(G, imp, ctx)
     if ctx.modules[key] then return ctx.modules[key] end
     local result = {}
     if imp.kind == 'require' then
+        for _, f in ipairs(M.native_modules(G, imp.path, ctx)) do result[#result + 1] = f end
         local sub = imp.path:gsub('%.', '/')
         for _, want in ipairs({ sub .. '.lua', sub .. '/init.lua' }) do
             local candidates = {}
@@ -324,8 +325,20 @@ function M.modules(G, imp, ctx)
     ctx.modules[key] = result
     return result
 end
-function M.resolve(G, f, name, hint, ctx)
-    if G.files[f].language ~= 'lua' or not hint or hint == '' then return nil end
+function M.native_modules(G, name, ctx)
+    return require('codeoutline.foreign').modules(G, 'lua', name, ctx)
+end
+
+function M.resolve(G, f, name, hint, ctx, recv)
+    if G.files[f].language ~= 'lua' then return nil end
+    if not hint or hint == '' then
+        local result = {}
+        for _, target in ipairs(M.native_modules(G, recv, ctx)) do
+            local n = require('codeoutline.foreign').exports(G.files[target], 'lua', recv)[name]
+            if n then result[#result + 1] = G.id_of[target][n] end
+        end
+        return #result > 0 and result or nil
+    end
     if hint == '?' then return {} end
     local local_index = tonumber(hint:match('^lua%-local:(%d+)$'))
     if local_index then
@@ -337,7 +350,9 @@ function M.resolve(G, f, name, hint, ctx)
     if not imp then return nil end
     local result = {}
     for _, target in ipairs(M.modules(G, imp, ctx)) do
-        local n = (G.files[target].lua_exports or {})[name]
+        local rec = G.files[target]
+        local exports = require('codeoutline.foreign').exports(rec, 'lua', imp.path) or rec.lua_exports
+        local n = (exports or {})[name]
         if n then result[#result + 1] = G.id_of[target][n] end
     end
     return result

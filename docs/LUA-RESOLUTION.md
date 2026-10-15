@@ -55,3 +55,29 @@ Bindings participate in explore, reverse callers and LSP call-site navigation.
 Metadata survives disk cache reload, source updates replace old bindings, and
 LSP resolution uses unsaved module overlays. Tests exercise the server API;
 they do not verify a running editor's UI.
+
+## Global export tables
+
+A project can publish a local function under a global alias:
+
+```lua
+local function get_design_list(player) end
+g_exports.phantom_system_get_phantom_design_list = get_design_list
+```
+
+Configure the table names in the workspace root's `.codeoutline.json`:
+
+```json
+{ "luaGlobalExportTables": ["g_exports", "custom_exports"] }
+```
+
+The default is `["g_exports"]`. An explicit list replaces the default;
+`[]` disables global export aliases. Entries must be simple Lua identifiers.
+Dot keys and literal string keys (such as `g_exports['get_list'] = impl`) are
+supported for assignments of a named function. Locally defined export tables
+are excluded, and function-call results are not treated as function aliases.
+
+Aliases use the existing name index for definitions, references and callers.
+Configuration is reread on the next query/request, including unsaved documents.
+Changing the list rebuilds symbol tables from cached records without reparsing
+unchanged source files. It does not execute the export table's runtime behavior.

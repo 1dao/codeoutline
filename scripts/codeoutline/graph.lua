@@ -324,7 +324,7 @@ local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired, accept,
     -- score() rejects an unknown-receiver member call to an unrelated file;
     -- checking placement first skips most candidates of common method names.
     local local_only = kind == 'member_call' and not self_call
-    local n, has_def = 0, false
+    local n, has_def, has_name = 0, false, false
     for i = 1, math.min(#cands, M.MAX_CANDIDATES) do
         local cid = cands[i]
         local node = G.nodes[cid]
@@ -335,15 +335,16 @@ local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired, accept,
                 n = n + 1
                 scored_ids[n], scored_vals[n] = cid, s
                 if not is_decl(node) then has_def = true end
+                if node.name == name then has_name = true end
             end
         end
     end
-    -- Prefer definitions: drop prototypes / in-class declarations when a
-    -- reachable definition exists.
+    -- Prefer real names over export aliases (which may be platform stubs),
+    -- then definitions over prototypes / in-class declarations.
     local best, ties, tie_count = nil, {}, 0
     for i = 1, n do
         local cid, s = scored_ids[i], scored_vals[i]
-        if not (has_def and is_decl(G.nodes[cid])) then
+        if not (has_def and is_decl(G.nodes[cid])) and (not has_name or G.nodes[cid].name == name) then
             if not best or s > best then
                 best, ties, tie_count = s, { cid }, 1
             elseif s == best then
@@ -405,6 +406,7 @@ end
 function M.new()
     return { files = {}, file_index = {}, file_order = {}, file_dir = {}, dir_ids = {}, nodes = {}, node_file = {},
         id_of = {}, by_name = {}, by_lname = {}, by_qualified = {}, by_owner = {}, by_base = {}, by_stem = {}, pkg_files = {},
+        lua_global_export_tables = { 'g_exports' },
         children = {}, dir_files = {}, dir_by_base = {}, ns_files = {},
         next_file = 0, next_node = 0, next_dir = 0, file_count = 0, node_count = 0 }
 end
@@ -456,6 +458,7 @@ function M.add_file(G, rel, rec)
         G.nodes[id], G.node_file[id] = node, f
         ids[n] = id
         insert(G, G.by_name, node.name, id, node_before)
+        for _, alias in ipairs(lua_bindings.aliases(node, G.lua_global_export_tables)) do insert(G, G.by_name, alias, id, node_before) end
         insert(G, G.by_lname, node.name:lower(), id, node_before)
         insert(G, G.by_qualified, node.qualified, id, node_before)
         local owner = M.owner(node.qualified)
@@ -473,6 +476,7 @@ function M.remove_file(G, rel)
     for _, id in ipairs(ids) do
         local node = G.nodes[id]
         remove(G, G.by_name, node.name, id, node_before)
+        for _, alias in ipairs(lua_bindings.aliases(node, G.lua_global_export_tables)) do remove(G, G.by_name, alias, id, node_before) end
         remove(G, G.by_lname, node.name:lower(), id, node_before)
         remove(G, G.by_qualified, node.qualified, id, node_before)
         local owner = M.owner(node.qualified)
@@ -495,9 +499,10 @@ end
 
 -- Symbol tables for every record of idx. Checkpoints per file: a cancelled
 -- build is simply discarded.
-function M.build(idx)
+function M.build(idx, lua_context)
     local G = M.new()
     G.root = idx.root
+    G.lua_global_export_tables = (lua_context or lua_bindings.context(G)).global_export_tables
     local paths = {}
     for rel in pairs(idx.files) do paths[#paths + 1] = rel end
     table.sort(paths)
@@ -590,6 +595,7 @@ function M.query(symbols, opts)
         for _, id in ipairs(ids) do
             if rawget(self.inn, id) == nil then
                 wanted[id], names[symbols.nodes[id].name], found = true, true, true
+                for _, alias in ipairs(lua_bindings.aliases(symbols.nodes[id], symbols.lua_global_export_tables)) do names[alias] = true end
             end
         end
         if not found then return end

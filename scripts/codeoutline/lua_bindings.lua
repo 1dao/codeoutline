@@ -109,11 +109,41 @@ function M.collect(r, T, bm)
         end
     end
 
-    local function alias(key, target)
+    local function alias(into, key, target)
         for index, n in ipairs(r.nodes) do
             if not n.parent and n.name == target and n.qualified == target and (n.kind == 'function' or n.kind == 'method') then
-                r.lua_exports[key] = index
+                into[key] = index
             end
+        end
+    end
+    -- A global alias is a statement of its own: the right-hand side is a bare
+    -- identifier and nothing but a separator follows it on that line. The key
+    -- is dotted (`g_exports.name`) or a literal (`g_exports['name']`).
+    local globals = {}
+    for i = 1, T.n - 4 do
+        if i % 4096 == 0 then control.check() end
+        local owner = T:text(i)
+        if T.k[i] == 'id' and not bindings[owner] and T:text(i - 1) ~= '.' and T:text(i - 1) ~= ':' then
+            local key, eq
+            if T:text(i + 1) == '.' and T.k[i + 2] == 'id' then key, eq = T:text(i + 2), i + 3
+            elseif T:text(i + 1) == '[' and T.m[i + 1] == i + 3 and T.k[i + 2] == 'str' then key, eq = literal(T, i + 2), i + 4 end
+            local target = key and T:text(eq) == '=' and T.k[eq + 1] == 'id' and T:text(eq + 1)
+            if key and T:text(eq) == '=' then
+                globals[owner] = globals[owner] or {}
+                globals[owner][key] = nil
+            end
+            if target and target ~= key and (T.l[eq + 2] ~= T.l[eq + 1] or T:text(eq + 2) == ';') then
+                alias(globals[owner], key, target)
+            end
+        end
+    end
+    -- Keep candidates independent of project configuration, including in caches.
+    for owner, exports in pairs(globals) do
+        for name, index in pairs(exports) do
+            local node = r.nodes[index]
+            node.lua_aliases = node.lua_aliases or {}
+            node.lua_aliases[owner] = node.lua_aliases[owner] or {}
+            node.lua_aliases[owner][#node.lua_aliases[owner] + 1] = name
         end
     end
     -- A single unconditional top-level return is the supported module contract.
@@ -156,7 +186,7 @@ function M.collect(r, T, bm)
             if scopes[i] == 0 and T.k[i] == 'id' and T:text(i) == EXPORT_OWNER and T:text(i + 1) == '.' and T.k[i + 2] == 'id'
                 and T:text(i + 3) == '=' and T:text(i + 4) ~= 'function' then
                 r.lua_exports[T:text(i + 2)] = nil
-                if T.k[i + 4] == 'id' and (T.l[i + 5] ~= T.l[i + 4] or T:text(i + 5) == ';') then alias(T:text(i + 2), T:text(i + 4)) end
+                if T.k[i + 4] == 'id' and (T.l[i + 5] ~= T.l[i + 4] or T:text(i + 5) == ';') then alias(r.lua_exports, T:text(i + 2), T:text(i + 4)) end
             end
         end
         return
@@ -186,7 +216,7 @@ function M.collect(r, T, bm)
         local i, close = table_start + 1, T.m[table_start]
         while i < close do
             if T.k[i] == 'id' and T:text(i + 1) == '=' and T.k[i + 2] == 'id'
-                and (T:text(i + 3) == ',' or T:text(i + 3) == ';' or i + 3 == close) then alias(T:text(i), T:text(i + 2)) end
+                and (T:text(i + 3) == ',' or T:text(i + 3) == ';' or i + 3 == close) then alias(r.lua_exports, T:text(i), T:text(i + 2)) end
             if T.m[i] and T.m[i] > i then i = T.m[i]
             elseif bm[i] and bm[i] > i then i = bm[i] end
             i = i + 1
@@ -196,7 +226,7 @@ function M.collect(r, T, bm)
         if scopes[i] == 0 and T:text(i) == owner and T:text(i + 1) == '.' and T.k[i + 2] == 'id'
             and T:text(i + 3) == '=' and T:text(i + 4) ~= 'function' then
             r.lua_exports[T:text(i + 2)] = nil
-            if T.k[i + 4] == 'id' and (T.l[i + 5] ~= T.l[i + 4] or T:text(i + 5) == ';') then alias(T:text(i + 2), T:text(i + 4)) end
+            if T.k[i + 4] == 'id' and (T.l[i + 5] ~= T.l[i + 4] or T:text(i + 5) == ';') then alias(r.lua_exports, T:text(i + 2), T:text(i + 4)) end
         end
     end
 end
@@ -210,13 +240,26 @@ local function normalize(p)
     return table.concat(parts, '/')
 end
 function M.context(G)
-    local ctx = { directory = '', modules = {} }
+    local ctx = { directory = '', modules = {}, global_export_tables = { 'g_exports' } }
     local f = G.root and io.open(G.root .. '/.codeoutline.json', 'rb')
     if f then
         local raw = f:read(65537); f:close()
         assert(#raw <= 65536, '.codeoutline.json exceeds 64 KiB')
         local ok, config = pcall(xutils.json_unpack, raw)
         assert(ok and type(config) == 'table', 'invalid .codeoutline.json')
+        local owners = config.luaGlobalExportTables
+        if owners ~= nil then
+            assert(type(owners) == 'table', 'luaGlobalExportTables must be an array of Lua identifiers')
+            local seen, names = {}, {}
+            for key, name in pairs(owners) do
+                assert(type(key) == 'number' and key >= 1 and key <= #owners and key % 1 == 0
+                    and type(name) == 'string' and name:match('^[%a_][%w_]*$'),
+                    'luaGlobalExportTables must be an array of Lua identifiers')
+                if not seen[name] then names[#names + 1], seen[name] = name, true end
+            end
+            table.sort(names)
+            ctx.global_export_tables = names
+        end
         local value = config.luaRuntimeDirectory
         if value ~= nil then
             assert(type(value) == 'string' and not value:match('^[/\\]') and not value:find(':', 1, true), 'luaRuntimeDirectory must be project-relative')
@@ -225,6 +268,18 @@ function M.context(G)
         end
     end
     return ctx
+end
+-- Project-selected aliases share the normal name index and overlay path.
+local EMPTY = {}
+function M.aliases(node, owners)
+    if not node.lua_aliases then return EMPTY end
+    local names, seen = {}, {}
+    for _, owner in ipairs(owners) do
+        for _, name in ipairs((node.lua_aliases or {})[owner] or {}) do
+            if not seen[name] then names[#names + 1], seen[name] = name, true end
+        end
+    end
+    return names
 end
 function M.modules(G, imp, ctx)
     ctx = ctx or M.context(G)

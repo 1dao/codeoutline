@@ -610,6 +610,63 @@ spec.describe('LSP navigation', function()
         spec.equal(#found, 1); spec.equal(found[1].range.start.line, 2)
         navigation.close('lua-module')
     end)
+    spec.it('resolves g_exports aliases as bare globals', function()
+        local module = 'do\n\tlocal function design_list(player) return player end\n'
+            .. '\tg_exports.phantom_get_design_list = design_list\n'
+            .. '\tg_exports.phantom_called = design_list()\nend\n'
+        nav_write('PhantomModule.lua', module)
+        local source = 'function use_globals(player)\n\treturn phantom_get_design_list(player) + phantom_called(player)\nend\n'
+        nav_write('PhantomClient.lua', source)
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local doc = docs.read(nav_root .. '/PhantomClient.lua')
+        local function definition(text)
+            return nav({ method = 'lsp_definition', uri = doc.uri,
+                position = doc:position(assert(source:find(text, 1, true)) - 1) })
+        end
+        local found = definition('phantom_get_design_list(')
+        spec.equal(#found, 1); spec.equal(found[1].uri, nav_uri('PhantomModule.lua'))
+        spec.equal(range_text('PhantomModule.lua', found[1].range), 'design_list')
+        spec.equal(#definition('phantom_called('), 0)
+        local mdoc = docs.read(nav_root .. '/PhantomModule.lua')
+        local uses = nav({ method = 'lsp_references', uri = nav_uri('PhantomModule.lua'), includeDeclaration = false,
+            position = mdoc:position(assert(module:find('design_list', 1, true)) - 1) })
+        spec.equal(#uses, 2); spec.equal(range_text('PhantomClient.lua', uses[1].range), 'phantom_get_design_list')
+        spec.equal(uses[2].uri, nav_uri('PhantomModule.lua'))
+        spec.equal(range_text('PhantomModule.lua', uses[2].range), 'design_list')
+        local uri = nav_uri('PhantomModule.lua')
+        navigation.sync({ session = 'global-draft', open = { [uri] = 1 }, changed = {
+            [uri] = { version = 1, language = 'lua', source = module:gsub('phantom_get_design_list', 'renamed_global') } } })
+        local missing = nav({ method = 'lsp_definition', session = 'global-draft', uri = doc.uri,
+            position = doc:position(assert(source:find('phantom_get_design_list', 1, true)) - 1) })
+        spec.equal(#missing, 0)
+        navigation.sync({ session = 'global-draft', open = { [uri] = 2 }, changed = {
+            [uri] = { version = 2, language = 'lua', source = '\n' .. module } } })
+        local moved = nav({ method = 'lsp_definition', session = 'global-draft', uri = doc.uri,
+            position = doc:position(assert(source:find('phantom_get_design_list', 1, true)) - 1) })
+        spec.equal(#moved, 1); spec.equal(moved[1].range.start.line, 2)
+        navigation.close('global-draft')
+    end)
+    spec.it('reloads configured global export tables for disk and unsaved definitions', function()
+        local module = 'local function configured_impl() end\ncustom_exports.configured_global = configured_impl\n'
+        nav_write('ConfiguredExports.lua', module)
+        nav_write('ConfiguredClient.lua', 'configured_global()\n')
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local req = { method = 'lsp_definition', uri = nav_uri('ConfiguredClient.lua'), position = { line = 0, character = 2 } }
+        spec.equal(#nav(req), 0)
+        nav_write('.codeoutline.json', '{"luaGlobalExportTables":["custom_exports"]}')
+        local found = nav(req)
+        spec.equal(#found, 1); spec.equal(found[1].uri, nav_uri('ConfiguredExports.lua'))
+        local uri = nav_uri('ConfiguredExports.lua')
+        navigation.sync({ session = 'configured-global', open = { [uri] = 1 }, changed = {
+            [uri] = { version = 1, language = 'lua', source = '\n' .. module } } })
+        req.session = 'configured-global'
+        found = nav(req)
+        spec.equal(#found, 1); spec.equal(found[1].range.start.line, 1)
+        nav_write('.codeoutline.json', '{"luaGlobalExportTables":[]}')
+        spec.equal(#nav(req), 0)
+        navigation.close('configured-global')
+        os.remove(nav_root .. '/.codeoutline.json')
+    end)
     spec.it('uses configurable literal argument rules and ignores unrelated strings and comments', function()
         local config = nav_root .. '/.codeoutline.json'
         nav_write('messages.lua', "xthread.post(nested(1, 2), 'xmysql_business_done', false)\n")

@@ -1357,6 +1357,78 @@ return M
         })
         spec.equal(edges_from(shadowed, 'run'), 'save@deep.lua')
     end)
+    spec.it('publishes g_exports aliases as bare global names', function()
+        local G = build({
+            ['modules/phantom.lua'] = 'do\n\tlocal function design_list(p) return p end\n'
+                .. '\tg_exports.phantom_get_design_list = design_list\n'
+                .. '\tg_exports.phantom_called = design_list()\n'
+                .. '\t__exports.phantom_module_only = design_list\nend\n',
+            ['client.lua'] = 'function use(p) return phantom_get_design_list(p) + phantom_called(p)'
+                .. ' + phantom_module_only(p) end\n',
+        })
+        spec.equal(edges_from(G, 'use'), 'design_list@modules/phantom.lua')
+        spec.equal(#G.by_name.phantom_get_design_list, 1)
+        spec.equal(G.by_name.phantom_called, nil)
+        spec.equal(G.by_name.phantom_module_only, nil)
+        local shadow = build({
+            ['stub.lua'] = 'local function empty_func() end\ng_exports.app_on_windows = empty_func\n',
+            ['real.lua'] = 'function app_on_windows() end\n',
+            ['main.lua'] = 'function run() app_on_windows() end\n',
+        })
+        spec.equal(edges_from(shadow, 'run'), 'app_on_windows@real.lua')
+        local literal_key = build({
+            ['server/redis.lua'] = "local function sync_call() end\ng_exports['__game_redis_call'] = sync_call\n",
+            ['server/task.lua'] = 'function query() return __game_redis_call() end\n',
+        })
+        spec.equal(edges_from(literal_key, 'query'), 'sync_call@server/redis.lua')
+    end)
+    spec.it('drops overwritten global aliases and removes them with their file', function()
+        local G = build({
+            ['exports.lua'] = 'local function impl() end\ng_exports.kept = impl\n'
+                .. 'g_exports.removed = impl\ng_exports.removed = nil\n',
+            ['private.lua'] = 'local g_exports = {}\nlocal function impl() end\ng_exports.private_alias = impl\n',
+        })
+        spec.equal(#G.by_name.kept, 1)
+        spec.equal(G.by_name.removed, nil)
+        spec.equal(G.by_name.private_alias, nil)
+        graph.remove_file(G, 'exports.lua')
+        spec.equal(G.by_name.kept, nil)
+        graph.add_file(G, 'exports.lua', ci.parse('exports.lua', 'local function impl() end\ng_exports.replaced = impl\n'))
+        spec.equal(#G.by_name.replaced, 1)
+        spec.equal(G.by_name.kept, nil)
+    end)
+    spec.it('configures global export tables across cached and resident indexes', function()
+        local root = tmp_root .. '/global_export_config'
+        write(root .. '/exports.lua', 'local function impl() end\ncustom_exports.custom_export = impl\n'
+            .. 'g_exports.default_export = impl\nother_exports.custom_export = impl\n')
+        write(root .. '/main.lua', 'function run() custom_export() end\n')
+        local options = { cache_path = root .. '/cache.bin', lister = 'walk' }
+        local idx, G = svc.get(root, options)
+        spec.equal(G.by_name.custom_export, nil)
+        spec.equal(#G.by_name.default_export, 1)
+        assert(idx:save()); svc.forget(root)
+        write(root .. '/.codeoutline.json', '{"luaGlobalExportTables":["custom_exports","other_exports","custom_exports"]}')
+        idx, G = svc.get(root, options)
+        spec.equal(idx.cache_loaded, true)
+        spec.equal(#G.by_name.custom_export, 1)
+        spec.equal(G.by_name.default_export, nil)
+        spec.equal(edges_from(G, 'run'), 'impl@exports.lua')
+        write(root .. '/.codeoutline.json', '{"luaGlobalExportTables":[]}')
+        G = idx:symbols()
+        spec.equal(G.by_name.custom_export, nil)
+        spec.equal(G.by_name.default_export, nil)
+        for _, value in ipairs({ '"g_exports"', '[1]', '["g.exports"]', '{"bad":"g_exports"}' }) do
+            write(root .. '/.codeoutline.json', '{"luaGlobalExportTables":' .. value .. '}')
+            local ok, err = pcall(function() idx:symbols() end)
+            spec.equal(ok, false)
+            spec.truthy(tostring(err):find('luaGlobalExportTables', 1, true))
+        end
+        os.remove(root .. '/.codeoutline.json')
+        G = idx:symbols()
+        spec.equal(#G.by_name.default_export, 1)
+        spec.equal(G.by_name.custom_export, nil)
+        svc.forget(root)
+    end)
     spec.it('does not retain members from a replaced table or overwritten export', function()
         local G = build({
             ['a.lua'] = 'local M = {}\nfunction M.save() end\nM = {}\nreturn M',

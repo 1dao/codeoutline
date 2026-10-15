@@ -109,6 +109,10 @@ local function view(session, root)
             local list = added[node.name]
             if not list then list = {}; added[node.name] = list end
             list[#list + 1] = id
+            for _, alias in ipairs(require('codeoutline.lua_bindings').aliases(node, V.lua_global_export_tables)) do
+                added[alias] = added[alias] or {}
+                added[alias][#added[alias] + 1] = id
+            end
         end
         return f
     end
@@ -408,6 +412,10 @@ end
 -- Hot names can match thousands of files; past the budget the scan stops.
 local function scan(V, targets, name)
     local hits, deadline = {}, os.clock() + M.SCAN_SECONDS
+    local wanted = { [name] = true }
+    for id in pairs(targets) do
+        for _, alias in ipairs(require('codeoutline.lua_bindings').aliases(V.nodes[id], V.lua_global_export_tables)) do wanted[alias] = true end
+    end
     local files = {}
     for i, f in ipairs(V.file_order) do files[i] = f end
     for _, f in ipairs(V.new_files) do files[#files + 1] = f end
@@ -424,7 +432,7 @@ local function scan(V, targets, name)
         end
         for i = 1, #names do
             if i % 4096 == 0 then control.check() end
-            if names[i] == name or aliases[names[i]] or aliases[refs.recv[i]] or (refs.lua_binding and refs.lua_binding[i] ~= '') then
+            if wanted[names[i]] or aliases[names[i]] or aliases[refs.recv[i]] or (refs.lua_binding and refs.lua_binding[i] ~= '') then
                 if os.clock() > deadline then return hits, true end
                 for _, dst in ipairs(resolve_site(V, f, refs.from[i], names[i], refs.kind[i], refs.recv[i], refs.lua_binding and refs.lua_binding[i] or refs.js_receiver and refs.js_receiver[i])) do
                     if targets[dst] then hits[#hits + 1] = { f, i }; break end

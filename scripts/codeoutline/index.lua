@@ -229,7 +229,11 @@ end
 -- Symbol tables over the records, built on first use and then kept current
 -- by commit(). Hosts that never resolve names do not pay for them.
 function Index:symbols()
-    if not self.symbol_tables then self.symbol_tables = graph.build(self) end
+    local ctx = require('codeoutline.lua_bindings').context(self)
+    if not self.symbol_tables or table.concat(self.symbol_tables.lua_global_export_tables, '\0')
+        ~= table.concat(ctx.global_export_tables, '\0') then
+        self.symbol_tables = graph.build(self, ctx)
+    end
     return self.symbol_tables
 end
 

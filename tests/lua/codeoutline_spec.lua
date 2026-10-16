@@ -81,6 +81,50 @@ int luaopen_old(lua_State *L) { luaL_register(L, "old", one); return 1; }
         spec.nil_value(exports.tokenize)
         spec.nil_value(exports.text)
     end)
+    spec.it('rejects discarded and conflicting native constructor results', function()
+        local rec = ci.parse('constructors.c', [[
+static int push_a(lua_State *L) { lua_newuserdata(L, 8); luaL_setmetatable(L, "a"); return 1; }
+static int push_b(lua_State *L) { lua_newuserdata(L, 8); luaL_setmetatable(L, "b"); return 1; }
+static int discarded(lua_State *L) { push_a(L); lua_pop(L, 1); return 0; }
+static int popped(lua_State *L) { push_a(L); lua_pop(L, 1); return 1; }
+static int conditional(lua_State *L) { if (flag) { push_a(L); } return 1; }
+static int called(lua_State *L) { push_a(L); lua_call(L, 0, 0); return 1; }
+static int changed(lua_State *L) { push_a(L); lua_pushinteger(L, 2); return 1; }
+static int conflict(lua_State *L) { if (flag) return push_a(L); return push_b(L); }
+static int mixed(lua_State *L) { if (flag) return 0; return push_a(L); }
+static int consistent(lua_State *L) { if (flag) return push_a(L); return push_a(L); }
+static int wrapper(lua_State *L) { return push_a(L); }
+static const luaL_Reg funcs[] = {
+ {"discarded", discarded}, {"popped", popped}, {"changed", changed},
+ {"conditional", conditional}, {"called", called}, {"conflict", conflict}, {"mixed", mixed}, {"consistent", consistent}, {"wrapper", wrapper}, {NULL, NULL}};
+int luaopen_test(lua_State *L) { luaL_newlib(L, funcs); return 1; }
+]])
+        local foreign = require('codeoutline.foreign')
+        for _, name in ipairs({ 'discarded', 'popped', 'changed', 'conflict', 'mixed', 'conditional', 'called' }) do
+            spec.nil_value(foreign.returns(rec.nodes[rec.foreign_exports.lua.test[name]], 'lua'), name)
+        end
+        for _, name in ipairs({ 'consistent', 'wrapper' }) do
+            spec.equal(foreign.returns(rec.nodes[rec.foreign_exports.lua.test[name]], 'lua'), 'a', name)
+        end
+    end)
+    spec.it('types native objects by the metatable the implementation returns', function()
+        local f = assert(io.open('xnet2lua/xlua/lua_xrecord.c', 'rb'))
+        local source = f:read('a'); f:close()
+        local rec = ci.parse('lua_xrecord.c', source, { ranges = false })
+        local foreign = require('codeoutline.foreign')
+        local handle = assert(rec.foreign_exports.lua['xrecord.handle'])
+        local schema = assert(rec.foreign_exports.lua['xrecord.schema'])
+        spec.truthy(handle.get)
+        spec.truthy(schema.new)
+        spec.nil_value(rec.foreign_exports.lua.xrecord.get)
+        -- A method's self is implicit for the guest, and the pool a schema
+        -- creates is named by the metatable the C helper puts on the stack.
+        spec.equal(foreign.signature(rec.nodes[schema.new], 'lua', 'new').label, 'new(capacity:int) -> xrecord.handle')
+        spec.equal(foreign.signature(rec.nodes[handle.set], 'lua', 'set').label, 'set(id:int, field:string, arg3:unknown)')
+        spec.equal(foreign.returns(rec.nodes[rec.foreign_exports.lua.xrecord.schema], 'lua'), 'xrecord.schema')
+        spec.equal(foreign.returns(rec.nodes[rec.foreign_exports.lua.xrecord.create], 'lua'), 'xrecord.handle')
+        spec.nil_value(foreign.returns(rec.nodes[handle.get], 'lua'))
+    end)
 end)
 
 spec.describe('xscan', function()
@@ -1486,6 +1530,26 @@ return M
         spec.equal(#G.by_name.default_export, 1)
         spec.equal(G.by_name.custom_export, nil)
         svc.forget(root)
+    end)
+    spec.it('binds a quoted loader path that lives deeper than the workspace root', function()
+        local G = build({
+            ['vendor/lib/a.lua'] = 'local M = {}\nfunction M.save() end\nreturn M\n',
+            ['app/main.lua'] = "local a = dofile('lib/a.lua')\nfunction run() a.save() end",
+        })
+        spec.equal(edges_from(G, 'run'), 'save@vendor/lib/a.lua')
+        local missing = build({
+            ['vendor/other/a.lua'] = 'local M = {}\nfunction M.save() end\nreturn M\n',
+            ['app/main.lua'] = "local a = dofile('lib/a.lua')\nfunction run() a.save() end",
+        })
+        spec.equal(edges_from(missing, 'run'), '')
+    end)
+    spec.it('prefers exact loader paths before suffix candidates', function()
+        local G = build({
+            ['lib/a.lua'] = 'local M = {}\nfunction M.save() end\nreturn M',
+            ['vendor/lib/a.lua'] = 'local M = {}\nfunction M.save() end\nreturn M',
+            ['app.lua'] = "local a = dofile('lib/a.lua')\nfunction run() a.save() end",
+        })
+        spec.equal(edges_from(G, 'run'), 'save@lib/a.lua')
     end)
     spec.it('does not retain members from a replaced table or overwritten export', function()
         local G = build({

@@ -54,7 +54,14 @@ function M.signature(node, language, name)
         labels[#labels + 1] = '...:unknown'
         parameters[#parameters + 1] = { label = '...:unknown' }
     end
-    return { label = (name or node.name) .. '(' .. table.concat(labels, ', ') .. ')', parameters = parameters }
+    return { label = (name or node.name) .. '(' .. table.concat(labels, ', ') .. ')'
+        .. (contract.returns and ' -> ' .. contract.returns or ''), parameters = parameters }
+end
+
+-- Guest-facing result type: the native metatable the implementation returns.
+function M.returns(node, language)
+    local contract = node.foreign_signatures and node.foreign_signatures[language]
+    return contract and contract.returns or nil
 end
 
 return M

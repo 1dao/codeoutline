@@ -32,7 +32,10 @@ program's working directory in project-root `.codeoutline.json` when needed:
 
 The directory must be project-relative and stay within the project. Configuration
 is reread for each query/request. Absolute paths and files outside the indexed
-project are not resolved. `require` retains the index's suffix lookup for
+project are not resolved. If the exact runtime-relative path is absent, quoted loader
+paths also match indexed Lua files by their complete path suffix, allowing a
+workspace opened above the runtime directory. Exact matches take precedence;
+multiple suffix matches remain candidates rather than choosing arbitrarily. `require` retains the index's suffix lookup for
 `pkg/lib.lua` and `pkg/lib/init.lua`, including source-root prefixes. Multiple
 matching module files remain candidates; runtime `package.path` ordering,
 `package.preload`, custom searchers and C modules are not simulated.
@@ -45,7 +48,7 @@ return value is outside this batch.
 Known dynamic paths, missing exports, parameter/local shadowing and simple
 reassignment suppress unrelated name guesses. Conditional or multiple top-level
 returns are not treated as a definite module contract. Resolution does not
-evaluate source, follow metatables, infer dynamic exports, propagate arbitrary
+evaluate source, follow arbitrary Lua metatables, infer dynamic exports, propagate arbitrary
 variable aliases, or model control flow and mutations across function calls.
 Multiple assignment/destructuring-style bindings and chained module expressions
 are outside the supported binding forms. Missing edges do not prove that code
@@ -81,3 +84,10 @@ Aliases use the existing name index for definitions, references and callers.
 Configuration is reread on the next query/request, including unsaved documents.
 Changing the list rebuilds symbol tables from cached records without reparsing
 unchanged source files. It does not execute the export table's runtime behavior.
+
+Native Lua C bindings expose registered metatable methods to completion and
+navigation. Both use the same lexical receiver bindings and constructor chains,
+including module aliases and local/parameter shadowing. Return types are inferred
+only from recognized userdata constructor tails and file-local helpers. Discarded
+objects, conflicting normal returns and uncertain stack mutations yield unknown
+types; this is not general C control-flow or Lua stack analysis.

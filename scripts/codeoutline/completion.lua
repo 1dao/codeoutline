@@ -11,10 +11,9 @@
 -- files are reparsed on demand within a time budget; running out of it, or
 -- of items, marks the list incomplete.
 local graph = require('codeoutline.graph')
-local parse = require('codeoutline.parse')
 local navigation = require('codeoutline.navigation')
 local control = require('codeoutline.control')
-local M = { MAX_ITEMS = 500, BUDGET_SECONDS = 0.3, MAX_FILE_BYTES = 524288, MAX_DEPTH = 6, CACHE_FILES = 64 }
+local M = { MAX_ITEMS = 500, BUDGET_SECONDS = 0.3, MAX_DEPTH = 6 }
 
 local ITEM = { ['function'] = 3, method = 2, constructor = 4, destructor = 4, field = 5, variable = 6,
     property = 10, class = 7, struct = 22, union = 22, record = 22, interface = 8, enum = 13, enum_member = 20,
@@ -40,9 +39,6 @@ for word in ([[Option Box Rc Arc RefCell Cell Mutex RwLock Weak unique_ptr share
     Optional Nullable Promise Future Lazy]]):gmatch('%S+') do WRAPPERS[word] = true end
 local TYPE_AFTER = { go = true, rust = true, typescript = true, javascript = true, python = true, kotlin = true }
 local DYNAMIC = { lua = true, python = true, javascript = true, typescript = true }
-
--- Full parses of type files, keyed by the index record they correspond to.
-local cache, cache_order = setmetatable({}, { __mode = 'k' }), {}
 
 local function text_of(T, i) return T.s[i] and T:text(i) or '' end
 local function is(T, i, s) return T.k[i] == 'op' and text_of(T, i) == s end
@@ -135,31 +131,7 @@ end
 
 -- Full record and tokens of file f: the overlay document, else a cached
 -- reparse of the indexed file (nil when too large or unreadable).
-local function full(V, f)
-    local draft = V.drafts[f]
-    if draft then
-        draft.completion = draft.completion or {}
-        local entry = draft.completion
-        if not entry.rec then entry.rec, entry.tokens = parse.parse_tokens(draft.path or V.files[f].path, draft.source) end
-        return entry.rec, entry.tokens, draft
-    end
-    local key = V.files[f]
-    local entry = cache[key]
-    if entry == nil then
-        if (key.size or 0) > M.MAX_FILE_BYTES then cache[key] = false; return nil end
-        local doc = navigation.source_doc(V, f)
-        entry = false
-        if doc then
-            local rec, tokens = parse.parse_tokens(key.path, doc.source)
-            entry = rec and { rec = rec, tokens = tokens } or false
-        end
-        cache[key] = entry
-        cache_order[#cache_order + 1] = key
-        if #cache_order > M.CACHE_FILES then cache[table.remove(cache_order, 1)] = nil end
-    end
-    if not entry then return nil end
-    return entry.rec, entry.tokens
-end
+local full = navigation.full
 
 -- Parameters inside parentheses [a, b] of a function header.
 local function parameters(T, a, b, language, out)
@@ -765,6 +737,12 @@ end
 -- A receiver: { types = ids } or { modules = files }.
 function Completion:receiver(item, depth)
     local name = item.name
+    if self.language == 'lua' then
+        local target, bound = require('codeoutline.lua_bindings').receiver(
+            self.V, self.rec, self.T, name, self.offset, self.V.js_context.lua)
+        if target then return target end
+        if bound then return { owner = name, local_only = true } end
+    end
     if SELF[name] or (self.language == 'rust' and name == 'self') then
         local ids = self:self_types()
         if #ids > 0 then return { types = ids } end
@@ -817,7 +795,7 @@ function Completion:chain(chain, depth)
     local target = self:receiver(chain[1], depth)
     for k = 2, #chain do
         if not target or self:expired() then return nil end
-        local element, next_ids = chain[k], {}
+        local element, next_ids, next_files, next_module = chain[k], {}, nil, nil
         for _, entry in ipairs(self:entries(target)) do
             if entry.name == element.name then
                 local node = entry.node
@@ -830,10 +808,17 @@ function Completion:chain(chain, depth)
                     elseif type then
                         for _, id in ipairs(self:types(type, entry.file)) do next_ids[#next_ids + 1] = id end
                     end
+                    if #next_ids == 0 and element.call and self.language == 'lua' then
+                        -- A native object: the C implementation names the metatable
+                        -- it returns, which is the type the guest sees.
+                        local value = require('codeoutline.lua_bindings').return_target(self.V, node, self.V.js_context.lua)
+                        if value then next_files, next_module = value.modules, value.module_name end
+                    end
                 end
             end
         end
-        target = #next_ids > 0 and { types = next_ids } or nil
+        target = #next_ids > 0 and { types = next_ids }
+            or (next_module and { modules = next_files, module_name = next_module } or nil)
     end
     return target
 end

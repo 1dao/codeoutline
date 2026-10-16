@@ -11,8 +11,10 @@ local documents = require('codeoutline.documents')
 local paths = require('codeoutline.path')
 local control = require('codeoutline.control')
 local lsp = require('codeoutline.lsp')
+local parse = require('codeoutline.parse')
 -- Reference scans stop at a result count or time budget and report truncation.
-local M = { MAX_RESULTS = 1000, MAX_HOVER = 3, SCAN_SECONDS = 3, POSITION_SECONDS = 2, MAX_INCLUDES = 2000 }
+local M = { MAX_RESULTS = 1000, MAX_HOVER = 3, SCAN_SECONDS = 3, POSITION_SECONDS = 2, MAX_INCLUDES = 2000,
+    MAX_FILE_BYTES = 524288, CACHE_FILES = 64 }
 
 local sessions = {}
 local ANY = setmetatable({}, { __index = function() return true end })
@@ -186,7 +188,7 @@ local function recursive(node, recv)
 end
 
 -- Targets of one occurrence of name in file f, enclosed by node index from.
-local function resolve_site(V, f, from, name, kind, recv, evidence)
+local function resolve_site(V, f, from, name, kind, recv, evidence, offset)
     local src = from > 0 and V.id_of[f][from] or nil
     local direct, paired = deps(V, f)
     local rkind, accept = kind, nil
@@ -211,6 +213,23 @@ local function resolve_site(V, f, from, name, kind, recv, evidence)
     -- names the function, and going to its definition lists them all.
     if #targets == 0 and (kind == 'call' or kind == 'ref') then
         targets = graph.resolve(V, f, src, name, kind, recv or nil, direct, paired, PROTOTYPE, evidence, V.js_context) or {}
+    end
+    -- A native object: the local's initializer chain names the metatable whose
+    -- methods the C side registers (`local pool = mod.open()`, then `pool:read()`).
+    if #targets == 0 and recv and (kind == 'member_call' or kind == 'member_symbol')
+        and V.files[f].language == 'lua' then
+        local bindings = require('codeoutline.lua_bindings')
+        local ctx = V.js_context.lua
+        bindings.native_modules(V, '', ctx)
+        local rec, T
+        if offset and next(ctx.foreign.lua or {}) then rec, T = M.full(V, f) end
+        if T then
+            local target = bindings.receiver(V, rec, T, recv, offset, V.js_context.lua)
+            for _, entry in ipairs(bindings.member(V, target, name)) do
+                local id = V.id_of[entry.file] and V.id_of[entry.file][entry.index]
+                if id then targets[#targets + 1] = id end
+            end
+        end
     end
     if C_FAMILY[V.files[f].language] then
         -- C binds only what its includes make visible; a lone far definition
@@ -289,6 +308,35 @@ local function source_doc(V, f)
         V.disk[f] = doc
     end
     return doc or nil
+end
+
+-- Full parse (record plus tokens) of one file, cached per record. Shared with
+-- completion, which needs tokens for types this index does not store.
+local full_cache, full_order = setmetatable({}, { __mode = 'k' }), {}
+function M.full(V, f)
+    local draft = V.drafts[f]
+    if draft then
+        draft.full = draft.full or {}
+        local entry = draft.full
+        if not entry.rec then entry.rec, entry.tokens = parse.parse_tokens(draft.path or V.files[f].path, draft.source) end
+        return entry.rec, entry.tokens, draft
+    end
+    local key = V.files[f]
+    local entry = full_cache[key]
+    if entry == nil then
+        if (key.size or 0) > M.MAX_FILE_BYTES then full_cache[key] = false; return nil end
+        local doc = source_doc(V, f)
+        entry = false
+        if doc then
+            local rec, tokens = parse.parse_tokens(key.path, doc.source)
+            entry = rec and { rec = rec, tokens = tokens } or false
+        end
+        full_cache[key] = entry
+        full_order[#full_order + 1] = key
+        if #full_order > M.CACHE_FILES then full_cache[table.remove(full_order, 1)] = nil end
+    end
+    if not entry then return nil end
+    return entry.rec, entry.tokens
 end
 
 local function uri_of(V, f)
@@ -434,7 +482,7 @@ local function scan(V, targets, name)
             if i % 4096 == 0 then control.check() end
             if wanted[names[i]] or aliases[names[i]] or aliases[refs.recv[i]] or (refs.lua_binding and refs.lua_binding[i] ~= '') then
                 if os.clock() > deadline then return hits, true end
-                for _, dst in ipairs(resolve_site(V, f, refs.from[i], names[i], refs.kind[i], refs.recv[i], refs.lua_binding and refs.lua_binding[i] or refs.js_receiver and refs.js_receiver[i])) do
+                for _, dst in ipairs(resolve_site(V, f, refs.from[i], names[i], refs.kind[i], refs.recv[i], refs.lua_binding and refs.lua_binding[i] or refs.js_receiver and refs.js_receiver[i], refs.start and refs.start[i] or nil)) do
                     if targets[dst] then hits[#hits + 1] = { f, i }; break end
                 end
                 if #hits >= M.MAX_RESULTS then return hits, true end
@@ -807,7 +855,7 @@ local function at(req)
     local c = cursor(doc, offset)
     local targets = {}
     if c and c.decl then targets = { V.id_of[f][c.decl] }
-    elseif c then targets = resolve_site(V, f, c.from, c.name, c.kind, c.recv, c.evidence) end
+    elseif c then targets = resolve_site(V, f, c.from, c.name, c.kind, c.recv, c.evidence, c.first) end
     return V, doc, c, targets, f, offset
 end
 
@@ -1005,7 +1053,7 @@ function handlers.lsp_outgoing(req)
     for i = 1, #refs.name do
         if i % 128 == 0 then control.check() end
         if refs.from[i] == from then
-            for _, dst in ipairs(resolve_site(V, f, from, refs.name[i], refs.kind[i], refs.recv[i], refs.lua_binding and refs.lua_binding[i] or refs.js_receiver and refs.js_receiver[i])) do
+            for _, dst in ipairs(resolve_site(V, f, from, refs.name[i], refs.kind[i], refs.recv[i], refs.lua_binding and refs.lua_binding[i] or refs.js_receiver and refs.js_receiver[i], refs.start and refs.start[i] or nil)) do
                 local group = groups[dst]
                 if not group then
                     group = { to = item(V, dst), fromRanges = {} }

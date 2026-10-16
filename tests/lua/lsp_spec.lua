@@ -746,6 +746,81 @@ int luaopen_native_test(lua_State *L) { luaL_setfuncs(L, methods, 0); luaL_newli
         navigation.close('configured-global')
         os.remove(nav_root .. '/.codeoutline.json')
     end)
+    spec.it('resolves native objects through the metatable a C call returns', function()
+        nav_write('pool.c', '#define POOL_META "demo.pool"\n'
+            .. 'static int pool_read(lua_State *L) { luaL_checkinteger(L, 2); return 0; }\n'
+            .. 'static int push_pool(lua_State *L) { lua_newuserdata(L, 8); luaL_setmetatable(L, POOL_META); return 1; }\n'
+            .. 'static int pool_open(lua_State *L) { return push_pool(L); }\n'
+            .. 'static const luaL_Reg pool_methods[] = {{"read", pool_read}, {NULL, NULL}};\n'
+            .. 'static const luaL_Reg pool_funcs[] = {{"open", pool_open}, {NULL, NULL}};\n'
+            .. 'int luaopen_pool(lua_State *L) {\n'
+            .. '  luaL_newmetatable(L, POOL_META);\n  luaL_setfuncs(L, pool_methods, 0);\n  lua_pop(L, 1);\n'
+            .. '  luaL_newlib(L, pool_funcs);\n  return 1;\n}\n')
+        local source = 'local w = pool.open()\nfunction use()\n\treturn w:read(1)\nend\n'
+        nav_write('watcher.lua', source)
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local doc = docs.read(nav_root .. '/watcher.lua')
+        local at = assert(source:find('w:read(', 1, true)) - 1 + #'w:read('
+        local sig = nav({ method = 'lsp_signature', uri = doc.uri, position = doc:position(at) })
+        spec.equal(sig.signatures[1].label, 'read(arg1:int)')
+        local found = nav({ method = 'lsp_definition', uri = doc.uri, position = doc:position(at - 2) })
+        spec.equal(#found, 1); spec.equal(found[1].uri, nav_uri('pool.c'))
+        spec.equal(range_text('pool.c', found[1].range), 'pool_read')
+    end)
+    spec.it('shares native receiver bindings across completion and navigation', function()
+        local file = assert(io.open('xnet2lua/xlua/lua_xrecord.c', 'rb'))
+        nav_write('native_record.c', file:read('a')); file:close()
+        local prefix = "local xr = require('xrecord')\nlocal schema = xr.schema({})\nlocal items = schema:new(4)\n"
+        local cases = {
+            { prefix .. 'items:has(1)', true },
+            { prefix .. 'function use() return items:has(1) end', true },
+            { prefix .. 'function use(items) return items:has(1) end', false },
+            { prefix .. 'items = {}\nitems:has(1)', false },
+            { 'function other()\n' .. prefix .. 'end\nitems:has(1)', false },
+            { 'do\n' .. prefix .. 'end\nitems:has(1)', false },
+            { prefix .. 'do local items = {} end\nitems:has(1)', true },
+            { prefix .. 'local items = items\nitems:has(1)', true },
+            { "local xr = require('xrecord')\nlocal xr = {}\nlocal items = xr.create({})\nitems:has(1)", false },
+            { prefix .. 'local items = schema:new(4) or {}\nitems:has(1)', false },
+        }
+        local completion = require('codeoutline.completion')
+        for i, case in ipairs(cases) do
+            nav_write('native_case.lua', case[1])
+            service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+            local doc = docs.read(nav_root .. '/native_case.lua')
+            local offset = assert(case[1]:find('items:has', 1, true)) - 1 + #'items:'
+            local req = { method = 'lsp_definition', uri = doc.uri, position = doc:position(offset) }
+            local found = nav(req)
+            spec.equal(#found > 0, case[2], 'definition case ' .. i)
+            local has = false
+            for _, item in ipairs(completion.complete(req).items) do if item.label == 'has' then has = true end end
+            spec.equal(has, case[2], 'completion case ' .. i)
+        end
+        local uri = nav_uri('native_case.lua')
+        for version, source in ipairs({ prefix .. 'items:has(1)', prefix .. 'local items = {}\nitems:has(1)' }) do
+            navigation.sync({ session = 'native-draft', open = { [uri] = version },
+                changed = { [uri] = { version = version, language = 'lua', source = source } } })
+            local doc = docs.new(uri, source, version, 'lua')
+            local offset = assert(source:find('items:has', 1, true)) - 1 + #'items:'
+            local req = { session = 'native-draft', method = 'lsp_definition', uri = uri, position = doc:position(offset) }
+            spec.equal(#nav(req) > 0, version == 1, 'draft definition')
+            local has = false
+            for _, item in ipairs(completion.complete(req).items) do if item.label == 'has' then has = true end end
+            spec.equal(has, version == 1, 'draft completion')
+        end
+        navigation.close('native-draft')
+    end)
+    spec.it('opens a quoted Lua path that lives deeper than the workspace root', function()
+        assert(xutils.mkdir_p(nav_root .. '/deep/scripts'))
+        nav_write('deep/scripts/mod.lua', 'local M = {}\nfunction M.save() end\nreturn M\n')
+        local source = "local m = dofile('scripts/mod.lua')\nfunction use() m.save() end\n"
+        nav_write('deep/user.lua', source)
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local doc = docs.read(nav_root .. '/deep/user.lua')
+        local found = nav({ method = 'lsp_definition', uri = doc.uri,
+            position = doc:position(assert(source:find('mod.lua', 1, true))) })
+        spec.equal(#found, 1); spec.equal(found[1].uri, nav_uri('deep/scripts/mod.lua'))
+    end)
     spec.it('uses configurable literal argument rules and ignores unrelated strings and comments', function()
         local config = nav_root .. '/.codeoutline.json'
         nav_write('messages.lua', "xthread.post(nested(1, 2), 'xmysql_business_done', false)\n")
@@ -1242,6 +1317,16 @@ local comp_files = {
     ['shape_ops.cpp'] = 'class Shape;\nint Shape::perimeter() { return 0; }\nint use(Shape *s) { return s->@@; }\n',
     ['scope.c'] = 'static int counter;\nint helper(int a);\nint work(int alpha, char *beta) {\n  int gamma = 2;\n  @@\n}\n'
         .. 'int after(void) { int hidden = 1; return hidden; }\n',
+    ['pool.c'] = '#define POOL_META "demo.pool"\n'
+        .. 'static int pool_get(lua_State *L) { luaL_checkinteger(L, 2); return 0; }\n'
+        .. 'static int push_pool(lua_State *L) { lua_newuserdata(L, 8); luaL_setmetatable(L, POOL_META); return 1; }\n'
+        .. 'static int pool_open(lua_State *L) { return push_pool(L); }\n'
+        .. 'static const luaL_Reg pool_methods[] = {{"get", pool_get}, {NULL, NULL}};\n'
+        .. 'static const luaL_Reg pool_funcs[] = {{"open", pool_open}, {NULL, NULL}};\n'
+        .. 'int luaopen_pool(lua_State *L) {\n'
+        .. '  luaL_newmetatable(L, POOL_META);\n  luaL_setfuncs(L, pool_methods, 0);\n  lua_pop(L, 1);\n'
+        .. '  luaL_newlib(L, pool_funcs);\n  return 1;\n}\n',
+    ['core/pool.lua'] = 'local p = pool.open()\nreturn p.@@ + p:@@\n',
 }
 local comp_marks = {}
 for path, source in pairs(comp_files) do
@@ -1300,6 +1385,8 @@ spec.describe('LSP completion', function()
         { 'core/script.lua', 1, 'add,size', 'Lua global tables defined in other files' },
         { 'core/script.lua', 2, 'depth,extra,mode', 'Lua local table literals and assignments' },
         { 'shape_ops.cpp', 1, 'perimeter,sides', 'C++ members defined out of line in other files' },
+        { 'core/pool.lua', 1, 'get', 'Lua local typed by the metatable a C call returns' },
+        { 'core/pool.lua', 2, 'get', 'Lua colon call on a native object' },
     }
     for _, case in ipairs(cases) do
         spec.it('completes ' .. case[4], function()

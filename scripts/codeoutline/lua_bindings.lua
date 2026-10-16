@@ -83,6 +83,8 @@ function M.collect(r, T, bm)
             end
         end
     end
+    -- Query-only lexical bindings travel with the cached tokens, not the index.
+    T.lua_bindings = bindings
     for name, list in pairs(bindings) do
         for _, b in ipairs(list) do
             if b.hint:match('^lua%-local:') then
@@ -302,9 +304,10 @@ function M.modules(G, imp, ctx)
         local path = normalize(ctx.directory .. '/' .. imp.path)
         local f = G.file_index[path]
         if f and G.files[f].language == 'lua' then result[1] = f end
-        if not result[1] and not loaders[imp.kind] then
-            -- `*import` pattern loader: bind when any indexed Lua file's path
-            -- ends with the quoted path, regardless of directory prefix.
+        if not result[1] then
+            -- No file at that exact path: bind any indexed Lua file whose path
+            -- ends with the quoted one, however deep the workspace root sits
+            -- above the Lua tree (`dofile('scripts/x.lua')` opened from a parent).
             local want = normalize(imp.path)
             local base = want:match('([^/]+)$')
             if base then
@@ -327,6 +330,65 @@ function M.modules(G, imp, ctx)
 end
 function M.native_modules(G, name, ctx)
     return require('codeoutline.foreign').modules(G, 'lua', name, ctx)
+end
+
+-- Shared query-time receiver resolution for completion and navigation. Reuse
+-- the parser's lexical bindings and loader contracts; never execute Lua.
+function M.member(G, target, name)
+    local result = {}
+    for _, f in ipairs(target and target.modules or {}) do
+        local rec = G.files[f]
+        local exports = require('codeoutline.foreign').exports(rec, 'lua', target.module_name) or rec.lua_exports
+        local n = exports and exports[name]
+        if n then result[#result + 1] = { node = rec.nodes[n], file = f, index = n } end
+    end
+    return result
+end
+
+function M.return_target(G, node, ctx)
+    local name = require('codeoutline.foreign').returns(node, 'lua')
+    local files = name and M.native_modules(G, name, ctx)
+    if files and #files > 0 then return { modules = files, module_name = name } end
+end
+
+function M.receiver(G, rec, T, name, offset, ctx, depth)
+    depth = depth or 0
+    if depth >= 6 then return nil, true end
+    local best
+    for _, b in ipairs((T.lua_bindings or {})[name] or {}) do
+        if T.s[b.token] - 1 < offset and (b.a == 0 or T.s[b.a] - 1 <= offset)
+            and (b.a == 0 or not T.e[b.b] or offset < T.e[b.b])
+            and (not best or b.a > best.a or b.a == best.a and b.token > best.token) then best = b end
+    end
+    if not best then
+        local files = M.native_modules(G, name, ctx)
+        return #files > 0 and { modules = files, module_name = name } or nil, (T.lua_bindings or {})[name] ~= nil
+    end
+    local imported = tonumber(best.hint:match('^lua:(%d+)$'))
+    if imported then
+        local imp = rec.lua_imports[imported]
+        return { modules = M.modules(G, imp, ctx), module_name = imp.path }, true
+    end
+    local i = best.token + 2
+    if best.imported or T:text(best.token + 1) ~= '=' or T.k[i] ~= 'id' then return nil, true end
+    local target = M.receiver(G, rec, T, T:text(i), T.s[best.token] - 1, ctx, depth + 1)
+    i = i + 1
+    while target and (T:text(i) == '.' or T:text(i) == ':') and T.k[i + 1] == 'id' do
+        local close = T:text(i + 2) == '(' and T.m[i + 2]
+        if not close then return nil, true end
+        local next_target
+        for _, entry in ipairs(M.member(G, target, T:text(i + 1))) do
+            local value = M.return_target(G, entry.node, ctx)
+            if not value or next_target and next_target.module_name ~= value.module_name then return nil, true end
+            next_target = value
+        end
+        target, i = next_target, close + 1
+    end
+    -- Reject expressions whose value is not the simple receiver/call chain.
+    local tail = T:text(i)
+    if T.k[i] == 'op' and tail ~= ';' and tail ~= ')' and tail ~= ','
+        or tail == 'and' or tail == 'or' then return nil, true end
+    return target, true
 end
 
 function M.resolve(G, f, name, hint, ctx, recv)

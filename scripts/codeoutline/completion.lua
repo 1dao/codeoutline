@@ -587,9 +587,9 @@ function Completion:module_members(files, module_name)
         if self:expired() then break end
         local rec = self.V.files[g]
         local language = rec.language
-        local native = rec.foreign_exports and rec.foreign_exports[self.language]
+        local native = require('codeoutline.foreign').exports(rec, self.language, module_name)
         if native then
-            for name, n in pairs(native[module_name] or {}) do
+            for name, n in pairs(native) do
                 local node = rec.nodes[n]
                 out[#out + 1] = { name = name, kind = node.kind, node = node, file = g }
             end

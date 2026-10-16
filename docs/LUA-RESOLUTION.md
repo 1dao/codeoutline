@@ -91,3 +91,11 @@ including module aliases and local/parameter shadowing. Return types are inferre
 only from recognized userdata constructor tails and file-local helpers. Discarded
 objects, conflicting normal returns and uncertain stack mutations yield unknown
 types; this is not general C control-flow or Lua stack analysis.
+
+Native export maps, guest signatures and constructor return types are query-only.
+The index stores ordinary C symbols, which identify `luaopen_*` candidate files;
+only a requested native module is reparsed for its binding contract. The results
+use bounded in-memory caches, shared with full-file query parsing, and are never
+attached to persistent index records. Record replacement and document versions
+invalidate the cached contracts. Loading an index from disk reconstructs these
+contracts on demand from source rather than restoring them from the index file.

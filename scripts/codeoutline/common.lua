@@ -25,7 +25,7 @@ local text = require('codeoutline.text')
 function M.new(path, language, opts)
     return { path = path, language = language, nodes = {}, refs = {}, imports = {},
         ranges = not opts or opts.ranges ~= false, collect_dispatch = opts and opts.dispatch,
-        dispatch_only = opts and opts.dispatch_only }
+        dispatch_only = opts and opts.dispatch_only, collect_foreign = opts and opts.foreign }
 end
 
 -- Collapse a token span into a one-line signature.
@@ -132,9 +132,10 @@ end
 
 -- Drop parser-internal fields so the result is plain data.
 function M.finish(r, T)
-    if T and (r.language == 'c' or r.language == 'cpp') then
+    if T and r.collect_foreign and (r.language == 'c' or r.language == 'cpp') then
         require('codeoutline.foreign').collect(r, T)
     end
+    r.collect_foreign = nil
     M.assign_refs(r)
     -- Query-only parse: preserve normal declaration/call attribution, but do
     -- not build binding evidence or compact records that will be discarded.

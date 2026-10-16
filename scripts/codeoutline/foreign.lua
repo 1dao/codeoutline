@@ -1,6 +1,59 @@
 -- Language-neutral native exports. Adapters supply registration evidence and
 -- guest parameters; implementation nodes retain their original host signature.
 local M = {}
+-- Side caches never mutate index records or nodes. Entries follow record identity
+-- (including overlays) and share navigation's bounded full-parse cache.
+local records, contracts, order = setmetatable({}, { __mode = 'k' }), setmetatable({}, { __mode = 'k' }), {}
+local function load(G, f)
+    local rec = G.files[f]
+    if records[rec] ~= nil then return records[rec] or nil end
+    local full = require('codeoutline.navigation').full(G, f, true)
+    local entry = full and full.foreign_exports or false
+    if full then
+        -- Node indices are stable only while the source still matches the index.
+        for n, node in ipairs(rec.nodes) do
+            local current = full.nodes[n]
+            if not current or current.name ~= node.name or current.line ~= node.line then entry = false; break end
+        end
+        if #full.nodes ~= #rec.nodes then entry = false end
+    end
+    records[rec] = entry
+    if entry then
+        for n, node in ipairs(rec.nodes) do contracts[node] = full.nodes[n].foreign_signatures end
+    end
+    order[#order + 1] = rec
+    if #order > 64 then
+        local old = table.remove(order, 1)
+        records[old] = nil
+        for _, node in ipairs(old.nodes) do contracts[node] = nil end
+    end
+    return entry or nil
+end
+
+-- Find candidate files from existing symbols without reading their sources.
+local function candidates(G, ctx)
+    if ctx.foreign_candidates then return ctx.foreign_candidates end
+    local result, seen = {}, {}
+    local function add(f)
+        if seen[f] then return end
+        seen[f] = true
+        local rec = G.files[f]
+        if rec.language ~= 'c' and rec.language ~= 'cpp' then return end
+        for _, node in ipairs(rec.nodes) do
+            local name = node.name:match('^luaopen_(.+)$')
+            if name then
+                result[name] = result[name] or {}
+                result[name][#result[name] + 1] = f
+            end
+        end
+    end
+    for _, f in ipairs(G.file_order or {}) do add(f) end
+    for _, f in ipairs(G.new_files or {}) do add(f) end
+    ctx.foreign_candidates = result
+    return result
+end
+
+function M.has_candidates(G, ctx) return next(candidates(G, ctx)) ~= nil end
 
 function M.register(rec, language, module, exports)
     rec.foreign_exports = rec.foreign_exports or {}
@@ -9,7 +62,8 @@ function M.register(rec, language, module, exports)
 end
 
 function M.exports(rec, language, module)
-    return rec.foreign_exports and rec.foreign_exports[language] and rec.foreign_exports[language][module]
+    local exports = records[rec] or rec.foreign_exports
+    return exports and exports[language] and exports[language][module]
 end
 
 function M.collect(rec, T)
@@ -18,30 +72,31 @@ end
 
 function M.modules(G, language, name, ctx)
     ctx = ctx or {}
-    if not ctx.foreign then
-        ctx.foreign = {}
-        local seen = {}
-        local function add(f)
-            if seen[f] then return end
-            seen[f] = true
-            for lang, modules in pairs(G.files[f].foreign_exports or {}) do
+    ctx.foreign = ctx.foreign or {}
+    ctx.foreign_loaded = ctx.foreign_loaded or {}
+    for _, f in ipairs(candidates(G, ctx)[name] or {}) do
+        if not ctx.foreign_loaded[f] then
+            ctx.foreign_loaded[f] = true
+            for lang, modules in pairs(load(G, f) or {}) do
                 ctx.foreign[lang] = ctx.foreign[lang] or {}
                 for module in pairs(modules) do
                     local names = ctx.foreign[lang]
                     names[module] = names[module] or {}
-                    table.insert(names[module], f)
+                    names[module][#names[module] + 1] = f
                 end
             end
         end
-        for _, f in ipairs(G.file_order or {}) do add(f) end
-        for _, f in ipairs(G.new_files or {}) do add(f) end
     end
-    return (ctx.foreign[language] or {})[name] or {}
+    local files = (ctx.foreign[language] or {})[name] or {}
+    -- A long query may have evicted a previously used record.
+    for _, f in ipairs(files) do load(G, f) end
+    return files
 end
 
 -- Parameter labels are structured data, never reparsed as host-language code.
 function M.signature(node, language, name)
-    local contract = node.foreign_signatures and node.foreign_signatures[language]
+    local signatures = contracts[node] or node.foreign_signatures
+    local contract = signatures and signatures[language]
     if not contract then return nil end
     local labels, parameters = {}, {}
     for i, p in ipairs(contract.parameters) do
@@ -60,7 +115,8 @@ end
 
 -- Guest-facing result type: the native metatable the implementation returns.
 function M.returns(node, language)
-    local contract = node.foreign_signatures and node.foreign_signatures[language]
+    local signatures = contracts[node] or node.foreign_signatures
+    local contract = signatures and signatures[language]
     return contract and contract.returns or nil
 end
 

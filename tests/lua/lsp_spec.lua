@@ -810,6 +810,61 @@ int luaopen_native_test(lua_State *L) { luaL_setfuncs(L, methods, 0); luaL_newli
         end
         navigation.close('native-draft')
     end)
+    spec.it('loads native contracts on demand without changing saved index records', function()
+        local source = 'static int lazy_read(lua_State *L) { luaL_checkinteger(L, 1); return 0; }\n'
+            .. 'static const luaL_Reg funcs[] = {{"read", lazy_read}, {NULL, NULL}};\n'
+            .. 'int luaopen_lazy_contract(lua_State *L) { luaL_newlib(L, funcs); return 1; }\n'
+        nav_write('lazy_contract.c', source)
+        nav_write('lazy_user.lua', "local lib = require('lazy_contract')\nlib.read(1)\n")
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local idx = service.resident(nav_root)
+        local function check_records(files)
+            for _, rec in pairs(files) do
+                spec.nil_value(rec.foreign_exports)
+                for _, node in ipairs(rec.nodes) do spec.nil_value(node.foreign_signatures) end
+            end
+        end
+        check_records(idx.files)
+        local doc = docs.read(nav_root .. '/lazy_user.lua')
+        local req = { method = 'lsp_signature', uri = doc.uri, position = { line = 1, character = 9 } }
+        local foreign = require('codeoutline.foreign')
+        local G = idx:symbols()
+        local ctx = require('codeoutline.lua_bindings').context(G)
+        spec.truthy(foreign.has_candidates(G, ctx))
+        local rec = idx.files['lazy_contract.c']
+        spec.nil_value(foreign.exports(rec, 'lua', 'lazy_contract'))
+        spec.equal(nav(req).signatures[1].label, 'read(arg1:int)')
+        local exports = foreign.exports(rec, 'lua', 'lazy_contract')
+        spec.truthy(exports.read)
+        spec.equal(nav(req).signatures[1].label, 'read(arg1:int)')
+        spec.equal(foreign.exports(rec, 'lua', 'lazy_contract'), exports)
+        check_records(idx.files)
+        assert(idx:save())
+        local file = assert(io.open(idx.cache_path, 'rb'))
+        local envelope = cmsgpack.unpack(file:read('a')); file:close()
+        local saved = cmsgpack.unpack(xcompress.inflate(envelope.payload, envelope.size))
+        check_records(saved.files)
+        local loaded = require('codeoutline.index').open(nav_root, { cache_path = idx.cache_path })
+        local reloaded = loaded:symbols()
+        local files = foreign.modules(reloaded, 'lua', 'lazy_contract', require('codeoutline.lua_bindings').context(reloaded))
+        spec.equal(#files, 1)
+        spec.truthy(foreign.exports(reloaded.files[files[1]], 'lua', 'lazy_contract').read)
+        check_records(loaded.files)
+        -- Unsaved C changes replace the query contract without touching disk/index.
+        local uri = nav_uri('lazy_contract.c')
+        navigation.sync({ session = 'lazy-draft', open = { [uri] = 1 }, changed = {
+            [uri] = { version = 1, language = 'c', source = source:gsub('checkinteger', 'checkstring') } } })
+        req.session = 'lazy-draft'
+        spec.equal(nav(req).signatures[1].label, 'read(arg1:string)')
+        navigation.close('lazy-draft')
+        req.session = 'spec'
+        spec.equal(nav(req).signatures[1].label, 'read(arg1:int)')
+        check_records(idx.files)
+        nav_write('lazy_contract.c', source:gsub('checkinteger', 'checkstring'))
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        spec.equal(nav(req).signatures[1].label, 'read(arg1:string)')
+        check_records(idx.files)
+    end)
     spec.it('opens a quoted Lua path that lives deeper than the workspace root', function()
         assert(xutils.mkdir_p(nav_root .. '/deep/scripts'))
         nav_write('deep/scripts/mod.lua', 'local M = {}\nfunction M.save() end\nreturn M\n')

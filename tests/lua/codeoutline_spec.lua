@@ -26,10 +26,14 @@ local function refs(r)
 end
 
 spec.describe('native Lua exports', function()
+    local function native_parse(path, source, opts)
+        opts = opts or {}; opts.foreign = true
+        return ci.parse(path, source, opts)
+    end
     spec.it('infers the real xthread guest signature without changing its C signature', function()
         local f = assert(io.open('xnet2lua/xlua/lua_xthread.c', 'rb'))
         local source = f:read('a'); f:close()
-        local rec = ci.parse('lua_xthread.c', source, { ranges = false })
+        local rec = native_parse('lua_xthread.c', source, { ranges = false })
         local node = rec.nodes[rec.foreign_exports.lua.xthread.create_thread]
         local signature = require('codeoutline.foreign').signature(node, 'lua', 'create_thread')
         spec.equal(signature.label, 'create_thread(id:int, name:string, script_path:string)')
@@ -37,7 +41,7 @@ spec.describe('native Lua exports', function()
         spec.nil_value(require('codeoutline.foreign').signature(node, 'c', 'create_thread'))
     end)
     spec.it('retains positional gaps, checked types, defaults and unknown dynamic indices', function()
-        local rec = ci.parse('native.c', [[
+        local rec = native_parse('native.c', [[
 static int call(lua_State *state) {
     luaL_checkinteger(state, lua_upvalueindex(1));
     luaL_checkstring(state, -1);
@@ -65,7 +69,7 @@ int luaopen_two(lua_State *L) { lua_newtable(L); luaL_setfuncs(L, two, 0); retur
 int luaopen_old(lua_State *L) { luaL_register(L, "old", one); return 1; }
 ]]
         for _, ext in ipairs({ 'c', 'cpp' }) do
-            local rec = ci.parse('native.' .. ext, source, { ranges = false })
+            local rec = native_parse('native.' .. ext, source, { ranges = false })
             spec.equal(rec.nodes[rec.foreign_exports.lua.one.run].name, 'first')
             spec.equal(rec.nodes[rec.foreign_exports.lua.two.run].name, 'second')
             spec.equal(rec.nodes[rec.foreign_exports.lua.old.run].name, 'first')
@@ -75,14 +79,14 @@ int luaopen_old(lua_State *L) { luaL_register(L, "old", one); return 1; }
     spec.it('extracts the real xscan module without leaking metatable methods', function()
         local f = assert(io.open('xnet2lua/xlua/lua_xscan.c', 'rb'))
         local source = f:read('a'); f:close()
-        local rec = ci.parse('lua_xscan.c', source)
+        local rec = native_parse('lua_xscan.c', source)
         local exports = assert(rec.foreign_exports.lua.xscan)
         spec.truthy(exports.lang)
         spec.nil_value(exports.tokenize)
         spec.nil_value(exports.text)
     end)
     spec.it('rejects discarded and conflicting native constructor results', function()
-        local rec = ci.parse('constructors.c', [[
+        local rec = native_parse('constructors.c', [[
 static int push_a(lua_State *L) { lua_newuserdata(L, 8); luaL_setmetatable(L, "a"); return 1; }
 static int push_b(lua_State *L) { lua_newuserdata(L, 8); luaL_setmetatable(L, "b"); return 1; }
 static int discarded(lua_State *L) { push_a(L); lua_pop(L, 1); return 0; }
@@ -110,7 +114,7 @@ int luaopen_test(lua_State *L) { luaL_newlib(L, funcs); return 1; }
     spec.it('types native objects by the metatable the implementation returns', function()
         local f = assert(io.open('xnet2lua/xlua/lua_xrecord.c', 'rb'))
         local source = f:read('a'); f:close()
-        local rec = ci.parse('lua_xrecord.c', source, { ranges = false })
+        local rec = native_parse('lua_xrecord.c', source, { ranges = false })
         local foreign = require('codeoutline.foreign')
         local handle = assert(rec.foreign_exports.lua['xrecord.handle'])
         local schema = assert(rec.foreign_exports.lua['xrecord.schema'])

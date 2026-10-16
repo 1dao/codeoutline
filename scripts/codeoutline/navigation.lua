@@ -220,9 +220,8 @@ local function resolve_site(V, f, from, name, kind, recv, evidence, offset)
         and V.files[f].language == 'lua' then
         local bindings = require('codeoutline.lua_bindings')
         local ctx = V.js_context.lua
-        bindings.native_modules(V, '', ctx)
         local rec, T
-        if offset and next(ctx.foreign.lua or {}) then rec, T = M.full(V, f) end
+        if offset and require('codeoutline.foreign').has_candidates(V, ctx) then rec, T = M.full(V, f) end
         if T then
             local target = bindings.receiver(V, rec, T, recv, offset, V.js_context.lua)
             for _, entry in ipairs(bindings.member(V, target, name)) do
@@ -301,7 +300,8 @@ end
 
 -- Source document for file f: its overlay, else the disk file read once per request.
 local function source_doc(V, f)
-    if V.drafts[f] then return V.drafts[f] end
+    if V.drafts and V.drafts[f] then return V.drafts[f] end
+    if not V.disk then return V.root and documents.read(V.root .. '/' .. V.files[f].path) end
     local doc = V.disk[f]
     if doc == nil then
         doc = documents.read(V.idx:abs(V.files[f].path)) or false
@@ -313,26 +313,30 @@ end
 -- Full parse (record plus tokens) of one file, cached per record. Shared with
 -- completion, which needs tokens for types this index does not store.
 local full_cache, full_order = setmetatable({}, { __mode = 'k' }), {}
-function M.full(V, f)
-    local draft = V.drafts[f]
+function M.full(V, f, native)
+    local draft = V.drafts and V.drafts[f]
     if draft then
         draft.full = draft.full or {}
         local entry = draft.full
-        if not entry.rec then entry.rec, entry.tokens = parse.parse_tokens(draft.path or V.files[f].path, draft.source) end
+        if not entry.rec or native and not entry.foreign then
+            entry.rec, entry.tokens = parse.parse_tokens(draft.path or V.files[f].path, draft.source, { foreign = native })
+            entry.foreign = native
+        end
         return entry.rec, entry.tokens, draft
     end
     local key = V.files[f]
     local entry = full_cache[key]
-    if entry == nil then
+    if entry == nil or entry and native and not entry.foreign then
+        local fresh = entry == nil
         if (key.size or 0) > M.MAX_FILE_BYTES then full_cache[key] = false; return nil end
         local doc = source_doc(V, f)
         entry = false
         if doc then
-            local rec, tokens = parse.parse_tokens(key.path, doc.source)
-            entry = rec and { rec = rec, tokens = tokens } or false
+            local rec, tokens = parse.parse_tokens(key.path, doc.source, { foreign = native })
+            entry = rec and { rec = rec, tokens = tokens, foreign = native } or false
         end
         full_cache[key] = entry
-        full_order[#full_order + 1] = key
+        if fresh then full_order[#full_order + 1] = key end
         if #full_order > M.CACHE_FILES then full_cache[table.remove(full_order, 1)] = nil end
     end
     if not entry then return nil end

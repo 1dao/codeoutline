@@ -65,6 +65,36 @@ test('official SDK stdio: discovery, source, incremental refresh, rebuild and er
     } finally { await c.close(); await f.cleanup(); }
 });
 
+test('official SDK static registries: inferred flows, callers and registration edits', { timeout: 30000 }, async () => {
+    const f = await fixture();
+    const transport = new StdioClientTransport({ command: defaultRuntime,
+        args: [main, 'STDIO=1', `PROJECT=${f.project}`], cwd: tmpdir(), stderr: 'pipe' });
+    transport.stderr?.on('data', () => {});
+    const c = client();
+    try {
+        const lua = 'local function registryLeaf() end\nlocal handlers = { go = registryLeaf }\nfunction registryRun() handlers["go"]() end\n';
+        await writeFile(join(f.project, 'registry.lua'), lua);
+        await writeFile(join(f.project, 'pointer.c'), 'struct Ops { void (*call)(void); };\nvoid pointerLeaf(void) {}\nstatic struct Ops ops = { pointerLeaf };\nvoid pointerRun(void) { ops.call(); }\n');
+        await c.connect(transport);
+        for (const [entry, leaf, relation] of [
+            ['registryRun', 'registryLeaf', 'indirect:registry'],
+            ['pointerRun', 'pointerLeaf', 'indirect:fn-pointer'],
+        ]) {
+            const flow = await c.callTool({ name: 'codeoutline_explore', arguments: { query: `${entry} ${leaf}` } });
+            assert.notEqual(flow.isError, true);
+            assert.ok(flow.content[0].text.includes(`${entry} -> ${leaf}`));
+            assert.match(flow.content[0].text, /registered at/);
+            const callers = await c.callTool({ name: 'codeoutline_callers', arguments: { query: leaf } });
+            assert.notEqual(callers.isError, true);
+            assert.ok(callers.content[0].text.includes(relation));
+        }
+        await writeFile(join(f.project, 'registry.lua'), lua.replace('go = registryLeaf', 'go = nil'));
+        const after = await c.callTool({ name: 'codeoutline_callers', arguments: { query: 'registryLeaf' } });
+        assert.notEqual(after.isError, true);
+        assert.doesNotMatch(after.content[0].text, /Depth 1: registryRun/);
+    } finally { await c.close(); await f.cleanup(); }
+});
+
 test('official SDK Kotlin: kt/kts discovery, aliased call paths and incremental edits', { timeout: 30000 }, async () => {
     const f = await fixture();
     const transport = new StdioClientTransport({ command: defaultRuntime,

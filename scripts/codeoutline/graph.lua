@@ -529,6 +529,7 @@ function M.query(symbols, opts)
     local report = opts.explain and require('codeoutline.query_report').new() or nil
     Q.report = report
     local indirect = require('codeoutline.indirect').query(symbols, opts.dispatch_rules, report)
+    local static_dispatch = require('codeoutline.static_dispatch').query(symbols, report)
     local function deps(f)
         local entry = dependencies[f]
         if not entry then
@@ -538,6 +539,7 @@ function M.query(symbols, opts)
         return entry[1], entry[2]
     end
     local function targets(f, i, explain)
+        if static_dispatch.handles(f, i) then return {} end
         local rec, ids = symbols.files[f], symbols.id_of[f]
         local refs = rec.refs
         local direct, paired = deps(f)
@@ -578,6 +580,11 @@ function M.query(symbols, opts)
             edges[#edges + 1] = edge.line
             edges[#edges + 1] = edge.kind
         end
+        for _, edge in ipairs(static_dispatch.outgoing(id)) do
+            edges[#edges + 1] = edge.target
+            edges[#edges + 1] = edge.line
+            edges[#edges + 1] = edge.kind
+        end
         for _, i in ipairs(grouped[id] or {}) do
             control.check()
             for _, dst in ipairs(targets(f, i, true) or {}) do
@@ -602,6 +609,9 @@ function M.query(symbols, opts)
         local incoming = {}
         for id in pairs(wanted) do incoming[id] = {} end
         local indirect_incoming = indirect.incoming(wanted)
+        for src, edges in pairs(static_dispatch.incoming(wanted)) do
+            for _, edge in ipairs(edges) do push3(incoming, edge.target, src, edge.line, edge.kind) end
+        end
         for _, f in ipairs(symbols.file_order) do
             for _, src in ipairs(symbols.id_of[f]) do
                 for _, edge in ipairs(indirect_incoming[src] or {}) do

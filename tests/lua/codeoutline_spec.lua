@@ -1862,6 +1862,196 @@ spec.describe('recursive callers', function()
     end)
 end)
 
+spec.describe('static registry dispatch', function()
+    local function build(path, source)
+        return graph.build({ files = { [path] = ci.parse(path, source, { static_dispatch = true }) } })
+    end
+    local function targets(G, name)
+        local Q, result = graph.query(G, { explain = true }), {}
+        local edges = Q.out[G.by_name[name][1]]
+        for i = 1, #edges, graph.EDGE do
+            if edges[i + 2]:match('^indirect:') then result[#result + 1] = G.nodes[edges[i]].name end
+        end
+        table.sort(result)
+        return table.concat(result, ','), Q
+    end
+    spec.it('connects literal Lua registry keys in both directions with evidence', function()
+        local G = build('registry.lua', [[
+local function save() end
+local function load() end
+local handlers = { save = save, ['load'] = load }
+function run() handlers['save'](); handlers.load() end
+]])
+        local found, Q = targets(G, 'run')
+        spec.equal(found, 'load,save')
+        local incoming = Q.inn[G.by_name.save[1]]
+        spec.equal(#incoming, 3)
+        spec.equal(G.nodes[incoming[1]].name, 'run')
+        spec.equal(Q.report.entries[1].registered_at, 'registry.lua:3')
+    end)
+    spec.it('accepts explicit Lua field registration and rejects dynamic or overwritten slots', function()
+        local G = build('registry.lua', [[
+local function save() end
+local handlers = {}
+handlers.save = save
+handlers['load'] = save
+handlers.load = nil
+function run(key) handlers.save(); handlers['load'](); handlers[key]() end
+]])
+        local found, Q = targets(G, 'run')
+        spec.equal(found, 'save')
+        local reasons = {}
+        for _, e in ipairs(Q.report.entries) do reasons[#reasons + 1] = e.reason or '' end
+        spec.contains(table.concat(reasons, '|'), 'dynamic registry key')
+    end)
+    spec.it('does not cross Lua table scopes, parameters, replacement or computed writes', function()
+        for _, body in ipairs({
+            'function run(handlers) handlers.save() end',
+            'function run() local handlers = {}; handlers.save() end',
+            'handlers = {}\nfunction run() handlers.save() end',
+            'handlers[key] = other\nfunction run() handlers.save() end',
+        }) do
+            local G = build('registry.lua', 'local function save() end\nlocal handlers = { save = save }\n' .. body)
+            spec.equal(targets(G, 'run'), '')
+        end
+    end)
+    spec.it('connects C and C++ typed function-pointer tables and field assignments', function()
+        for _, ext in ipairs({ 'c', 'cpp' }) do
+            local G = build('registry.' .. ext, [[
+struct Ops { const char *name; void (*call)(void); };
+void save(void) {}
+void load(void) {}
+static struct Ops entries[] = { { "save", save }, { "load", load } };
+void run(struct Ops *ops) { ops->call(); }
+]])
+            spec.equal(targets(G, 'run'), 'load,save', ext)
+            local Q = graph.query(G)
+            spec.equal(G.nodes[Q.inn[G.by_name.save[1]][1]].name, 'run')
+        end
+        local G = build('registry.c', [[
+struct Ops { void (*call)(void); };
+void save(void) {}
+static struct Ops ops = { .call = save };
+void run(void) { ops.call(); }
+]])
+        spec.equal(targets(G, 'run'), 'save')
+        G = build('registry.c', [[
+struct Ops { void (*call)(void); };
+void save(void) {}
+void setup(struct Ops *ops) { ops->call = &save; }
+void run(struct Ops *ops) { ops->call(); }
+]])
+        spec.equal(targets(G, 'run'), 'save')
+    end)
+    spec.it('isolates C function-pointer fields by declared structure type', function()
+        local G = build('registry.c', [[
+struct A { void (*call)(void); };
+struct B { void (*call)(void); };
+void first(void) {}
+void second(void) {}
+static struct A a = { first };
+static struct B b = { second };
+void run(struct A *ops) { ops->call(); }
+]])
+        spec.equal(targets(G, 'run'), 'first')
+    end)
+    spec.it('handles direct C array dispatch and parenthesized function pointers', function()
+        local G = build('registry.c', [[
+struct Ops { void (*call)(void); };
+void save(void) {}
+static struct Ops table[] = { { save } };
+void run(int i) { table[i].call(); }
+void indirect(struct Ops *ops) { (*ops->call)(); }
+]])
+        spec.equal(targets(G, 'run'), 'save')
+        spec.equal(targets(G, 'indirect'), 'save')
+    end)
+    spec.it('rejects shadowed C receivers and Lua callback names', function()
+        for _, body in ipairs({
+            'void run(void *ops) { ops->call(); }',
+            'void run(void) { void *ops = other; ops->call(); }',
+        }) do
+            local G = build('registry.c', 'struct Ops { void (*call)(void); };\nvoid save(void) {}\nstatic struct Ops ops = { save };\n' .. body)
+            spec.equal(targets(G, 'run'), '')
+        end
+        for _, body in ipairs({
+            'local save = unknown\nlocal handlers = { save = save }\nfunction run() handlers.save() end',
+            'save = unknown\nlocal handlers = { save = save }\nfunction run() handlers.save() end',
+            'local handlers = { save = save, save = other }\nfunction run() handlers.save() end',
+        }) do
+            local G = build('registry.lua', 'local function save() end\n' .. body)
+            spec.equal(targets(G, 'run'), '')
+        end
+    end)
+    spec.it('preserves callers across query cache eviction and file removal', function()
+        local root = tmp_root .. '/registry_eviction'
+        for i = 1, 20 do
+            write(root .. '/' .. i .. '.lua', 'local function handler() end\nlocal t = { go = handler }\nfunction run' .. i .. '() t["go"]() end')
+        end
+        local opts = { cache_path = root .. '/cache.bin' }
+        local _, info = svc.callers(root, 'handler', opts)
+        spec.equal(#info.callers, 20)
+        os.remove(root .. '/1.lua')
+        _, info = svc.callers(root, 'handler', opts)
+        spec.equal(#info.callers, 19)
+        svc.forget(root)
+    end)
+    spec.it('preserves existing Lua table-function calls in resident project queries', function()
+        local root = tmp_root .. '/registry_ordinary'
+        write(root .. '/a.lua', [[
+local M = { inline = function() end }
+function M.named() end
+M.assigned = function() end
+function run() M.inline(); M.named(); M.assigned() end
+]])
+        local opts = { cache_path = root .. '/cache.bin' }
+        for _, name in ipairs({ 'inline', 'named', 'assigned' }) do
+            local _, info = svc.callers(root, name, opts)
+            spec.equal(#info.callers, 1, name)
+            spec.equal(info.callers[1].name, 'run')
+        end
+        svc.forget(root)
+    end)
+    spec.it('selects the lexical Lua handler when nested functions reuse a name', function()
+        local G = build('registry.lua', [[
+local function save() end
+function outer()
+    local function save() end
+    local handlers = { save = save }
+    handlers['save']()
+end
+]])
+        local Q = graph.query(G)
+        local edges = Q.out[G.by_name.outer[1]]
+        spec.equal(#edges, 3)
+        spec.equal(G.nodes[edges[1]].qualified, 'outer.save')
+    end)
+    spec.it('keeps registrations query-owned and refreshes cached callers after edits', function()
+        local root = tmp_root .. '/static_registry'
+        local source = "local function save() end\nlocal handlers = { save = save }\nfunction run() handlers['save']() end"
+        write(root .. '/a.lua', source)
+        local opts = { cache_path = root .. '/cache.bin' }
+        local idx, G = svc.get(root, opts)
+        spec.equal(idx.files['a.lua'].static_dispatch, nil)
+        spec.truthy(idx.files['a.lua'].static_dispatch_candidate)
+        local output, info = svc.callers(root, 'save', opts)
+        spec.equal(#info.callers, 1)
+        spec.contains(output, 'indirect:registry')
+        local explored = svc.explore(root, 'run save', opts)
+        spec.contains(explored, 'registered at a.lua:2')
+        idx:save(); svc.forget(root)
+        output, info = svc.callers(root, 'save', opts)
+        spec.equal(#info.callers, 1)
+        local _, stale = svc.get(root, opts)
+        write(root .. '/a.lua', source:gsub('save = save', 'save = nil'))
+        local ok, err = pcall(function() return graph.query(stale).out[stale.by_name.run[1]] end)
+        spec.equal(ok, false); spec.contains(err, 'source changed during query')
+        output, info = svc.callers(root, 'save', opts)
+        spec.equal(#info.callers, 0)
+        svc.forget(root)
+    end)
+end)
+
 return {
     __init = function()
         local failed = spec.finish()

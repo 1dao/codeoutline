@@ -25,7 +25,8 @@ local text = require('codeoutline.text')
 function M.new(path, language, opts)
     return { path = path, language = language, nodes = {}, refs = {}, imports = {},
         ranges = not opts or opts.ranges ~= false, collect_dispatch = opts and opts.dispatch,
-        dispatch_only = opts and opts.dispatch_only, collect_foreign = opts and opts.foreign }
+        dispatch_only = opts and opts.dispatch_only, collect_static_dispatch = opts and opts.static_dispatch,
+        collect_foreign = opts and opts.foreign }
 end
 
 -- Collapse a token span into a one-line signature.
@@ -137,6 +138,8 @@ function M.finish(r, T)
     end
     r.collect_foreign = nil
     M.assign_refs(r)
+    if T then require('codeoutline.static_dispatch').collect(r, T) end
+    r.collect_static_dispatch = nil
     -- Query-only parse: preserve normal declaration/call attribution, but do
     -- not build binding evidence or compact records that will be discarded.
     if r.dispatch_only then

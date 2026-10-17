@@ -27,7 +27,7 @@ local INDEX_PARSE = { ranges = false }
 -- rebuilds stale caches instead of silently reusing old parse results.
 M.VERSION = (function()
     local parts = {}
-    for _, m in ipairs({ 'xscan', 'text', 'common', 'indirect', 'js_evidence', 'lua_bindings', 'foreign', 'foreign_lua', 'parse', 'lang.c', 'lang.cpp', 'lang.lua', 'lang.python',
+    for _, m in ipairs({ 'xscan', 'text', 'common', 'indirect', 'static_dispatch', 'js_evidence', 'lua_bindings', 'foreign', 'foreign_lua', 'parse', 'lang.c', 'lang.cpp', 'lang.lua', 'lang.python',
         'lang.java', 'lang.kotlin', 'lang.go', 'lang.js', 'lang.csharp', 'lang.rust' }) do
         local file = package.searchpath and package.searchpath('codeoutline.' .. m, package.path)
         local h = file and io.open(file, 'rb')

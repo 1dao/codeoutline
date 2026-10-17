@@ -1,5 +1,59 @@
 # Indirect calls
 
+## Static registries and function pointers
+
+Explore and recursive callers automatically follow these bounded static patterns:
+
+```lua
+local function save() end
+local handlers = { save = save }
+function run() handlers['save']() end
+```
+
+```c
+struct Ops { const char *name; void (*call)(void); };
+void save(void) {}
+static struct Ops entries[] = { { "save", save } };
+void run(struct Ops *ops) { ops->call(); }
+```
+
+Lua supports same-file lexical `local` tables with named function values,
+identifier or simple quoted keys, and explicit `handlers.save = save` or
+`handlers['save'] = save` registrations. Calls can use a dot or a quoted index.
+Unknown/overwritten registrations, repeated slot writes, replaced tables,
+computed writes, and shadowed bindings do not produce inferred edges. Dynamic
+read keys are reported as unresolved; they are not expanded to every handler.
+Ordinary anonymous/named table-function definitions keep their existing binding
+resolution. Imported/global registries, aliases, metatables, escaped keys and
+numeric indices are outside this first implementation.
+
+C/C++ supports named structs/classes with inline function-pointer fields and
+explicitly typed variables/parameters. Positional or designated initializers
+(including arrays of structs) and direct field assignments register named
+functions, optionally prefixed with `&`. Calls through `ops->call()`,
+`ops.call()`, `entries[index].call()` and `(*ops->call)()` share those candidates.
+The type declaration, registration and dispatch must be in the same source file;
+the registered function itself may resolve through existing cross-file lookup.
+Matching uses the declared type and field, not the field name alone. Instances
+of the same type share potential targets: this is not instance-sensitive or
+control-flow analysis. Typedef-based pointer fields, included type definitions,
+macro tables, inheritance and field-to-field propagation are not inferred.
+
+Edges are labelled `indirect:registry` or `indirect:fn-pointer` and include a
+registration location in explore's relationship evidence. They describe static
+potential execution, not proof that a registration or call runs at runtime.
+Recognized indirect sites suppress ordinary same-name call guesses.
+
+The resident index stores a candidate boolean only. Query parsing validates
+source checksums and node identities, then retains registration/site data in a
+query-local FIFO (16 files, estimated 8 MiB budget); no source/tokens or inferred
+edges are saved in the disk index. Cache eviction preserves matching coverage.
+Embeddings without a project root can parse with `{ static_dispatch = true }`
+to supply the transient data explicitly. LSP definition navigation is unchanged;
+this addition feeds the shared graph used by exploration and caller queries.
+
+## Configured API contracts
+
 Configure exact API contracts in project-root `.codeoutline.json`. Rules are
 read on every explore request; editing them does not require rebuilding.
 Existing `definitionRules` for editor navigation remain independent.
@@ -45,7 +99,8 @@ isolated. File-scope registrations are supported, while file-scope sends have no
 caller symbol and do not create edges. Missing edges do not prove non-reachability.
 
 Lua embeddings can pass the same rule array as `dispatch_rules` to `graph.query`
-or `explore.run`. With no rules configured, no indirect dispatch edges are added.
+or `explore.run`. With no rules configured, no API-contract dispatch edges are
+added; the automatic static registry patterns above remain available.
 
 The resident index stores only distinct dispatch API names per file, not every
 call's arguments. Outgoing edges are resolved when a caller is expanded. Incoming

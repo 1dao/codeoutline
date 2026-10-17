@@ -3,6 +3,10 @@ local M = {}
 local control = require('codeoutline.control')
 local callable = { ['function'] = true, method = true, constructor = true }
 
+local function site_key(from, line, recv, name)
+    return from .. ':' .. line .. ':' .. tostring(recv) .. ':' .. tostring(name)
+end
+
 local function literal(T, i)
     local s = T:text(i)
     if T.k[i] == 'str' and (s:sub(1, 1) == '"' or s:sub(1, 1) == "'")
@@ -12,7 +16,7 @@ end
 function M.collect(r, T)
     local lua = r.language == 'lua'
     if not lua and r.language ~= 'c' and r.language ~= 'cpp' then return end
-    -- One boolean in resident records. Detailed sites exist only in query parses.
+    -- Reject cheap negatives before collecting compact query hints.
     for i = 1, T.n do
         if i % 4096 == 0 then control.check() end
         local prev = T:text(i - 1)
@@ -23,7 +27,7 @@ function M.collect(r, T)
             r.static_dispatch_candidate = true; break
         end
     end
-    if not r.collect_static_dispatch or not r.static_dispatch_candidate then return end
+    if not r.static_dispatch_candidate then return end
     local scopes, ends, stack, owners = {}, { [0] = T.n }, {}, {}
     local opens = { ['function'] = true, ['if'] = true, ['do'] = true, ['repeat'] = true }
     for i = 1, T.n do
@@ -246,7 +250,8 @@ function M.collect(r, T)
     end
     for i = 1, T.n do
         if i % 4096 == 0 then control.check() end
-        if T.k[i] ~= 'id' or T:text(i - 1) == '.' or T:text(i - 1) == '->' or T:text(i - 1) == ':' then goto continue end
+        if T.k[i] ~= 'id' or T:text(i - 1) == '.' or T:text(i - 1) == '->'
+            or lua and T:text(i - 1) == ':' then goto continue end
         local b = binding(T:text(i), i)
         if not b or (not b.slots and not b.type) then goto continue end
         if lua and T:text(i + 1) == '=' and i ~= b.token then b.invalid = true end
@@ -289,16 +294,26 @@ function M.collect(r, T)
         site.registrations = not site.binding.invalid and entries and not entries.unknown and entries or {}
         site.slots, site.binding = nil, nil
     end
+    if not r.collect_static_dispatch then
+        local targets, members = {}, {}
+        for _, site in ipairs(data.sites) do
+            if site.name then members[site_key(site.from, site.line, site.ref_recv, site.name)] = true end
+            for _, registration in ipairs(site.registrations) do targets[registration.name] = true end
+        end
+        r.static_dispatch_candidate = #data.sites > 0 and { targets = targets, members = members } or nil
+        r.static_dispatch = nil
+    end
 end
 
 function M.query(G, report)
     local graph = require('codeoutline.graph')
-    local cache, order, bytes = {}, {}, 0
+    local cache, entries = {}, 0
+    local empty = { sites = {} }
     local function data(f)
         local rec = G.files[f]
         if rec.static_dispatch then return rec.static_dispatch end
-        if not rec.static_dispatch_candidate or not G.root then return { sites = {} } end
-        if cache[f] then return cache[f].data end
+        if not rec.static_dispatch_candidate or not G.root then return empty end
+        if cache[f] then return cache[f] end
         local h = assert(io.open(G.root .. '/' .. rec.path, 'rb'), 'cannot read static dispatch source: ' .. rec.path)
         local raw = h:read('a'); h:close()
         local crc = xcompress and xcompress.crc32 and xcompress.crc32(raw) or xutils.sha256_hex(raw)
@@ -314,11 +329,10 @@ function M.query(G, report)
             assert(n.qualified == rec.nodes[i].qualified and n.line == rec.nodes[i].line, 'source encoding changed; refresh index: ' .. rec.path)
         end
         local result = parsed.static_dispatch or { sites = {} }
-        local weight = #source + #result.sites * 512
-        while #order > 0 and (#order >= 16 or bytes + weight > 8 * 1024 * 1024) do
-            local old = table.remove(order, 1); bytes = bytes - cache[old].weight; cache[old] = nil
-        end
-        if weight <= 8 * 1024 * 1024 then cache[f] = { data = result, weight = weight }; order[#order + 1] = f; bytes = bytes + weight end
+        entries = entries + 1 + #result.sites
+        for _, site in ipairs(result.sites) do entries = entries + #site.registrations end
+        assert(entries <= (M.max_query_entries or 100000), 'static dispatch query limit exceeded; narrow the project scope')
+        cache[f] = result
         return result
     end
     local function scan(f, only, wanted)
@@ -355,15 +369,28 @@ function M.query(G, report)
         outgoing = function(id) return scan(G.node_file[id], id)[id] or {} end,
         incoming = function(wanted)
             local result = {}
+            local names = {}
+            for id in pairs(wanted) do names[G.nodes[id].name] = true end
             for _, f in ipairs(G.file_order) do
                 control.check()
-                for src, edges in pairs(scan(f, nil, wanted)) do result[src] = edges end
+                local hint = G.files[f].static_dispatch_candidate
+                local relevant = G.files[f].static_dispatch ~= nil or hint == true
+                if type(hint) == 'table' then
+                    for name in pairs(names) do if hint.targets[name] then relevant = true; break end end
+                end
+                if relevant then
+                    for src, edges in pairs(scan(f, nil, wanted)) do result[src] = edges end
+                end
             end
             return result
         end,
         handles = function(f, i)
             local refs = G.files[f].refs
             if refs.kind[i] ~= 'member_call' then return false end
+            local hint = G.files[f].static_dispatch_candidate
+            if type(hint) == 'table' then
+                return hint.members[site_key(refs.from[i], refs.line[i], refs.recv[i], refs.name[i])] == true
+            end
             for _, site in ipairs(data(f).sites) do
                 if site.from == refs.from[i] and site.line == refs.line[i] and site.ref_recv == refs.recv[i]
                     and site.name == refs.name[i] then return true end

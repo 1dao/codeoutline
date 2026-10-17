@@ -1955,6 +1955,49 @@ void run(struct A *ops) { ops->call(); }
 ]])
         spec.equal(targets(G, 'run'), 'first')
     end)
+    spec.it('includes registrations immediately after C switch labels', function()
+        local G = build('registry.c', [[
+struct Ops { void (*call)(void); };
+void first(void) {}
+void second(void) {}
+void setup(struct Ops *ops, int mode) {
+    switch (mode) { case 0: ops->call = first; break;
+    case 1: ops->call = second; break; default: ops->call = first; }
+}
+void run(struct Ops *ops) { (*ops->call)(); }
+]])
+        spec.equal(targets(G, 'run'), 'first,second')
+    end)
+    spec.it('filters unrelated targets and parses each candidate once across traversals', function()
+        local root = tmp_root .. '/registry_once'
+        for i = 1, 20 do
+            write(root .. '/' .. i .. '.lua', 'local function handler() end\nlocal t = { go = handler }\nfunction run' .. i .. '() t.go() end')
+        end
+        local _, G = svc.get(root, { cache_path = root .. '/cache.bin' })
+        local parser = require('codeoutline.parse')
+        local original, count = parser.parse, 0
+        parser.parse = function(...) count = count + 1; return original(...) end
+        local ok, err = pcall(function()
+            local dispatch = require('codeoutline.static_dispatch').query(G)
+            dispatch.incoming({ [G.by_name.run1[1]] = true })
+            spec.equal(count, 0)
+            local wanted = {}; for _, id in ipairs(G.by_name.handler) do wanted[id] = true end
+            dispatch.incoming(wanted)
+            spec.equal(count, 20)
+            dispatch.incoming(wanted)
+            for i = 1, 20 do dispatch.outgoing(G.by_name['run' .. i][1]) end
+            spec.equal(count, 20)
+            local static = require('codeoutline.static_dispatch')
+            static.max_query_entries = 1
+            local bounded, message = pcall(function() static.query(G).incoming(wanted) end)
+            static.max_query_entries = nil
+            spec.equal(bounded, false)
+            spec.contains(message, 'static dispatch query limit exceeded')
+        end)
+        parser.parse = original
+        svc.forget(root)
+        assert(ok, err)
+    end)
     spec.it('handles direct C array dispatch and parenthesized function pointers', function()
         local G = build('registry.c', [[
 struct Ops { void (*call)(void); };

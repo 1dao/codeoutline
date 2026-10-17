@@ -44,10 +44,14 @@ registration location in explore's relationship evidence. They describe static
 potential execution, not proof that a registration or call runs at runtime.
 Recognized indirect sites suppress ordinary same-name call guesses.
 
-The resident index stores a candidate boolean only. Query parsing validates
-source checksums and node identities, then retains registration/site data in a
-query-local FIFO (16 files, estimated 8 MiB budget); no source/tokens or inferred
-edges are saved in the disk index. Cache eviction preserves matching coverage.
+Indexing collects compact target-name and dispatch-position hints only for files with
+recognized dispatch sites. Incoming queries filter files by target name before
+parsing. Query parsing validates source checksums and node identities, then
+retains lightweight site/registration summaries (including empty results) for
+the query lifetime. Each candidate is parsed at most once per query; source,
+tokens and inferred edges are not saved in the disk index. A query exceeding
+100,000 combined file/site/registration entries fails explicitly instead of
+silently dropping edges. This trades additional indexing work for cheaper queries.
 Embeddings without a project root can parse with `{ static_dispatch = true }`
 to supply the transient data explicitly. LSP definition navigation is unchanged;
 this addition feeds the shared graph used by exploration and caller queries.

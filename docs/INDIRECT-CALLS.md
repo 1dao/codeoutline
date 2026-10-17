@@ -45,7 +45,11 @@ potential execution, not proof that a registration or call runs at runtime.
 Recognized indirect sites suppress ordinary same-name call guesses.
 
 Indexing collects compact target-name and dispatch-position hints only for files with
-recognized dispatch sites. Incoming queries filter files by target name before
+recognized dispatch sites. Files without executable declarations are skipped;
+a token prefilter requires a local table and matching receiver call in Lua, or
+a named struct/class pointer field and matching member call in C/C++, before
+detailed scope and registration analysis. This filter does not infer edges.
+Incoming queries filter files by target name before
 parsing. Query parsing validates source checksums and node identities, then
 retains lightweight site/registration summaries (including empty results) for
 the query lifetime. Each candidate is parsed at most once per query; source,

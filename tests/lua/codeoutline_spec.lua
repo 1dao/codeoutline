@@ -1863,6 +1863,18 @@ spec.describe('recursive callers', function()
 end)
 
 spec.describe('static registry dispatch', function()
+    spec.it('skips detailed collection without matching declarations and calls', function()
+        for _, input in ipairs({
+            { 'a.lua', 'local function save() end\nlocal t = { go = save }\nfunction run() other.go() end' },
+            { 'a.lua', 'local function save() end\nM.go = save\nfunction run() M.go() end' },
+            { 'a.c', 'struct Ops { void (*call)(void); };\nvoid run(void) { other.work(); }' },
+            { 'a.c', 'void run(void) { (*ops->call)(); }' },
+        }) do
+            local parsed = ci.parse(input[1], input[2], { static_dispatch = true })
+            spec.equal(parsed.static_dispatch_candidate, nil)
+            spec.equal(parsed.static_dispatch, nil)
+        end
+    end)
     local function build(path, source)
         return graph.build({ files = { [path] = ci.parse(path, source, { static_dispatch = true }) } })
     end

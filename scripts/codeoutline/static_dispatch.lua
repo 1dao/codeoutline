@@ -13,21 +13,66 @@ local function literal(T, i)
         and s:sub(-1) == s:sub(1, 1) and not s:find('\\', 1, true) then return s:sub(2, -2) end
 end
 
+-- Necessary syntax only: leave scope, shadowing and registration validation to
+-- the collector. Token checks work identically with native and Lua scanners.
+local function has_dispatch(T, lua)
+    local declared, called = {}, {}
+    for i = 1, T.n do
+        if i % 4096 == 0 then control.check() end
+        if lua then
+            if T.k[i] == 'kw' and T:text(i) == 'local' then
+                local j = i + 1
+                while T.k[j] == 'id' do
+                    if T:text(j + 1) == '=' and T:text(j + 2) == '{' then declared[T:text(j)] = true end
+                    if T:text(j + 1) ~= ',' then break end
+                    j = j + 2
+                end
+            elseif T.k[i] == 'id' then
+                local tail
+                if T:text(i + 1) == '.' and T.k[i + 2] == 'id' then tail = i + 3
+                elseif T:text(i + 1) == '[' and T.m[i + 1] then tail = T.m[i + 1] + 1 end
+                if tail and T:text(tail) == '(' then called[T:text(i)] = true end
+            end
+        else
+            if T.k[i] == 'kw' and (T:text(i) == 'struct' or T:text(i) == 'class')
+                and T.k[i + 1] == 'id' and T:text(i + 2) == '{' and T.m[i + 2] then
+                for j = i + 3, T.m[i + 2] - 1 do
+                    if j % 4096 == 0 then control.check() end
+                    if T.k[j] == 'id' and T:text(j - 1) == '*' and T:text(j - 2) == '('
+                        and T:text(j + 1) == ')' and T:text(j + 2) == '(' then declared[T:text(j)] = true end
+                end
+            elseif T.k[i] == 'id' and (T:text(i - 1) == '.' or T:text(i - 1) == '->') then
+                if T:text(i + 1) == '(' or T:text(i + 1) == ')' and T:text(i + 2) == '(' then
+                    called[T:text(i)] = true
+                end
+            end
+        end
+    end
+    for name in pairs(declared) do if called[name] then return true end end
+    return false
+end
+
 function M.collect(r, T)
     local lua = r.language == 'lua'
     if not lua and r.language ~= 'c' and r.language ~= 'cpp' then return end
+    local executable
+    for _, node in ipairs(r.nodes) do if callable[node.kind] then executable = true; break end end
+    if not executable then return end
     -- Reject cheap negatives before collecting compact query hints.
     for i = 1, T.n do
         if i % 4096 == 0 then control.check() end
-        local prev = T:text(i - 1)
-        local before = T:text(i - 2)
-        local registration = lua and T:text(i) == '=' and T.k[i + 1] == 'id'
-            and (prev == ']' or T.k[i - 1] == 'id' and (before == '.' or before == '{' or before == ',' or before == ';'))
-        if registration or (not lua and T:text(i) == '*' and prev == '(') then
+        local registration
+        if T.k[i] == 'op' and lua and T:text(i) == '=' and T.k[i + 1] == 'id' then
+            local prev, before = T:text(i - 1), T:text(i - 2)
+            registration = prev == ']' or T.k[i - 1] == 'id'
+                and (before == '.' or before == '{' or before == ',' or before == ';')
+        end
+        if registration or (not lua and T.k[i] == 'op' and T:text(i) == '*' and T:text(i - 1) == '(') then
             r.static_dispatch_candidate = true; break
         end
     end
     if not r.static_dispatch_candidate then return end
+    if not has_dispatch(T, lua) then r.static_dispatch_candidate = nil; return end
     local scopes, ends, stack, owners = {}, { [0] = T.n }, {}, {}
     local opens = { ['function'] = true, ['if'] = true, ['do'] = true, ['repeat'] = true }
     for i = 1, T.n do

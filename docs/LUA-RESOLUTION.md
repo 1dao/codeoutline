@@ -99,3 +99,10 @@ use bounded in-memory caches, shared with full-file query parsing, and are never
 attached to persistent index records. Record replacement and document versions
 invalidate the cached contracts. Loading an index from disk reconstructs these
 contracts on demand from source rather than restoring them from the index file.
+
+Ordinary symbol signatures are also omitted from resident/index-file records for
+files within the shared 1 MiB query-parse limit. Hover, signature help, completion
+and MCP outlines restore them through the same bounded full-file cache. Larger
+indexed files retain signatures so the query size limit does not remove existing
+information. Complete reference columns and binding lookup metadata remain in the
+index to preserve MCP caller-search candidate selection.

@@ -26,7 +26,7 @@ function M.new(path, language, opts)
     return { path = path, language = language, nodes = {}, refs = {}, imports = {},
         ranges = not opts or opts.ranges ~= false, collect_dispatch = opts and opts.dispatch,
         dispatch_only = opts and opts.dispatch_only, collect_static_dispatch = opts and opts.static_dispatch,
-        collect_foreign = opts and opts.foreign }
+        collect_foreign = opts and opts.foreign, omit_signatures = opts and opts.omit_signatures }
 end
 
 -- Collapse a token span into a one-line signature.
@@ -172,14 +172,15 @@ function M.finish(r, T)
             -- Rebuild: deleting keys does not shrink Lua table allocations.
             local compact = {}
             for key, value in pairs(n) do
-                if key ~= 'start_byte' and key ~= 'end_byte' and key ~= 'name_start' and key ~= 'name_end' then
+                if key ~= 'start_byte' and key ~= 'end_byte' and key ~= 'name_start' and key ~= 'name_end'
+                    and not (r.omit_signatures and key == 'sig') then
                     compact[key] = value
                 end
             end
             r.nodes[i] = compact
         end
     end
-    r.ranges = nil
+    r.ranges, r.omit_signatures = nil, nil
     r.prefix, r.skip_calls = nil, nil
     return r
 end

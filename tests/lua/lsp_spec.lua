@@ -821,7 +821,10 @@ int luaopen_native_test(lua_State *L) { luaL_setfuncs(L, methods, 0); luaL_newli
         local function check_records(files)
             for _, rec in pairs(files) do
                 spec.nil_value(rec.foreign_exports)
-                for _, node in ipairs(rec.nodes) do spec.nil_value(node.foreign_signatures) end
+                for _, node in ipairs(rec.nodes) do
+                    spec.nil_value(node.foreign_signatures)
+                    if rec.size <= 1048576 then spec.nil_value(node.sig) end
+                end
             end
         end
         check_records(idx.files)
@@ -864,6 +867,24 @@ int luaopen_native_test(lua_State *L) { luaL_setfuncs(L, methods, 0); luaL_newli
         service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
         spec.equal(nav(req).signatures[1].label, 'read(arg1:string)')
         check_records(idx.files)
+    end)
+    spec.it('restores ordinary signatures for MCP outlines without retaining them in the index', function()
+        nav_write('lazy_outline.cpp', 'class LazyOutline {\npublic:\n    int compute(int amount);\n'
+            .. string.rep('// padding\n', 180) .. '};\n')
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local idx = service.resident(nav_root)
+        local G = idx:symbols()
+        local f = G.file_index['lazy_outline.cpp']
+        local method
+        for _, node in ipairs(G.files[f].nodes) do if node.name == 'compute' then method = node end end
+        spec.truthy(method)
+        spec.nil_value(method.sig)
+        local detail = navigation.detail(G, f, method)
+        spec.contains(detail.sig, 'int amount')
+        spec.equal(navigation.detail(G, f, method), detail)
+        local output = service.explore(nav_root, 'LazyOutline', { budget = 12000 })
+        spec.contains(output, 'compute(int amount)')
+        spec.nil_value(method.sig)
     end)
     spec.it('opens a quoted Lua path that lives deeper than the workspace root', function()
         assert(xutils.mkdir_p(nav_root .. '/deep/scripts'))

@@ -282,7 +282,7 @@ local function node_block(G, idx, id, full)
             for _, k in ipairs(kids) do
                 local kn = G.nodes[k]
                 if not rows[kn.line] then row_lines[#row_lines + 1] = kn.line end
-                rows[kn.line] = kn.sig or kn.name
+                rows[kn.line] = require('codeoutline.navigation').detail(G, G.node_file[k], kn).sig or kn.name
             end
             for _, ln in ipairs(row_lines) do
                 out[#out + 1] = string.format('%d\t    %s', ln, rows[ln])
@@ -461,7 +461,7 @@ function M.run(G, idx, query, opts)
             local ol = {}
             for _, node in ipairs(rec.nodes) do
                 if not node.parent and node.kind ~= 'macro' then
-                    ol[#ol + 1] = string.format('%d\t%s %s', node.line, node.kind, node.sig or node.name)
+                    ol[#ol + 1] = string.format('%d\t%s %s', node.line, node.kind, require('codeoutline.navigation').detail(G, f, node).sig or node.name)
                 end
                 if #ol >= 60 then ol[#ol + 1] = '\t...'; break end
             end

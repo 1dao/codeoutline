@@ -14,7 +14,7 @@ local lsp = require('codeoutline.lsp')
 local parse = require('codeoutline.parse')
 -- Reference scans stop at a result count or time budget and report truncation.
 local M = { MAX_RESULTS = 1000, MAX_HOVER = 3, SCAN_SECONDS = 3, POSITION_SECONDS = 2, MAX_INCLUDES = 2000,
-    MAX_FILE_BYTES = 524288, CACHE_FILES = 64 }
+    MAX_FILE_BYTES = 1048576, CACHE_FILES = 64 }
 
 local sessions = {}
 local ANY = setmetatable({}, { __index = function() return true end })
@@ -343,6 +343,23 @@ function M.full(V, f, native)
     return entry.rec, entry.tokens
 end
 
+-- Restore display/type details without attaching them to resident index nodes.
+function M.detail(V, f, node)
+    if node.sig then return node end
+    local rec = M.full(V, f)
+    if not rec then return node end
+    if not rec.detail_nodes then
+        local map = {}
+        for n, original in ipairs(V.files[f].nodes) do
+            local current = rec.nodes[n]
+            if current and current.name == original.name and current.qualified == original.qualified
+                and current.line == original.line and current.kind == original.kind then map[original] = current end
+        end
+        rec.detail_nodes = map
+    end
+    return rec.detail_nodes[node] or node
+end
+
 local function uri_of(V, f)
     local doc = source_doc(V, f)
     return doc and doc.uri or documents.uri(V.idx:abs(V.files[f].path))
@@ -380,7 +397,7 @@ local function item(V, id)
     local loc, doc, hit = location(V, id)
     local node = V.nodes[id]
     local n, f = index_of(V, id)
-    return { name = node.name, kind = lsp.symbol_kind(node), detail = node.sig or node.qualified, uri = loc.uri,
+    return { name = node.name, kind = lsp.symbol_kind(node), detail = (hit and hit.sig) or node.sig or node.qualified, uri = loc.uri,
         range = hit and doc:range(hit.start_byte, hit.end_byte) or loc.range, selectionRange = loc.range,
         data = { root = V.root, path = V.files[f].path, index = n, name = node.name, qualified = node.qualified } }
 end
@@ -948,7 +965,7 @@ function handlers.lsp_signature(req)
     for _, id in ipairs(targets) do
         local node = V.nodes[id]
         local foreign = require('codeoutline.foreign').signature(node, doc:parse().language, T:text(name_token))
-        local label = node.sig
+        local label = M.detail(V, V.node_file[id], node).sig
         if foreign and not seen[foreign.label] then
             foreign.activeParameter = #foreign.parameters > 0 and math.min(call.argument, #foreign.parameters - 1) or nil
             signatures[#signatures + 1] = foreign
@@ -995,7 +1012,7 @@ function handlers.lsp_hover(req)
         local node, rec = V.nodes[id], V.files[V.node_file[id]]
         local foreign = require('codeoutline.foreign').signature(node, doc:parse().language, doc.source:sub(c.first + 1, c.last))
         parts[#parts + 1] = '```' .. (foreign and doc:parse().language or rec.language or '') .. '\n'
-            .. (foreign and foreign.label or node.sig or node.qualified) .. '\n```'
+            .. (foreign and foreign.label or M.detail(V, V.node_file[id], node).sig or node.qualified) .. '\n```'
         parts[#parts + 1] = node.kind .. ' `' .. node.qualified .. '` — ' .. rec.path .. ':' .. node.line
     end
     return { contents = { kind = 'markdown', value = table.concat(parts, '\n\n') }, range = doc:range(c.first, c.last) }

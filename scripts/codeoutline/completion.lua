@@ -802,7 +802,7 @@ function Completion:chain(chain, depth)
                 if TYPES[node.kind] then
                     for _, id in ipairs(self:types(node.name, entry.file)) do next_ids[#next_ids + 1] = id end
                 else
-                    local type = declared(node, self.V.files[entry.file].language)
+                    local type = declared(navigation.detail(self.V, entry.file, node), self.V.files[entry.file].language)
                     if not type and element.call and FACTORY[element.name] and target.types then
                         for _, id in ipairs(target.types) do next_ids[#next_ids + 1] = id end
                     elseif type then
@@ -841,9 +841,10 @@ local function receiver_chain(T, op, member)
     return #chain > 0 and chain or nil
 end
 
-local function item_for(entry, language)
+local function item_for(entry, language, V, details)
     local node = entry.node
     local foreign = node and require('codeoutline.foreign').signature(node, language, entry.name)
+    if details and node and entry.file and not foreign then node = navigation.detail(V, entry.file, node) end
     return { label = entry.name, kind = ITEM[entry.kind] or 6,
         detail = foreign and foreign.label or (node and (node.sig or (node.type and (node.type .. ' ' .. entry.name))) or entry.detail) }
 end
@@ -954,7 +955,7 @@ function M.complete(req)
         if not seen[entry.name] then
             seen[entry.name] = true
             if #items >= M.MAX_ITEMS then self.incomplete = true; break end
-            items[#items + 1] = item_for(entry, self.language)
+            items[#items + 1] = item_for(entry, self.language, V, not self:expired())
         end
     end
     return { items = items, incomplete = self.incomplete }

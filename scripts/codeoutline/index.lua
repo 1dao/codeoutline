@@ -21,7 +21,12 @@ local graph = require('codeoutline.graph')
 local pool = require('codeoutline.parse_pool')
 
 local M = {}
-local INDEX_PARSE = { ranges = false }
+local INDEX_PARSE = { ranges = false, omit_signatures = true }
+local LARGE_PARSE = { ranges = false }
+-- Keep signatures for files beyond the shared query parser's 1 MiB limit.
+local function parse_options(source)
+    return #source <= 1048576 and INDEX_PARSE or LARGE_PARSE
+end
 
 -- Cache version: a checksum of the parser sources, so any parser change
 -- rebuilds stale caches instead of silently reusing old parse results.
@@ -266,7 +271,7 @@ function Index:query_source(rel)
     local changed = false
     if not rec.encoding then
         if encoding == 'gbk' then
-            local parsed = assert(ci.parse(rel, src, INDEX_PARSE), 'cannot parse decoded source: ' .. rel)
+            local parsed = assert(ci.parse(rel, src, parse_options(src)), 'cannot parse decoded source: ' .. rel)
             parsed.size, parsed.crc, parsed.mtime, parsed.checked = rec.size, rec.crc, rec.mtime, rec.checked
             parsed.encoding = encoding
             self:commit(rel, parsed)
@@ -447,7 +452,7 @@ function M.load_file(abs, rel, max_bytes, old_size, old_crc)
     if old_size == #src and old_crc == crc then
         return { status = 'unchanged', checked = checked }
     end
-    local ok, r = pcall(ci.parse, rel, src, INDEX_PARSE)
+    local ok, r = pcall(ci.parse, rel, src, parse_options(src))
     if not ok and control.is_interrupted(r) then error(r, 0) end
     -- A parser exception must not permanently hide a GBK file.
     -- Successful speculative parsing does not scan encoding here.
@@ -455,7 +460,7 @@ function M.load_file(abs, rel, max_bytes, old_size, old_crc)
         if xutils.to_utf8 then
             local decoded, encoding = xutils.to_utf8(src)
             if decoded then
-                ok, r = pcall(ci.parse, rel, decoded, INDEX_PARSE)
+                ok, r = pcall(ci.parse, rel, decoded, parse_options(src))
                 if not ok and control.is_interrupted(r) then error(r, 0) end
                 if ok and r then r.encoding = encoding end
             end

@@ -24,8 +24,37 @@ Unknown/overwritten registrations, repeated slot writes, replaced tables,
 computed writes, and shadowed bindings do not produce inferred edges. Dynamic
 read keys are reported as unresolved; they are not expanded to every handler.
 Ordinary anonymous/named table-function definitions keep their existing binding
-resolution. Imported/global registries, aliases, metatables, escaped keys and
+resolution. Imported/global registries, metatables, escaped keys and
 numeric indices are outside this first implementation.
+
+Simple same-file lexical aliases are supported: `local active = handlers`
+shares the registry's registrations, and `local callback = save` can supply a
+named local function to a registration such as `{ go = callback }`. Both may
+chain through at most eight aliases:
+
+```lua
+local function save() end
+local callback = save
+local handlers = { go = callback }
+local active = handlers
+function run() active.go() end -- potential run -> save edge
+```
+
+Initializers resolve before the new local
+binding, so `local handlers = handlers` uses the enclosing binding. Writes
+through registry aliases share slot invalidation; reassignment, repeated slot
+writes, computed writes and parameter/local/loop-variable shadowing prevent
+unproven edges. Invalidation is deliberately conservative across the file,
+without control-flow or execution-order analysis. Only single-name local
+initializers containing a bare identifier are propagated; tuple assignments,
+call results, global/imported aliases and extracted callbacks such as
+`local callback = handlers.go` are not inferred by this collector. This feature
+feeds explore/callers, not LSP definition resolution.
+
+Alias summaries remain transient. Existing compact target/member hints include
+the newly recognized sites, so index contents may grow with alias coverage;
+there is no new index field or persisted alias graph. The parser checksum
+invalidates older caches automatically.
 
 C/C++ supports named structs/classes with inline function-pointer fields and
 explicitly typed variables/parameters. Positional or designated initializers

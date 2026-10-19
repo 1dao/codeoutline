@@ -2068,6 +2068,110 @@ function run(key) handlers.save(); handlers['load'](); handlers[key]() end
             spec.equal(targets(G, 'run'), '')
         end
     end)
+    spec.it('follows lexical Lua registry and registration-target alias chains', function()
+        local G = build('registry.lua', [[
+local function save() end
+local callback = save
+local next_callback = callback
+local handlers = { go = next_callback }
+local active = handlers
+local current = active
+function run() current['go']() end
+]])
+        local found, Q = targets(G, 'run')
+        spec.equal(found, 'save')
+        spec.equal(Q.report.entries[1].registered_at, 'registry.lua:4')
+        spec.equal(G.nodes[Q.inn[G.by_name.save[1]][1]].name, 'run')
+    end)
+    spec.it('shares explicit registrations and invalidation across Lua registry aliases', function()
+        for _, write in ipairs({ 'active.go = save', "active['go'] = save", 'handlers.go = save' }) do
+            local G = build('registry.lua', 'local function save() end\nlocal handlers = {}\nlocal active = handlers\n'
+                .. write .. '\nfunction run() active.go() end')
+            spec.equal(targets(G, 'run'), 'save', write)
+        end
+        for _, write in ipairs({ 'active.go = nil', 'active[key] = save', 'handlers[key] = save',
+            'handlers.go = save', 'active.go, other = nil, nil',
+            'active.go, other[key] = nil, nil', 'other, active.go = save, nil',
+            'function change() active.go = save end' }) do
+            local G = build('registry.lua', 'local function save() end\nlocal handlers = { go = save }\nlocal active = handlers\n'
+                .. write .. '\nfunction run() active.go(); handlers.go() end')
+            spec.equal(targets(G, 'run'), '', write)
+        end
+    end)
+    spec.it('rejects reassigned, shadowed and computed Lua aliases', function()
+        for _, body in ipairs({
+            'local active = handlers\nactive = other\nfunction run() active.go() end',
+            'local active = handlers\nactive, other = other, nil\nfunction run() active.go() end',
+            'local active = handlers\nactive, other.go = other, nil\nfunction run() active.go() end',
+            'local active = handlers\nother[key], active = nil, other\nfunction run() active.go() end',
+            'local active = handlers\nother, active = nil, other\nfunction run() active.go() end',
+            'local active = handlers\nfunction active() end\nfunction run() active.go() end',
+            'local active = handlers\nhandlers = {}\nfunction run() active.go() end',
+            'local active = handlers\nfunction run(active) active.go() end',
+            'local active = handlers\nfunction run() for active in iterate() do active.go() end end',
+            'local active = handlers\nfunction run() for _, active in iterate() do active.go() end end',
+            'local active = handlers\nfunction run() local active = {}; active.go() end',
+            'local active = factory(handlers)\nfunction run() active.go() end',
+            'local active = handlers or other\nfunction run() active.go() end',
+            'local active = handlers\n    .other\nfunction run() active.go() end',
+            'local active = handlers\n    [key]\nfunction run() active.go() end',
+            'local callback = save\ncallback = other\nlocal active = { go = callback }\nfunction run() active.go() end',
+            'local callback = save\nsave = other\nlocal active = { go = callback }\nfunction run() active.go() end',
+            'local callback = save\nsave, other = other, nil\nlocal active = { go = callback }\nfunction run() active.go() end',
+            'local callback = save\nfunction save() end\nlocal active = { go = callback }\nfunction run() active.go() end',
+        }) do
+            local G = build('registry.lua', 'local function save() end\nlocal handlers = { go = save }\n' .. body)
+            spec.equal(targets(G, 'run'), '', body)
+        end
+    end)
+    spec.it('resolves Lua alias initializers before their own local binding', function()
+        local G = build('registry.lua', [[
+local function save() end
+local handlers = { go = save }
+function run()
+    local handlers = handlers
+    local save = save
+    local active = { again = save }
+    handlers.go(); active.again()
+end
+]])
+        spec.equal(targets(G, 'run'), 'save,save')
+    end)
+    spec.it('bounds Lua alias chains and rejects forward or cyclic aliases', function()
+        for _, body in ipairs({
+            'local a = b\nlocal b = handlers\nfunction run() a.go() end',
+            'local a = b\nlocal b = a\nfunction run() a.go() end',
+            'local a = handlers\nlocal b = a\nlocal c = b\nlocal d = c\nlocal e = d\nlocal f = e\n'
+                .. 'local g = f\nlocal h = g\nlocal i = h\nlocal j = i\nfunction run() j.go() end',
+        }) do
+            local G = build('registry.lua', 'local function save() end\nlocal handlers = { go = save }\n' .. body)
+            spec.equal(targets(G, 'run'), '', body)
+        end
+    end)
+    spec.it('persists compact alias hints and refreshes alias callers after edits', function()
+        local root = tmp_root .. '/registry_alias'
+        local source = 'local function alias_handler() end\nlocal callback = alias_handler\n'
+            .. 'local handlers = { go = callback }\nlocal active = handlers\nfunction alias_run() active.go() end\n'
+        write(root .. '/a.lua', source)
+        local opts = { cache_path = root .. '/cache.bin' }
+        local idx = svc.get(root, opts)
+        local hint = idx.files['a.lua'].static_dispatch_candidate
+        spec.truthy(hint.targets.alias_handler)
+        spec.equal(hint.targets.callback, nil)
+        spec.equal(idx.files['a.lua'].static_dispatch, nil)
+        local _, info = svc.callers(root, 'alias_handler', opts)
+        spec.equal(#info.callers, 1)
+        spec.equal(info.callers[1].name, 'alias_run')
+        idx:save(); svc.forget(root)
+        local output = svc.explore(root, 'alias_run alias_handler', opts)
+        spec.contains(output, 'alias_run -> alias_handler')
+        _, info = svc.callers(root, 'alias_handler', opts)
+        spec.equal(#info.callers, 1)
+        write(root .. '/a.lua', source:gsub('local active = handlers', 'local active = {}'))
+        _, info = svc.callers(root, 'alias_handler', opts)
+        spec.equal(#info.callers, 0)
+        svc.forget(root)
+    end)
     spec.it('connects C and C++ typed function-pointer tables and field assignments', function()
         for _, ext in ipairs({ 'c', 'cpp' }) do
             local G = build('registry.' .. ext, [[

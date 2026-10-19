@@ -124,6 +124,32 @@ test('official SDK call-path breakpoints explain dynamic sites without adding ca
     } finally { await c.close(); await f.cleanup(); }
 });
 
+test('official SDK Lua registry aliases resolve callers and refresh after reassignment', { timeout: 30000 }, async () => {
+    const f = await fixture();
+    const transport = new StdioClientTransport({ command: defaultRuntime,
+        args: [main, 'STDIO=1', `PROJECT=${f.project}`], cwd: tmpdir(), stderr: 'pipe' });
+    transport.stderr?.on('data', () => {});
+    const c = client();
+    try {
+        const source = 'local function aliasLeaf() end\nlocal callback = aliasLeaf\n'
+            + 'local handlers = { go = callback }\nlocal active = handlers\nfunction aliasRun() active.go() end\n';
+        await writeFile(join(f.project, 'aliases.lua'), source);
+        await c.connect(transport);
+        const flow = await c.callTool({ name: 'codeoutline_explore', arguments: { query: 'aliasRun aliasLeaf' } });
+        assert.notEqual(flow.isError, true);
+        assert.match(flow.content[0].text, /aliasRun -> aliasLeaf/);
+        assert.match(flow.content[0].text, /registered at aliases.lua:3/);
+        const query = () => c.callTool({ name: 'codeoutline_callers', arguments: { query: 'aliasLeaf' } });
+        const callers = await query();
+        assert.notEqual(callers.isError, true);
+        assert.match(callers.content[0].text, /Depth 1: aliasRun/);
+        await writeFile(join(f.project, 'aliases.lua'), source.replace('local active = handlers', 'local active = handlers\nactive = {}'));
+        const changed = await query();
+        assert.notEqual(changed.isError, true);
+        assert.match(changed.content[0].text, /0 potential callers/);
+    } finally { await c.close(); await f.cleanup(); }
+});
+
 test('official SDK Kotlin: kt/kts discovery, aliased call paths and incremental edits', { timeout: 30000 }, async () => {
     const f = await fixture();
     const transport = new StdioClientTransport({ command: defaultRuntime,

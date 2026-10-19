@@ -24,6 +24,11 @@ local function has_dispatch(T, lua)
                 local j = i + 1
                 while T.k[j] == 'id' do
                     if T:text(j + 1) == '=' and T:text(j + 2) == '{' then declared[T:text(j)] = true end
+                    -- A necessary-syntax prefilter only; lexical validity is
+                    -- checked below. Include aliases so they cannot hide sites.
+                    if T:text(j + 1) == '=' and T.k[j + 2] == 'id' and declared[T:text(j + 2)] then
+                        declared[T:text(j)] = true
+                    end
                     if T:text(j + 1) ~= ',' then break end
                     j = j + 2
                 end
@@ -119,15 +124,25 @@ function M.collect(r, T)
         end
         return best
     end
-    local function function_target(name, at)
+    local function function_target(name, at, depth)
+        depth = depth or 0
+        if depth > 8 then return nil end
         local b = binding(name, at)
         if b then
+            if b.alias then
+                if b.invalid then return nil end
+                return function_target(b.alias, b.token - 1, depth + 1)
+            end
+            if depth > 0 and b.invalid then return nil end
             if not b.function_name then return nil end
             for id, n in ipairs(r.nodes) do
                 if callable[n.kind] and n.name == name and n.ti == b.token then return id end
             end
             return nil
         end
+        -- Alias propagation is limited to lexical locals. Global functions can
+        -- be replaced outside this file and have no stable local binding.
+        if lua and depth > 0 then return nil end
         local best, best_scope
         for id, n in ipairs(r.nodes) do
             local scope = scopes[n.ti] or 0
@@ -144,11 +159,12 @@ function M.collect(r, T)
         if T:text(a) == '&' then a = a + 1 end
         local target = a == b and T.k[a] == 'id' and T:text(a)
         local index = target and function_target(target, a)
-        if target and binding(target, a) and not binding(target, a).function_name then target = nil end
+        if target and binding(target, a) and not index then target = nil end
         bucket[key] = bucket[key] or {}
         if lua and #bucket[key] > 0 then bucket[key].unknown = true end
         if not target or (lua and not index) then bucket[key].unknown = true; return end
-        table.insert(bucket[key], { name = target, index = index, line = T:line(site), from = owners[a] })
+        table.insert(bucket[key], { name = index and r.nodes[index].name or target,
+            index = index, line = T:line(site), from = owners[a] })
     end
     local function parts(a, b, separator)
         local result, first, i = {}, a, a
@@ -162,7 +178,30 @@ function M.collect(r, T)
         if first <= b then result[#result + 1] = { first, b } end
         return result
     end
+    local function lvalue_end(i)
+        if T.k[i] ~= 'id' then return nil end
+        local j = i + 1
+        while true do
+            if T:text(j) == '.' and T.k[j + 1] == 'id' then j = j + 2
+            elseif T:text(j) == '[' and T.m[j] then j = T.m[j] + 1
+            else return j end
+        end
+    end
+    local function assignment_end(i)
+        local j = lvalue_end(i)
+        while j and T:text(j) == ',' do j = lvalue_end(j + 1) end
+        return j and T:text(j) == '=' and j or nil
+    end
     if lua then
+        local statement = { ['local'] = true, ['function'] = true, ['return'] = true,
+            ['if'] = true, ['for'] = true, ['while'] = true, ['repeat'] = true,
+            ['do'] = true, ['end'] = true, ['else'] = true, ['elseif'] = true,
+            ['until'] = true, ['break'] = true, ['goto'] = true }
+        local function alias_end(i)
+            local next = T:text(i + 1)
+            return next == '' or next == ';' or statement[next]
+                or T.l[i + 1] > T.l[i] and T.k[i + 1] == 'id'
+        end
         -- Lexical local bindings (including unknown parameters) prevent name leaks.
         for i = 1, T.n do
             if T:text(i) == 'function' and T.k[i] == 'kw' then
@@ -180,22 +219,56 @@ function M.collect(r, T)
                         local b = bind(T:text(j), j, scopes[i])
                         if T:text(j + 1) == '=' and T:text(j + 2) == '{' and T.m[j + 2] then
                             b.slots, b.open = {}, j + 2
+                        elseif T:text(j - 1) == 'local' and T:text(j + 1) == '='
+                            and T.k[j + 2] == 'id' and alias_end(j + 2) then
+                            b.alias = T:text(j + 2)
                         end
                         if T:text(j + 1) ~= ',' then break end
                         j = j + 2
                     end
                 end
+            elseif T:text(i) == 'for' and T.k[i] == 'kw' then
+                local first, body = i + 1, i + 1
+                while body <= T.n and T:text(body) ~= 'do' do
+                    if T.m[body] and T.m[body] > body then body = T.m[body] end
+                    body = body + 1
+                end
+                while T.k[first] == 'id' do
+                    bind(T:text(first), first, body)
+                    if T:text(first + 1) ~= ',' then break end
+                    first = first + 2
+                end
             end
         end
         for i = 1, T.n do
             local prev = T:text(i - 1)
-            if T.k[i] == 'id' and T:text(i + 1) == '=' and prev ~= 'local'
-                and prev ~= '.' and prev ~= ':' and prev ~= '{' and prev ~= ',' then
-                local existing = binding(T:text(i), i)
-                if existing and existing.token ~= i then
-                    existing.invalid = true
-                    bind(T:text(i), i, scopes[i])
+            if T.k[i] == 'id' and prev ~= '.' and prev ~= ':' and prev ~= '{' and prev ~= ',' then
+                local eq = assignment_end(i)
+                local definition = prev == 'function' and T:text(i - 2) ~= 'local' and T:text(i + 1) == '('
+                if eq or definition then
+                    local j = i
+                    while j < (eq or i + 1) do
+                        local tail = definition and i + 1 or lvalue_end(j)
+                        local existing = binding(T:text(j), j)
+                        if tail == j + 1 and existing and existing.token ~= j and prev ~= 'local' then
+                            existing.invalid = true
+                            bind(T:text(j), j, scopes[j])
+                        end
+                        j = tail + 1
+                    end
                 end
+            end
+        end
+        -- Share registry state, not copies: writes through any alias must
+        -- invalidate the same slots. Resolve at the initializer's lexical point.
+        local function registry(b, depth)
+            if not b or depth > 8 then return nil end
+            if b.slots then return b end
+            if b.alias then return registry(binding(b.alias, b.token - 1), depth + 1) end
+        end
+        for _, list in pairs(bindings) do
+            for _, b in ipairs(list) do
+                if b.alias then b.registry = registry(b, 0) end
             end
         end
         for _, list in pairs(bindings) do
@@ -298,7 +371,7 @@ function M.collect(r, T)
         if T.k[i] ~= 'id' or T:text(i - 1) == '.' or T:text(i - 1) == '->'
             or lua and T:text(i - 1) == ':' then goto continue end
         local b = binding(T:text(i), i)
-        if not b or (not b.slots and not b.type) then goto continue end
+        if not b or (not b.slots and not b.type and not b.registry) then goto continue end
         if lua and T:text(i + 1) == '=' and i ~= b.token then b.invalid = true end
         local key, tail, dynamic
         local member = i + 1
@@ -311,15 +384,22 @@ function M.collect(r, T)
             tail, dynamic = close + 1, not key
         end
         if not tail then goto continue end
-        local slots = b.slots or b.type.slots
-        if T:text(tail) == '=' then
-            if dynamic then b.invalid = true
+        local registry = b.registry or b
+        local slots = registry.slots or b.type.slots
+        if lua and T:text(tail) == ',' then
+            -- A member in a multiple-assignment LHS cannot retain a proven
+            -- registration. Do not attempt to pair its RHS expression.
+            if assignment_end(i) then
+                if dynamic then registry.invalid = true else slots[key] = { unknown = true } end
+            end
+        elseif T:text(tail) == '=' then
+            if dynamic then registry.invalid = true
             elseif lua or slots[key] then
                 local last = tail + 1
                 if T:text(last) == '&' then last = last + 1 end
                 local next = T:text(last + 1)
                 local simple = next == ';' or next == '' or lua and (T.l[last + 1] > T.l[last] or next == 'end')
-                if lua and scopes[i] ~= b.scope then slots[key] = { unknown = true }
+                if lua and (scopes[i] ~= registry.scope or T:text(i - 1) == ',') then slots[key] = { unknown = true }
                 else register(slots, key, tail + 1, simple and last or last + 1, i) end
             end
         elseif lua and T:text(i - 1) == 'function' then slots[key] = nil
@@ -336,7 +416,13 @@ function M.collect(r, T)
     -- Flatten shared temporary tables; no tokens/source survive query parsing.
     for _, site in ipairs(data.sites) do
         local entries = site.name and site.slots[site.name]
-        site.registrations = not site.binding.invalid and entries and not entries.unknown and entries or {}
+        local b, valid, depth = site.binding, true, 0
+        while b do
+            if b.invalid or depth > 8 then valid = false; break end
+            depth = depth + 1
+            b = b.alias and binding(b.alias, b.token - 1) or nil
+        end
+        site.registrations = valid and entries and not entries.unknown and entries or {}
         site.slots, site.binding = nil, nil
     end
     if not r.collect_static_dispatch then

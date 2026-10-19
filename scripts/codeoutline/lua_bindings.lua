@@ -27,6 +27,19 @@ local function literal(T, i)
     return s:sub(2, -2)
 end
 
+-- Shared lexical table-member lookup for normal references and query-only
+-- configured callback aliases. Results are local parser node indices.
+function M.local_members(nodes, scopes, name, token, scope, finish)
+    local members = {}
+    for index, n in ipairs(nodes) do
+        if n.ti >= token and n.ti <= finish and scopes[n.ti] == scope
+            and (n.qualified == name .. '.' .. n.name or n.qualified == name .. ':' .. n.name) then
+            members[n.name] = index
+        end
+    end
+    return members
+end
+
 function M.collect(r, T, bm)
     r.lua_imports, r.lua_exports, r.lua_locals = {}, {}, {}
     local scopes, stack, params, bindings = {}, {}, {}, {}
@@ -88,12 +101,7 @@ function M.collect(r, T, bm)
     for name, list in pairs(bindings) do
         for _, b in ipairs(list) do
             if b.hint:match('^lua%-local:') then
-                local members = {}
-                for index, n in ipairs(r.nodes) do
-                    local scope = scopes[n.ti]
-                    if n.ti >= b.token and n.ti <= b.b and scope == b.a
-                        and (n.qualified == name .. '.' .. n.name or n.qualified == name .. ':' .. n.name) then members[n.name] = index end
-                end
+                local members = M.local_members(r.nodes, scopes, name, b.token, b.a, b.b)
                 r.lua_locals[#r.lua_locals + 1] = members
                 b.hint = 'lua-local:' .. #r.lua_locals
             end

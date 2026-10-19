@@ -143,6 +143,13 @@ local function exported(G, f, name, ctx, seen, depth)
     return result
 end
 
+-- Shared named/namespace import lookup for query-owned callback aliases.
+function M.imported(G, f, path, name, ctx)
+    ctx = ctx or M.context(G)
+    local target = M.module(G, f, path, ctx)
+    return target and name ~= '' and exported(G, target, name, ctx, {}, 0) or {}
+end
+
 function M.resolve(G, f, name, kind, recv, evidence, ctx)
     local rec = G.files[f]
     if not js(rec) then return nil end

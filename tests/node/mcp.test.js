@@ -150,6 +150,44 @@ test('official SDK Lua registry aliases resolve callers and refresh after reassi
     } finally { await c.close(); await f.cleanup(); }
 });
 
+test('official SDK configured dispatch follows multilingual aliases and refreshes callbacks', { timeout: 30000 }, async () => {
+    const f = await fixture();
+    const transport = new StdioClientTransport({ command: defaultRuntime,
+        args: [main, 'STDIO=1', `PROJECT=${f.project}`], cwd: tmpdir(), stderr: 'pipe' });
+    transport.stderr?.on('data', () => {});
+    const c = client();
+    try {
+        await writeFile(join(f.project, '.codeoutline.json'), JSON.stringify({ dispatchRules: [
+            { kind: 'event', call: 'bus.emit', argument: 1, register: 'bus.on', keyArgument: 1, handlerArgument: 2 },
+            { kind: 'callback', call: 'schedule', argument: 2 },
+        ] }));
+        await writeFile(join(f.project, 'aliases.lua'), 'local function luaAliasLeaf() end\nlocal api = require("bus")\n'
+            + 'local cb = luaAliasLeaf\napi.on("tick", cb)\nfunction luaAliasRun() api.emit("tick") end\n');
+        await writeFile(join(f.project, 'handler.ts'), 'export function tsAliasLeaf() {}');
+        const ts = 'import {tsAliasLeaf as handler} from "./handler"; import {on as subscribe, emit as publish} from "bus";\n'
+            + 'const cb = handler; subscribe("tick", cb); function tsAliasRun() { publish("tick"); }';
+        await writeFile(join(f.project, 'aliases.ts'), ts);
+        await writeFile(join(f.project, 'handler.py'), 'def pyAliasLeaf():\n    pass\n');
+        await writeFile(join(f.project, 'aliases.py'), 'from handler import pyAliasLeaf as handler\nimport bus as api\n'
+            + 'cb = handler\napi.on("tick", cb)\ndef pyAliasRun():\n    api.emit("tick")\n');
+        await writeFile(join(f.project, 'aliases.c'), 'void cAliasLeaf(void) {}\n'
+            + 'void cAliasRun(void) { void (*cb)(void) = &cAliasLeaf; schedule(1, cb); }');
+        await c.connect(transport);
+        for (const prefix of ['lua', 'ts', 'py', 'c']) {
+            const result = await c.callTool({ name: 'codeoutline_explore', arguments: { query: `${prefix}AliasRun ${prefix}AliasLeaf` } });
+            assert.notEqual(result.isError, true);
+            assert.match(result.content[0].text, new RegExp(`${prefix}AliasRun -> ${prefix}AliasLeaf`));
+            const callers = await c.callTool({ name: 'codeoutline_callers', arguments: { query: `${prefix}AliasLeaf` } });
+            assert.notEqual(callers.isError, true);
+            assert.match(callers.content[0].text, new RegExp(`Depth 1: ${prefix}AliasRun`));
+        }
+        await writeFile(join(f.project, 'aliases.ts'), ts.replace('const cb = handler', 'const cb = unknown'));
+        const changed = await c.callTool({ name: 'codeoutline_callers', arguments: { query: 'tsAliasLeaf' } });
+        assert.notEqual(changed.isError, true);
+        assert.match(changed.content[0].text, /0 potential callers/);
+    } finally { await c.close(); await f.cleanup(); }
+});
+
 test('official SDK Kotlin: kt/kts discovery, aliased call paths and incremental edits', { timeout: 30000 }, async () => {
     const f = await fixture();
     const transport = new StdioClientTransport({ command: defaultRuntime,

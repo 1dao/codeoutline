@@ -2003,6 +2003,171 @@ function start_path() dispatch_path(runtime_key) end
     end)
 end)
 
+spec.describe('configured dispatch aliases across languages', function()
+    local rules = {
+        { kind = 'event', call = 'bus.emit', argument = 1, register = 'bus.on', keyArgument = 1, handlerArgument = 2 },
+        { kind = 'callback', call = 'schedule', argument = 2 },
+        { kind = 'target', call = 'worker.post', argument = 2 },
+        { kind = 'callback', call = 'net->send', argument = 2 },
+    }
+    local function build(files)
+        local parsed = {}
+        for path, source in pairs(files) do parsed[path] = ci.parse(path, source, { dispatch = true }) end
+        return graph.build({ files = parsed })
+    end
+    local function indirect(G, name, opts)
+        local Q = graph.query(G, { dispatch_rules = opts or rules, explain = true })
+        local result, edges = {}, Q.out[G.by_name[name][1]]
+        for i = 1, #edges, graph.EDGE do
+            if edges[i + 2]:match('^indirect:') then result[#result + 1] = G.nodes[edges[i]].name end
+        end
+        table.sort(result)
+        return table.concat(result, ','), Q
+    end
+    spec.it('expands API, callback and literal aliases in Lua, JS, TS and Python', function()
+        local sources = {
+            lua = [[local function done() end
+local api = bus
+local cb = done
+local event = 'tick'
+local later = schedule
+local rpc = worker
+local target = 'done'
+api.on(event, cb)
+function run() api.emit(event); later(1, cb); rpc.post(1, target) end]],
+            js = [[function done() {}
+const api = bus; const cb = done; const event = 'tick'; const later = schedule;
+const rpc = worker; const target = 'done';
+api.on(event, cb);
+function run() { api.emit(event); later(1, cb); rpc.post(1, target); }]],
+            ts = [[function done() {}
+const api = bus; const cb: Handler = done; const event = 'tick'; const later = schedule;
+const rpc = worker; const target = 'done';
+api.on(event, cb);
+function run() { api.emit(event); later(1, cb); rpc.post(1, target); }]],
+            py = 'def done():\n    pass\napi = bus\ncb = done\nevent = "tick"\nlater = schedule\n'
+                .. 'rpc = worker\ntarget = "done"\napi.on(event, cb)\ndef run():\n'
+                .. '    api.emit(event)\n    later(1, cb)\n    rpc.post(1, target)\n',
+        }
+        for ext, source in pairs(sources) do
+            local G = build({ ['a.' .. ext] = source })
+            local found, Q = indirect(G, 'run')
+            spec.equal(found, 'done,done,done', ext)
+            spec.equal(#Q.inn[G.by_name.done[1]], 9, ext)
+        end
+    end)
+    spec.it('rejects overwritten, shadowed and computed dispatch aliases', function()
+        local cases = {
+            { 'a.lua', 'local function done() end\nlocal cb = done\ncb = other\nfunction run() schedule(1, cb) end' },
+            { 'a.lua', 'local function done() end\nlocal cb = done\ncb, other = other, done\nfunction run() schedule(1, cb) end' },
+            { 'a.lua', 'local api = bus\nfunction run(api) api.emit("tick") end' },
+            { 'a.lua', 'local self = bus\nlocal M = {}\nfunction M:run() self.emit("tick") end' },
+            { 'a.lua', 'local api = bus\nfunction run() for api in values() do api.emit("tick") end end' },
+            { 'a.lua', 'local function done() end\nlocal cb = done\nfunction run() local x, cb = values(); schedule(1, cb) end' },
+            { 'a.js', 'function done() {} const cb = done; cb = other; function run() { schedule(1, cb); }' },
+            { 'a.js', 'function done() {} const schedule = "text"; function run() { schedule(1, done); }' },
+            { 'a.js', 'function done() {} let cb = done; [cb] = other; function run() { schedule(1, cb); }' },
+            { 'a.js', 'const api = bus; function run(api) { api.emit("tick"); }' },
+            { 'a.js', 'import * as api from "bus"; function run() { try {} catch(api) { api.emit("tick"); } }' },
+            { 'a.js', 'import * as api from "bus"; function run() { const {api} = object; api.emit("tick"); }' },
+            { 'a.js', 'const api = bus; api.emit = other; function run() { api.emit("tick"); }' },
+            { 'a.ts', 'function done() {} const cb = done; function run(cb: Handler) { schedule(1, cb); }' },
+            { 'a.py', 'def done():\n    pass\ncb = done\ncb = other\ndef run():\n    schedule(1, cb)\n' },
+            { 'a.py', 'def done():\n    pass\ncb = done\ncb, other = other, done\ndef run():\n    schedule(1, cb)\n' },
+            { 'a.py', 'import bus as api\ndef run(api):\n    api.emit("tick")\n' },
+            { 'a.py', 'import bus as api\ndef run():\n    with context as api:\n        api.emit("tick")\n' },
+            { 'a.py', 'def done():\n    pass\ncb = done\ndef run():\n    schedule(1, cb)\n    cb = other\n' },
+            { 'a.py', 'import bus as api\ndef run():\n    for api in values:\n        api.emit("tick")\n' },
+            { 'a.cpp', 'void done() {} void run(void (*cb)()) { schedule(1, cb); }' },
+            { 'a.cpp', 'void done() {} void run() { auto cb = done; cb = other; schedule(1, cb); }' },
+        }
+        for _, case in ipairs(cases) do
+            local source = case[2]
+            -- Every event case has a real registration to expose false matches.
+            if case[1]:match('%.lua$') then source = 'local function leaf() end\nbus.on("tick", leaf)\n' .. source
+            elseif case[1]:match('%.py$') then source = 'def leaf():\n    pass\nbus.on("tick", leaf)\n' .. source
+            elseif case[1]:match('%.js$') or case[1]:match('%.ts$') then source = 'function leaf() {} bus.on("tick", leaf);\n' .. source end
+            spec.equal(indirect(build({ [case[1]] = source }), 'run'), '', case[2])
+        end
+        -- Explicit in-memory parsing must retain an empty site result rather
+        -- than trying to read a project root when every API binding is rejected.
+        spec.equal(indirect(build({ ['a.js'] = 'function done() {} const schedule = "text"; function run() { schedule(1, done); }' }), 'run'), '')
+    end)
+    spec.it('resolves C and C++ function-pointer callback variables', function()
+        for _, ext in ipairs({ 'c', 'cpp' }) do
+            local G = build({ ['a.' .. ext] = [[void done(void) {}
+void run(void) {
+    void (*cb)(void) = &done;
+    schedule(1, cb);
+}]] })
+            spec.equal(indirect(G, 'run'), 'done', ext)
+        end
+    end)
+    spec.it('resolves imported Lua, ES module and Python callbacks through aliases', function()
+        local cases = {
+            { files = { ['handler.lua'] = 'local M = {}\nfunction M.done() end\nreturn M\n',
+                ['a.lua'] = "local m = require('handler')\nlocal api = require('bus')\nlocal cb = m.done\napi.on('tick', cb)\nfunction run() api.emit('tick') end\n" } },
+            { files = { ['handler.js'] = 'export function done() {}',
+                ['a.js'] = "import { done as handler } from './handler'; import * as api from 'bus';\nconst cb = handler; api.on('tick', cb);\nfunction run() { api.emit('tick'); }" } },
+            { files = { ['handler.ts'] = 'export function done() {}',
+                ['a.ts'] = "import * as handlers from './handler'; import {on as register, emit as publish} from 'bus';\nconst cb = handlers.done; register('tick', cb);\nfunction run() { publish('tick'); }" } },
+            { files = { ['handler.py'] = 'def done():\n    pass\n',
+                ['a.py'] = "from handler import done as handler\nimport bus as api\ncb = handler\napi.on('tick', cb)\ndef run():\n    api.emit('tick')\n" } },
+        }
+        for i, case in ipairs(cases) do spec.equal(indirect(build(case.files), 'run'), 'done', 'import case ' .. i) end
+        local G = build({ ['a.lua'] = 'local M = {}\nfunction M.done() end\nlocal N = M\nlocal cb = N.done\nfunction run() schedule(1, M.done); schedule(1, cb); schedule(1, N.done) end' })
+        spec.equal(indirect(G, 'run'), 'done,done,done')
+    end)
+    spec.it('uses exact imported targets and bounds callback alias chains', function()
+        local G = build({
+            ['right.js'] = 'export function done() {}', ['wrong.js'] = 'export function done() {}',
+            ['a.js'] = "import {done as handler} from './right'; const cb = handler; function run() { schedule(1, cb); }",
+        })
+        local _, Q = indirect(G, 'run')
+        for i = 1, #Q.out[G.by_name.run[1]], graph.EDGE do
+            local id = Q.out[G.by_name.run[1]][i]
+            if G.nodes[id].name == 'done' then spec.equal(G.files[G.node_file[id]].path, 'right.js') end
+        end
+        G = build({ ['wrong.py'] = 'def done():\n    pass\n',
+            ['a.py'] = 'from missing import done as handler\ncb = handler\ndef run():\n    schedule(1, cb)\n' })
+        spec.equal(indirect(G, 'run'), '')
+        for _, count in ipairs({ 8, 9 }) do
+            local source = 'function done() {}\n'
+            for i = 1, count do source = source .. 'const cb' .. i .. ' = ' .. (i == 1 and 'done' or 'cb' .. (i - 1)) .. ';\n' end
+            source = source .. 'function run() { schedule(1, cb' .. count .. '); }'
+            spec.equal(indirect(build({ ['a.js'] = source }), 'run'), count == 8 and 'done' or '')
+        end
+    end)
+    spec.it('persists conservative alias roots and resolves them after reload and edits', function()
+        local cases = {
+            lua = 'local function done() end\nlocal api = bus\nlocal cb = done\napi.on("tick", cb)\nfunction run() api.emit("tick") end\n',
+            js = 'function done() {} const api = bus; const cb = done; api.on("tick", cb); function run() { api.emit("tick"); }',
+            ts = 'function done() {} import {on as register, emit as publish} from "bus"; const cb = done; register("tick", cb); function run() { publish("tick"); }',
+            py = 'def done():\n    pass\nimport bus as api\ncb = done\napi.on("tick", cb)\ndef run():\n    api.emit("tick")\n',
+            c = 'void done(void) {}\nvoid run(void) { void (*cb)(void) = &done; Rpc *api = net; api->send(1, cb); }',
+        }
+        for ext, source in pairs(cases) do
+            local root = tmp_root .. '/dispatch_alias_' .. ext
+            write(root .. '/a.' .. ext, source)
+            write(root .. '/.codeoutline.json', xutils.json_pack({ dispatchRules = rules }))
+            local opts = { cache_path = root .. '/cache.bin' }
+            local idx, G = svc.get(root, opts)
+            spec.equal(idx.files['a.' .. ext].dispatch_sites, nil)
+            spec.equal(indirect(G, 'run'), 'done', ext)
+            idx:save(); svc.forget(root)
+            local _, info = svc.callers(root, 'done', opts)
+            spec.equal(#info.callers, 1, ext)
+            -- A successful on-disk query must not leave full alias/site data.
+            idx = svc.get(root, opts)
+            spec.equal(idx.files['a.' .. ext].dispatch_sites, nil)
+            write(root .. '/a.' .. ext, source:gsub('cb = done', 'cb = unknown'):gsub('&done', '&unknown'))
+            _, info = svc.callers(root, 'done', opts)
+            spec.equal(#info.callers, 0, ext)
+            svc.forget(root)
+        end
+    end)
+end)
+
 spec.describe('static registry dispatch', function()
     spec.it('skips detailed collection without matching declarations and calls', function()
         for _, input in ipairs({

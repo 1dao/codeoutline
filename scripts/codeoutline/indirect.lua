@@ -1,6 +1,7 @@
 -- Explicit dispatch contracts. No wildcard API guesses or source evaluation.
 local control = require('codeoutline.control')
 local M = {}
+local aliases = require('codeoutline.dispatch_aliases')
 local member = { ['.'] = true, [':'] = true, ['::'] = true, ['->'] = true }
 
 local function value(T, a, b)
@@ -25,6 +26,7 @@ end
 
 function M.collect(r, T)
     local sites, calls = {}, {}
+    local expand = r.collect_dispatch and aliases.prepare(r, T)
     for index, ref in ipairs(r.refs) do
         if index % 128 == 0 then control.check() end
         local x = ref.tok
@@ -35,25 +37,30 @@ function M.collect(r, T)
                 while first > 2 and member[T:text(first - 1)] and T.k[first - 2] == 'id' do first = first - 2 end
                 local call = value(T, first, x)
                 if call then calls[call.symbol] = true end
-                if not r.collect_dispatch or (type(r.collect_dispatch) == 'table' and not r.collect_dispatch[call and call.symbol]) then goto next_ref end
+                if not r.collect_dispatch then goto next_ref end
+                local api = call and expand(call, first)
+                if not api or not api.symbol or type(r.collect_dispatch) == 'table'
+                    and not r.collect_dispatch[call.symbol] and not r.collect_dispatch[api.symbol] then goto next_ref end
                 local args, a, i = {}, x + 2, x + 2
                 while i <= close do
                     if i == close or T:text(i) == ',' then
-                        args[#args + 1] = value(T, a, i - 1)
+                        args[#args + 1] = expand(value(T, a, i - 1), a)
                         a = i + 1
                     elseif T:match(i) and T:match(i) > i then i = T:match(i) end
                     i = i + 1
                 end
-                if call then sites[#sites + 1] = { call = call.symbol, args = args, from = ref.from, line = ref.line } end
+                if call then sites[#sites + 1] = { call = call.symbol, api = api.symbol,
+                    args = args, from = ref.from, line = ref.line } end
             end
         end
         ::next_ref::
     end
+    if not r.collect_dispatch and next(calls) then aliases.hints(r, T, calls) end
     local names = {}
     for name in pairs(calls) do names[#names + 1] = name end
     table.sort(names)
     if #names > 0 then r.dispatch_calls = names end
-    if #sites > 0 then r.dispatch_sites = sites end
+    if r.collect_dispatch then r.dispatch_sites = sites end
 end
 
 local function rules_for(G, rules)
@@ -91,7 +98,15 @@ function M.query(G, rules, report)
     for _, rule in ipairs(rules) do names[rule.call] = true; if rule.register then names[rule.register] = true end end
     local function candidate(rec, call)
         if rec.dispatch_sites then return true end -- explicit in-memory parse option
-        for _, name in ipairs(rec.dispatch_calls or {}) do if name == call then return true end end
+        for _, name in ipairs(rec.dispatch_calls or {}) do
+            if name == call then return true end
+            if name:sub(1, 1) == '@' then
+                local root = name:sub(2)
+                if root == call or call:sub(1, #root + 1) == root .. '.'
+                    or call:sub(1, #root + 1) == root .. ':'
+                    or call:sub(1, #root + 2) == root .. '->' then return true end
+            end
+        end
         return false
     end
     local function sites(f)
@@ -126,6 +141,37 @@ function M.query(G, rules, report)
         return result
     end
     local function targets(f, site, arg, literal)
+        if arg and not literal and arg.node then return { G.id_of[f][arg.node] } end
+        if arg and not literal and arg.import then
+            local imp = arg.import
+            local rec = G.files[f]
+            if rec.language == 'javascript' or rec.language == 'typescript' then
+                local js = require('codeoutline.js_resolution')
+                dependencies.js = dependencies.js or js.context(G)
+                return js.imported(G, f, imp.path, arg.member, dependencies.js) or {}
+            elseif rec.language == 'lua' then
+                local bindings = require('codeoutline.lua_bindings')
+                dependencies.lua = dependencies.lua or bindings.context(G)
+                local result = {}
+                for _, file in ipairs(bindings.modules(G, { path = imp.path, kind = imp.loader }, dependencies.lua)) do
+                    local record = G.files[file]
+                    local exports = require('codeoutline.foreign').exports(record, 'lua', imp.path) or record.lua_exports
+                    local id = exports and exports[arg.member]
+                    if id then result[#result + 1] = G.id_of[file][id] end
+                end
+                return result
+            elseif rec.language == 'python' then
+                local base = imp.path:gsub('%.', '/')
+                local file = G.file_index[base .. '.py'] or G.file_index[base .. '/__init__.py']
+                local result = {}
+                for _, id in ipairs(file and G.id_of[file] or {}) do
+                    local n = G.nodes[id]
+                    if not n.parent and n.name == arg.member then result[#result + 1] = id end
+                end
+                return result
+            end
+            return {}
+        end
         local name
         if arg then
             if literal then name = arg.literal else name = arg.symbol end
@@ -158,7 +204,7 @@ function M.query(G, rules, report)
                 if (not rule.language or rule.language == rec.language) and candidate(rec, rule.register) then
                     for _, site in ipairs(sites(f)) do
                         local key = site.args[rule.keyArgument]
-                        if site.call == rule.register and key and key.literal then
+                        if (site.call == rule.register or site.api == rule.register) and key and key.literal then
                             local bucket = rec.language .. '\0' .. key.literal
                             registrations[bucket] = registrations[bucket] or {}
                             for _, id in ipairs(targets(f, site, site.args[rule.handlerArgument])) do
@@ -185,7 +231,7 @@ function M.query(G, rules, report)
                     -- even if event registration scans evict it from the FIFO.
                     file_sites = file_sites or sites(f)
                     for _, site in ipairs(file_sites) do
-                        if site.call == rule.call and site.from > 0 and (not only or G.id_of[f][site.from] == only) then
+                        if (site.call == rule.call or site.api == rule.call) and site.from > 0 and (not only or G.id_of[f][site.from] == only) then
                             local ids, arg, registered = {}, site.args[rule.argument], nil
                             if rule.kind == 'event' then
                                 registered = registrations(ri, rule)

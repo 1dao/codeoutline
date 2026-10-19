@@ -142,11 +142,44 @@ kind and its one-based position in `dispatchRules`. They are potential execution
 relationships, not proof that registration or callback invocation runs at runtime.
 
 The collector uses the existing language parsers and tokenizers. Named callback
-expressions and simple quoted literals are supported. Dynamic keys, escaped or
-interpolated strings, anonymous callbacks, variable alias propagation, arbitrary
-function-pointer assignments, and interface/virtual dispatch are not inferred.
-Qualified handler names must match an indexed qualified symbol; module aliases
-are not expanded here. Registrations are static possibilities, so unsubscription,
+expressions and simple quoted literals are supported. Lua, JavaScript/TypeScript,
+Python and C/C++ additionally expand bounded lexical aliases during queries:
+
+| Language | Additional supported forms |
+| --- | --- |
+| Lua | Single-name `local api = bus`, `local cb = handler`, literal aliases, and `require`/`dofile` module aliases |
+| JavaScript/TypeScript | Simple `const`/`let`/`var` aliases, simple type annotations, ES named/namespace imports and renamed imports |
+| Python | Simple name assignments, absolute `import ... as ...` and `from ... import ... as ...` aliases |
+| C/C++ | Single initialized callback variables, including `void (*cb)(void) = &handler` and `auto cb = handler` |
+
+For example, a `bus.emit`/`bus.on` event contract also matches:
+
+```typescript
+import { on as subscribe, emit as publish } from 'bus';
+import { handle as callback } from './handlers';
+const cb = callback;
+subscribe('tick', cb);
+function run() { publish('tick'); }
+```
+
+Bare dotted module identifiers, such as `bus` or `pkg.bus`, provide canonical
+API names. Relative paths and filesystem paths are never shortened to a guessed
+module basename; configure the actual API spelling in those cases. Imported
+callback targets reuse Lua/ES module resolution (including existing exports and
+JS project path configuration). Python callback imports require an exact
+workspace-root module file or package initializer. There is no arbitrary runtime
+loader or Python `sys.path` evaluation. JS default-object members, CommonJS
+imports, Python relative imports, destructuring propagation, anonymous callbacks,
+call results, arbitrary pointer assignments and interface/virtual dispatch are
+not added by alias expansion. Other languages keep their existing direct rules.
+
+Alias chains are limited to eight hops. Parameters, lexical shadowing,
+reassignment and recognized member/multiple/destructuring writes conservatively
+block uncertain aliases; unsupported initializers never fall back to their
+original variable name. This is not control-flow, escape or runtime mutation
+analysis. Dynamic keys and escaped/interpolated strings remain unresolved.
+Qualified names without import evidence still require an indexed qualified
+symbol. Registrations are static possibilities, so unsubscription,
 conditional registration, and distinct runtime instances sharing the same API
 spelling are not modeled. Use distinct exact API rules where instances must be
 isolated. File-scope registrations are supported, while file-scope sends have no
@@ -156,8 +189,12 @@ Lua embeddings can pass the same rule array as `dispatch_rules` to `graph.query`
 or `explore.run`. With no rules configured, no API-contract dispatch edges are
 added; the automatic static registry patterns above remain available.
 
-The resident index stores only distinct dispatch API names per file, not every
-call's arguments. Outgoing edges are resolved when a caller is expanded. Incoming
+The resident index stores only distinct dispatch API names and conservative
+alias-root hints per file, not every call's arguments or an alias graph. Hints
+are restricted to aliases reachable from syntactic call receivers/callees; they
+do not validate scope or infer edges. Alias validation runs only for queries with
+dispatch rules. Additional hints may slightly increase index size. Outgoing
+edges are resolved when a caller is expanded. Incoming
 queries examine all project files matching the configured APIs; event registration
 searches also cover the entire project. Candidate files are checksum-checked and
 reparsed on demand. Source changes during a query cause an explicit retry error,

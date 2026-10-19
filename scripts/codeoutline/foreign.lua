@@ -8,15 +8,14 @@ local function load(G, f)
     local rec = G.files[f]
     if records[rec] ~= nil then return records[rec] or nil end
     local full = require('codeoutline.navigation').full(G, f, true)
-    local entry = full and full.foreign_exports or false
-    if full then
-        -- Node indices are stable only while the source still matches the index.
-        for n, node in ipairs(rec.nodes) do
-            local current = full.nodes[n]
-            if not current or current.name ~= node.name or current.line ~= node.line then entry = false; break end
-        end
-        if #full.nodes ~= #rec.nodes then entry = false end
+    if not full then return nil end
+    -- Node indices are stable only while the source still matches the index.
+    for n, node in ipairs(rec.nodes) do
+        local current = full.nodes[n]
+        if not current or current.name ~= node.name or current.line ~= node.line then return nil end
     end
+    if #full.nodes ~= #rec.nodes then return nil end
+    local entry = full.foreign_exports or false
     records[rec] = entry
     if entry then
         for n, node in ipairs(rec.nodes) do contracts[node] = full.nodes[n].foreign_signatures end
@@ -76,8 +75,11 @@ function M.modules(G, language, name, ctx)
     ctx.foreign_loaded = ctx.foreign_loaded or {}
     for _, f in ipairs(candidates(G, ctx)[name] or {}) do
         if not ctx.foreign_loaded[f] then
+            local exports = load(G, f)
+            -- Failed reads can be skipped within this query, but are never
+            -- retained on the record across later query contexts.
             ctx.foreign_loaded[f] = true
-            for lang, modules in pairs(load(G, f) or {}) do
+            for lang, modules in pairs(exports or {}) do
                 ctx.foreign[lang] = ctx.foreign[lang] or {}
                 for module in pairs(modules) do
                     local names = ctx.foreign[lang]

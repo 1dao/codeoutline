@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "cases": [
+    {"id":"local-direct","mode":"callees","query":"direct_run","expected":[{"file":"registry.lua","name":"save"}],"forbidden":[{"file":"registry.lua","name":"remove"}],"exhaustive":true,"evidence":[{"file":"registry.lua","contains":"function direct_run()\n    save()"}]},
+    {"id":"registry-static","mode":"callees","query":"registry_run","expected":[{"file":"registry.lua","name":"save"}],"forbidden":[{"file":"registry.lua","name":"remove"}],"exhaustive":true,"evidence":[{"file":"registry.lua","contains":"local handlers = { save = save }"}]},
+    {"id":"registry-shadow","mode":"callees","query":"registry_shadow","expected":[],"forbidden":[{"file":"registry.lua","name":"save"}],"exhaustive":true,"evidence":[{"file":"registry.lua","contains":"function registry_shadow(handlers)"}]},
+    {"id":"registry-replaced","mode":"callees","query":"registry_replaced","expected":[],"forbidden":[{"file":"registry.lua","name":"save"}],"exhaustive":true,"evidence":[{"file":"registry.lua","contains":"replaced = external_handlers"}]},
+    {"id":"registry-dynamic-key","mode":"callees","query":"registry_unknown","expected":[],"forbidden":[{"file":"registry.lua","name":"save"}],"exhaustive":true,"evidence":[{"file":"registry.lua","contains":"handlers[key]()"}]},
+    {"id":"import-direct","mode":"callees","query":"imported_run","expected":[{"file":"module.lua","name":"persist"}],"forbidden":[],"exhaustive":true,"evidence":[{"file":"import.lua","contains":"local store = require('module')"},{"file":"module.lua","contains":"return M"}]},
+    {"id":"import-shadow","mode":"callees","query":"imported_shadow","expected":[],"forbidden":[{"file":"module.lua","name":"persist"}],"exhaustive":true,"evidence":[{"file":"import.lua","contains":"function imported_shadow(store)"}]},
+    {"id":"import-callers","mode":"callers","query":"M.persist","expected":[{"file":"import.lua","name":"imported_run"}],"forbidden":[{"file":"import.lua","name":"imported_shadow"}],"exhaustive":true,"evidence":[{"file":"module.lua","contains":"function M.persist()"},{"file":"import.lua","contains":"store.persist()"}]},
+    {"id":"c-function-pointer","mode":"callees","query":"pointer_run","expected":[{"file":"pointer.c","name":"pointer_save"}],"forbidden":[{"file":"pointer.c","name":"pointer_other"}],"exhaustive":true,"evidence":[{"file":"pointer.c","contains":"static struct Ops ops = { pointer_save };"}]}
+  ]
+}

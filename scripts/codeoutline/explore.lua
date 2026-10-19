@@ -214,11 +214,14 @@ end
 -- Shortest call path a -> b (out edges), up to depth; returns id list.
 local function path_between(G, a, b, depth)
     local prev, frontier = { [a] = a }, { a }
+    local expansion_limited = false
     for _ = 1, depth do
         local next_frontier = {}
         for _, x in ipairs(frontier) do
             control.check()
-            local out = G.out[x] or {}
+            local out = G.out[x]
+            if out == nil and G.incomplete then expansion_limited = true end
+            out = out or {}
             for i = 1, #out, graph.EDGE do
                 if i % 128 == 1 then control.check() end
                 local dst = out[i]
@@ -234,10 +237,10 @@ local function path_between(G, a, b, depth)
             end
         end
         frontier = next_frontier
-        if #frontier == 0 then return nil end
-        if #frontier > 20000 then return nil, true end
+        if #frontier == 0 then return nil, false, prev, expansion_limited end
+        if #frontier > 20000 then return nil, true, prev, expansion_limited end
     end
-    return nil, #frontier > 0
+    return nil, #frontier > 0, prev, expansion_limited
 end
 
 local file_cache = {}
@@ -338,13 +341,17 @@ function M.run(G, idx, query, opts)
 
     -- Spine: nodes on call paths between seeds.
     local flows, spine, on_spine = {}, {}, {}
+    local reports = require('codeoutline.query_report')
+    local searches, missed, connected = {}, {}, {}
     local path_limited = false
     for _, a in ipairs(seeds) do
         for _, b in ipairs(seeds) do
             if a ~= b then
-                local p, limited = path_between(G, a, b, M.PATH_DEPTH)
+                local p, limited, prev, expansion_limited = path_between(G, a, b, M.PATH_DEPTH)
                 path_limited = path_limited or limited or false
                 if p then
+                    connected[a] = connected[a] or {}
+                    connected[a][b] = true
                     local names = {}
                     for _, id in ipairs(p) do
                         names[#names + 1] = G.nodes[id].name
@@ -354,6 +361,13 @@ function M.run(G, idx, query, opts)
                         end
                     end
                     flows[#flows + 1] = table.concat(names, ' -> ')
+                else
+                    if not missed[a] then
+                        missed[a] = { root = a, targets = {}, limited = limited, incomplete = expansion_limited,
+                            sites = reports.capture_paths(G.report, prev, a) }
+                        searches[#searches + 1] = missed[a]
+                    end
+                    missed[a].targets[#missed[a].targets + 1] = b
                 end
             end
         end
@@ -422,6 +436,11 @@ function M.run(G, idx, query, opts)
     end
 
     if G.load_incoming then G:load_incoming(seeds) end
+    if #seeds == 1 then
+        searches[1] = { root = seeds[1], targets = {}, single = true,
+            sites = reports.capture_paths(G.report, { [seeds[1]] = seeds[1] }, seeds[1]) }
+    end
+    local breakpoints = reports.path_breakpoints(G.report, G, searches, connected)
 
     -- Confirm every file whose source or symbol labels this query can emit.
     -- GBK reparsing invalidates node IDs, so rebuild and select again before
@@ -434,6 +453,10 @@ function M.run(G, idx, query, opts)
             for i = 1, #edges, graph.EDGE do selected[G.node_file[edges[i]]] = true end
         end
     end
+    for _, entry in ipairs(breakpoints.entries) do
+        for _, id in ipairs(entry.path) do selected[G.node_file[id]] = true end
+        if entry.goal then selected[G.node_file[entry.goal]] = true end
+    end
     for f in pairs(selected) do
         local path = G.files[f].path -- a decoding repair replaces this file ID
         local source, repaired = idx:query_source(path)
@@ -442,8 +465,15 @@ function M.run(G, idx, query, opts)
     end
     if changed then return nil, { encoding_retry = true } end
 
-    local evidence_text = require('codeoutline.query_report').render(G.report, G)
+    local evidence_text = reports.render(G.report, G)
     local evidence_budget = math.min(4096, math.floor(budget / 4))
+    local breakpoint_text = reports.render_breakpoints(breakpoints, G)
+    local breakpoint_budget = breakpoint_text and math.floor(evidence_budget / 2) or 0
+    evidence_budget = evidence_budget - breakpoint_budget
+    local breakpoint_cut = breakpoint_text and (#breakpoint_text > breakpoint_budget or breakpoints.truncated) or false
+    if breakpoint_budget >= 256 then emit(text.limit(breakpoint_text, breakpoint_budget, breakpoints.truncated))
+    elseif breakpoint_text then breakpoint_cut = true end
+    omitted = omitted or breakpoint_cut
     local evidence_cut = #evidence_text > evidence_budget
     if evidence_budget >= 256 then
         emit(text.limit(evidence_text, evidence_budget, G.report.truncated))
@@ -548,11 +578,15 @@ function M.run(G, idx, query, opts)
     if evidence_cut or G.report.truncated then
         table.insert(parts, 1, 'Relationship explanations omitted due to evidence/output limits.')
     end
+    if breakpoint_cut then
+        table.insert(parts, 1, 'Call-path breakpoint explanations omitted due to site/evidence/output limits.')
+    end
     local result, truncated = text.limit(table.concat(parts, '\n'), budget, omitted or #pointers > 0)
     return result, { seeds = seeds, spine = spine, shown = shown, flows = flows, truncated = truncated,
         relationships_incomplete = G.incomplete or false, query_stats = G.stats,
         evidence = G.report.entries, evidence_truncated = evidence_cut or G.report.truncated,
-        path_search_limited = path_limited, evidence_scope = G.report.scope }
+        path_search_limited = path_limited, evidence_scope = G.report.scope,
+        path_breakpoints = breakpoints.entries, path_breakpoints_truncated = breakpoint_cut }
 end
 
 return M

@@ -1862,6 +1862,147 @@ spec.describe('recursive callers', function()
     end)
 end)
 
+spec.describe('call-path breakpoints', function()
+    local function project(files, opts)
+        local records = {}
+        for path, source in pairs(files) do records[path] = ci.parse(path, source, opts or { static_dispatch = true }) end
+        return graph.build({ files = records }), { root = tmp_root,
+            query_source = function(_, path) return assert(files[path]), false end }
+    end
+    spec.it('attaches dynamic dispatch evidence to a searched prefix without inferring an edge', function()
+        local G, idx = project({ ['boundary.lua'] = [[local function final_handler() end
+local handlers = { go = final_handler }
+function dispatch_path(key) handlers[key]() end
+function start_path() dispatch_path(runtime_key) end
+]] })
+        local output, info = explore.run(G, idx, 'start_path final_handler')
+        spec.equal(#info.path_breakpoints, 1)
+        local e = info.path_breakpoints[1]
+        spec.equal(e.status, 'unresolved'); spec.equal(e.reason, 'dynamic registry key')
+        spec.equal(G.nodes[e.from].name, 'start_path'); spec.equal(G.nodes[e.goal].name, 'final_handler')
+        spec.equal(#e.path, 2); spec.equal(G.nodes[e.path[2]].name, 'dispatch_path')
+        spec.equal(e.line, 3)
+        spec.contains(output, '## Call-path breakpoints')
+        spec.contains(output, 'start_path (boundary.lua:4) -> dispatch_path (boundary.lua:3)')
+        spec.contains(output, 'continuation toward final_handler')
+        spec.contains(output, 'not proven causes of disconnection')
+        spec.equal(#info.flows, 0)
+        local Q = graph.query(G)
+        spec.equal(#Q.out[G.by_name.dispatch_path[1]], 0)
+        spec.equal(#Q.inn[G.by_name.final_handler[1]], 0)
+        spec.nil_value(G.out); spec.nil_value(G.inn)
+    end)
+    spec.it('does not invent a reverse-direction breakpoint for connected symbols', function()
+        local G, idx = project({ ['connected.lua'] = 'function connected_start() connected_end() end\n'
+            .. 'function connected_end() external_call() end\n' })
+        local output, info = explore.run(G, idx, 'connected_start connected_end')
+        spec.equal(info.flows[1], 'connected_start -> connected_end')
+        spec.equal(#info.path_breakpoints, 0)
+        spec.equal(output:find('## Call-path breakpoints', 1, true), nil)
+        spec.contains(output, 'no indexed target') -- ordinary evidence remains available
+    end)
+    spec.it('keeps single-symbol explanations local and ignores unrelated functions', function()
+        local G, idx = project({ ['local.lua'] = 'function local_entry() external_call() end\n'
+            .. 'function unrelated() other_unknown() end\nfunction isolated() end\n' })
+        local _, info = explore.run(G, idx, 'local_entry')
+        spec.equal(#info.path_breakpoints, 1)
+        spec.equal(info.path_breakpoints[1].goal, nil)
+        spec.equal(info.path_breakpoints[1].call, 'external_call')
+        local output
+        output, info = explore.run(G, idx, 'isolated')
+        spec.equal(#info.path_breakpoints, 0)
+        spec.equal(output:find('## Call-path breakpoints', 1, true), nil)
+    end)
+    spec.it('distinguishes search limits from unresolved call sites', function()
+        local G, idx = project({ ['limit.lua'] = 'function limit_start() hop_one() end\n'
+            .. 'function hop_one() hop_two() end\nfunction hop_two() hop_three() end\n'
+            .. 'function hop_three() hop_four() end\nfunction hop_four() limit_end() end\nfunction limit_end() end\n' })
+        local output, info = explore.run(G, idx, 'limit_start limit_end')
+        spec.truthy(info.path_search_limited)
+        spec.equal(#info.flows, 0)
+        spec.equal(info.path_breakpoints[1].status, 'search_limit')
+        spec.contains(output, 'path depth/frontier limit reached')
+        spec.contains(output, 'continuation was not checked completely')
+        output, info = explore.run(G, idx, 'limit_start limit_end', { max_expanded = 1 })
+        spec.truthy(info.relationships_incomplete)
+        spec.equal(info.path_breakpoints[1].reason, 'relationship expansion limit reached')
+    end)
+    spec.it('caps sites and reports omitted explanations under small output budgets', function()
+        local calls = {}
+        for i = 1, 12 do calls[i] = 'unknown_' .. i .. '()' end
+        local G, idx = project({ ['many.lua'] = 'function many_calls() ' .. table.concat(calls, '; ') .. ' end\n' })
+        local output, info = explore.run(G, idx, 'many_calls', { budget = 262144 })
+        spec.equal(#info.path_breakpoints, 4)
+        spec.truthy(info.path_breakpoints_truncated)
+        spec.contains(output, 'Additional sites or relationship evidence were omitted')
+        output, info = explore.run(G, idx, 'many_calls', { budget = 256 })
+        spec.truthy(#output <= 256); spec.truthy(info.truncated)
+        spec.truthy(info.path_breakpoints_truncated)
+    end)
+    spec.it('does not blame an earlier completed search for a later expansion limit', function()
+        local G, idx = project({ ['separate.lua'] = 'function done_start() external_call() end\n'
+            .. 'function busy_start() busy_next() end\nfunction busy_next() busy_end() end\nfunction busy_end() end\n' })
+        local _, info = explore.run(G, idx, 'done_start busy_start', { max_expanded = 2 })
+        spec.truthy(info.relationships_incomplete)
+        local limits = 0
+        for _, e in ipairs(info.path_breakpoints) do
+            if e.status == 'search_limit' then
+                limits = limits + 1
+                spec.equal(G.nodes[e.from].name, 'busy_start')
+            end
+        end
+        spec.equal(limits, 1)
+    end)
+    spec.it('checks source snapshots for intermediate files named by a breakpoint', function()
+        local G, idx = project({
+            ['first.c'] = 'void trace_start(void) { step_one(); }',
+            ['second.c'] = 'void step_one(void) { step_two(); }',
+            ['third.c'] = 'void step_two(void) { trace_stop(); }',
+            ['fourth.c'] = 'void trace_stop(void) { missing_runtime(); }',
+            ['goal.c'] = 'void trace_goal(void) {}',
+        })
+        local query_source, checked = idx.query_source, {}
+        idx.query_source = function(self, path) checked[path] = true; return query_source(self, path) end
+        local _, info = explore.run(G, idx, 'trace_start trace_goal')
+        spec.equal(#info.path_breakpoints, 1)
+        spec.equal(#info.path_breakpoints[1].path, 4)
+        spec.truthy(checked['third.c']); spec.truthy(checked['fourth.c'])
+        idx.query_source = function(self, path)
+            if path == 'fourth.c' then error('source changed during query; retry: fourth.c') end
+            return query_source(self, path)
+        end
+        local ok, err = pcall(explore.run, G, idx, 'trace_start trace_goal')
+        spec.equal(ok, false); spec.contains(err, 'source changed during query')
+    end)
+    spec.it('uses existing evidence without reparsing or expanding additional nodes', function()
+        local G, idx = project({ ['reuse.lua'] = 'function reuse_start() reuse_middle() end\n'
+            .. 'function reuse_middle() missing_runtime() end\nfunction reuse_goal() end\n' })
+        local original, parses = ci.parse, 0
+        ci.parse = function(...) parses = parses + 1; return original(...) end
+        local ok, err = pcall(function()
+            local _, info = explore.run(G, idx, 'reuse_start reuse_goal')
+            spec.equal(#info.path_breakpoints, 1)
+            spec.equal(parses, 0)
+            spec.equal(info.query_stats.expanded, 3)
+        end)
+        ci.parse = original
+        assert(ok, err)
+    end)
+    spec.it('identifies the configured rule and argument at an unresolved dispatch site', function()
+        local G, idx = project({ ['rule.lua'] = 'function rule_entry() enqueue(10, make_callback()) end\n'
+            .. 'function rule_goal() end\n' }, { dispatch = true })
+        local output, info = explore.run(G, idx, 'rule_entry rule_goal', {
+            dispatch_rules = {{kind = 'callback', call = 'enqueue', argument = 2}},
+        })
+        local found
+        for _, e in ipairs(info.path_breakpoints) do if e.call == 'enqueue' then found = e end end
+        spec.truthy(found); spec.equal(found.rule, 1); spec.equal(found.argument, 2)
+        spec.contains(found.reason, 'dispatch argument is dynamic')
+        spec.contains(output, 'rule #1, argument 2')
+        spec.equal(#info.flows, 0)
+    end)
+end)
+
 spec.describe('static registry dispatch', function()
     spec.it('skips detailed collection without matching declarations and calls', function()
         for _, input in ipairs({

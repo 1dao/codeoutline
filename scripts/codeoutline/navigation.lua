@@ -301,10 +301,12 @@ end
 -- Source document for file f: its overlay, else the disk file read once per request.
 local function source_doc(V, f)
     if V.drafts and V.drafts[f] then return V.drafts[f] end
-    if not V.disk then return V.root and documents.read(V.root .. '/' .. V.files[f].path) end
+    local rec = V.files[f]
+    local indexed = rec.crc ~= nil and rec or nil
+    if not V.disk then return V.root and documents.read(V.root .. '/' .. rec.path, indexed) end
     local doc = V.disk[f]
     if doc == nil then
-        doc = documents.read(V.idx:abs(V.files[f].path)) or false
+        doc = documents.read(V.idx:abs(rec.path), indexed) or false
         V.disk[f] = doc
     end
     return doc or nil
@@ -326,15 +328,15 @@ function M.full(V, f, native)
     end
     local key = V.files[f]
     local entry = full_cache[key]
-    if entry == nil or entry and native and not entry.foreign then
+    if entry == nil or native and not entry.foreign then
         local fresh = entry == nil
-        if (key.size or 0) > M.MAX_FILE_BYTES then full_cache[key] = false; return nil end
+        if (key.size or 0) > M.MAX_FILE_BYTES then return nil end
         local doc = source_doc(V, f)
-        entry = false
-        if doc then
-            local rec, tokens = parse.parse_tokens(key.path, doc.source, { foreign = native })
-            entry = rec and { rec = rec, tokens = tokens, foreign = native } or false
-        end
+        -- Read/parse failures are transient, unlike a successful empty result.
+        if not doc then return nil end
+        local rec, tokens = parse.parse_tokens(key.path, doc.source, { foreign = native })
+        if not rec then return nil end
+        entry = { rec = rec, tokens = tokens, foreign = native }
         full_cache[key] = entry
         if fresh then full_order[#full_order + 1] = key end
         if #full_order > M.CACHE_FILES then full_cache[table.remove(full_order, 1)] = nil end

@@ -60,6 +60,23 @@ Embeddings without a project root can parse with `{ static_dispatch = true }`
 to supply the transient data explicitly. LSP definition navigation is unchanged;
 this addition feeds the shared graph used by exploration and caller queries.
 
+## Call-path breakpoint reports
+
+Explore also reports **Call-path breakpoints** from unresolved evidence already
+encountered while searching between the selected symbols. Each site includes
+its known indexed prefix, file/line, call and resolver reason. A single-symbol
+query reports only unresolved sites in that symbol. A reverse search does not
+produce a breakpoint when the pair already connects in the other direction.
+
+These are observations, not proof that a particular dynamic call explains a
+missing connection. Search depth/frontier and relationship expansion limits
+are reported separately from unresolved call sites. At most four sites are
+shown, prioritizing dynamic/ambiguous dispatch and longer known prefixes;
+site/evidence/output limits are explicit. Prefix files are source-validated
+before their labels are emitted. The report creates no edges, performs no
+extra graph expansion or parsing, and is never stored in the index. Existing
+MCP arguments and relationship evidence remain available.
+
 ## Configured API contracts
 
 Configure exact API contracts in project-root `.codeoutline.json`. Rules are

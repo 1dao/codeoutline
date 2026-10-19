@@ -120,6 +120,19 @@ jobs:
           fi
       - run: npm ci
       - run: npm test
+      - name: Evaluate query quality on the reviewed corpus
+        run: |
+          $runtime = if ($IsWindows) { './bin/xnet.exe' } else { './bin/xnet' }
+          New-Item -ItemType Directory -Force tmp/query-evaluation | Out-Null
+          & $runtime tests/lua/query_evaluation_spec.lua
+          if ($LASTEXITCODE -ne 0) { throw 'Query scoring tests failed' }
+          & $runtime tools/evaluate-queries.lua ROOT=tests/evaluation/fixtures CASES=tests/evaluation/cases.json OUT=tmp/query-evaluation/native.json
+          if ($LASTEXITCODE -ne 0) { throw 'Native query evaluation failed' }
+          $env:XSCAN_PURE_LUA = '1'
+          try {
+            & $runtime tools/evaluate-queries.lua ROOT=tests/evaluation/fixtures CASES=tests/evaluation/cases.json OUT=tmp/query-evaluation/pure.json
+            if ($LASTEXITCODE -ne 0) { throw 'Pure Lua query evaluation failed' }
+          } finally { Remove-Item Env:XSCAN_PURE_LUA }
       - run: npm run test:package
       - name: Run on the oldest and target Linux distributions
         if: runner.os == 'Linux'

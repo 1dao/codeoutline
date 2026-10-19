@@ -141,11 +141,16 @@ function Doc:tokens()
     return tokens
 end
 
-function M.read(path)
+-- An indexed target must still match its raw on-disk snapshot before decoding.
+function M.read(path, indexed)
     local f = io.open(path, 'rb')
     if not f then return nil end
     local raw = f:read(M.MAX_BYTES + 1); f:close()
     if not raw or #raw > M.MAX_BYTES then return nil end
+    if indexed then
+        local crc = xcompress and xcompress.crc32 and xcompress.crc32(raw) or xutils.sha256_hex(raw)
+        assert(#raw == indexed.size and crc == indexed.crc, 'source changed during query; retry: ' .. indexed.path)
+    end
     local source = xutils.to_utf8(raw)
     if not source then return nil end
     return M.new(M.uri(path), source)

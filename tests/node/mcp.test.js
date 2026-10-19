@@ -95,6 +95,35 @@ test('official SDK static registries: inferred flows, callers and registration e
     } finally { await c.close(); await f.cleanup(); }
 });
 
+test('official SDK call-path breakpoints explain dynamic sites without adding callers', { timeout: 30000 }, async () => {
+    const f = await fixture();
+    const transport = new StdioClientTransport({ command: defaultRuntime,
+        args: [main, 'STDIO=1', `PROJECT=${f.project}`], cwd: tmpdir(), stderr: 'pipe' });
+    transport.stderr?.on('data', () => {});
+    const c = client();
+    try {
+        const source = 'local function boundaryLeaf() end\nlocal handlers = { go = boundaryLeaf }\n'
+            + 'function boundaryMiddle(key) handlers[key]() end\nfunction boundaryStart() boundaryMiddle(runtime_key) end\n';
+        await writeFile(join(f.project, 'boundary.lua'), source);
+        await c.connect(transport);
+        const query = () => c.callTool({ name: 'codeoutline_explore', arguments: { query: 'boundaryStart boundaryLeaf' } });
+        const result = await query();
+        assert.notEqual(result.isError, true);
+        assert.match(result.content[0].text, /## Call-path breakpoints/);
+        assert.match(result.content[0].text, /boundaryStart \(boundary.lua:4\) -> boundaryMiddle \(boundary.lua:3\)/);
+        assert.match(result.content[0].text, /dynamic registry key/);
+        assert.doesNotMatch(result.content[0].text, /## Call paths\n/);
+        const callers = await c.callTool({ name: 'codeoutline_callers', arguments: { query: 'boundaryLeaf' } });
+        assert.notEqual(callers.isError, true);
+        assert.match(callers.content[0].text, /0 potential callers/);
+        await writeFile(join(f.project, 'boundary.lua'), source.replace('handlers[key]()', 'handlers.go()'));
+        const updated = await query();
+        assert.notEqual(updated.isError, true);
+        assert.match(updated.content[0].text, /boundaryStart -> boundaryMiddle -> boundaryLeaf/);
+        assert.doesNotMatch(updated.content[0].text, /## Call-path breakpoints/);
+    } finally { await c.close(); await f.cleanup(); }
+});
+
 test('official SDK Kotlin: kt/kts discovery, aliased call paths and incremental edits', { timeout: 30000 }, async () => {
     const f = await fixture();
     const transport = new StdioClientTransport({ command: defaultRuntime,

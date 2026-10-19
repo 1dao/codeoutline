@@ -99,6 +99,11 @@ use bounded in-memory caches, shared with full-file query parsing, and are never
 attached to persistent index records. Record replacement and document versions
 invalidate the cached contracts. Loading an index from disk reconstructs these
 contracts on demand from source rather than restoring them from the index file.
+Disk reads used for these details validate the indexed byte size and checksum
+before decoding or reparsing. A changed file requires a refresh/retry; unsaved
+documents use their session version instead. Read and parse failures are not
+retained across queries, while successfully parsed files without exports remain
+cached. Within one query, a failed native load is skipped to avoid repeated I/O.
 
 Ordinary symbol signatures are also omitted from resident/index-file records for
 files within the shared 1 MiB query-parse limit. Hover, signature help, completion

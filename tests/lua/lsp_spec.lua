@@ -886,6 +886,150 @@ int luaopen_native_test(lua_State *L) { luaL_setfuncs(L, methods, 0); luaL_newli
         spec.contains(output, 'compute(int amount)')
         spec.nil_value(method.sig)
     end)
+    spec.it('retries lazy signature reads and parses after transient failures', function()
+        for _, failure in ipairs({ 'read', 'parse' }) do
+            local rel = 'retry_detail_' .. failure .. '.lua'
+            nav_write(rel, 'function retry_detail(alpha) return alpha end\n')
+            service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+            local idx = service.resident(nav_root)
+            local G = idx:symbols()
+            local f = G.file_index[rel]
+            local node = G.files[f].nodes[1]
+            local read, tokenize = docs.read, parse.parse_tokens
+            local reads, parses = 0, 0
+            docs.read = function(path, ...)
+                if path:sub(-#rel) == rel then
+                    reads = reads + 1
+                    if failure == 'read' and reads == 1 then return nil end
+                end
+                return read(path, ...)
+            end
+            parse.parse_tokens = function(path, ...)
+                if path == rel then
+                    parses = parses + 1
+                    if failure == 'parse' and parses == 1 then return nil end
+                end
+                return tokenize(path, ...)
+            end
+            local ok, err = pcall(function()
+                spec.nil_value(navigation.detail(G, f, node).sig)
+                local detail = navigation.detail(G, f, node)
+                spec.contains(detail.sig, 'alpha')
+                spec.equal(navigation.detail(G, f, node), detail)
+                spec.equal(reads, 2)
+                spec.equal(parses, failure == 'parse' and 2 or 1)
+                spec.nil_value(node.sig)
+            end)
+            docs.read, parse.parse_tokens = read, tokenize
+            assert(ok, err)
+        end
+    end)
+    spec.it('retries native metadata in later queries after a failed source read', function()
+        local rel = 'retry_contract.c'
+        nav_write(rel, 'static int retry_read(lua_State *L) { luaL_checkinteger(L, 1); return 0; }\n'
+            .. 'static const luaL_Reg funcs[] = {{"read", retry_read}, {NULL, NULL}};\n'
+            .. 'int luaopen_retry_contract(lua_State *L) { luaL_newlib(L, funcs); return 1; }\n')
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local idx = service.resident(nav_root)
+        local G = idx:symbols()
+        local foreign = require('codeoutline.foreign')
+        local ctx = require('codeoutline.lua_bindings').context(G)
+        local read, reads = docs.read, 0
+        docs.read = function(path, ...)
+            if path:sub(-#rel) == rel then
+                reads = reads + 1
+                if reads == 1 then return nil end
+            end
+            return read(path, ...)
+        end
+        local ok, err = pcall(function()
+            spec.equal(#foreign.modules(G, 'lua', 'retry_contract', ctx), 0)
+            spec.equal(#foreign.modules(G, 'lua', 'retry_contract', ctx), 0)
+            spec.equal(reads, 1) -- do not repeat failed I/O inside one query
+            ctx = require('codeoutline.lua_bindings').context(G)
+            local files = foreign.modules(G, 'lua', 'retry_contract', ctx)
+            spec.equal(#files, 1)
+            local exports = foreign.exports(G.files[files[1]], 'lua', 'retry_contract')
+            spec.truthy(exports.read)
+            spec.equal(#foreign.modules(G, 'lua', 'retry_contract', ctx), 1)
+            spec.equal(reads, 2)
+            spec.nil_value(G.files[files[1]].foreign_exports)
+        end)
+        docs.read = read
+        assert(ok, err)
+    end)
+    spec.it('rejects same-size source changes before restoring signatures or native metadata', function()
+        local cases = {
+            { rel = 'stale_detail.lua', before = 'function stale_detail(alpha) return alpha end\n',
+                after = 'function stale_detail(bravo) return bravo end\n' },
+            { rel = 'stale_contract.c', native = true,
+                before = 'static int stale_read(lua_State *L) { luaL_checknumber(L, 1); return 0; }\n'
+                    .. 'static const luaL_Reg funcs[] = {{"read", stale_read}, {NULL, NULL}};\n'
+                    .. 'int luaopen_stale_contract(lua_State *L) { luaL_newlib(L, funcs); return 1; }\n' },
+        }
+        cases[2].after = cases[2].before:gsub('checknumber', 'checkstring')
+        cases[#cases + 1] = { rel = 'stale_bom.lua', before = '\239\187\191function stale_bom(alpha) return alpha end\n',
+            after = '\239\187\191function stale_bom(bravo) return bravo end\n' }
+        for _, case in ipairs(cases) do
+            spec.equal(#case.before, #case.after)
+            nav_write(case.rel, case.before)
+            service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+            local idx = service.resident(nav_root)
+            local G = idx:symbols()
+            local f = G.file_index[case.rel]
+            local foreign = require('codeoutline.foreign')
+            local ctx = require('codeoutline.lua_bindings').context(G)
+            if case.native then navigation.full(G, f) end -- native upgrade of a cached ordinary parse
+            nav_write(case.rel, case.after)
+            local ok, err
+            if case.native then ok, err = pcall(foreign.modules, G, 'lua', 'stale_contract', ctx)
+            else ok, err = pcall(navigation.detail, G, f, G.files[f].nodes[1]) end
+            spec.equal(ok, false)
+            spec.contains(err, 'source changed during query')
+            -- A rejected load must not poison the cache or mark native metadata loaded.
+            nav_write(case.rel, case.before)
+            if case.native then spec.equal(#foreign.modules(G, 'lua', 'stale_contract', ctx), 1)
+            else spec.contains(navigation.detail(G, f, G.files[f].nodes[1]).sig, 'alpha') end
+        end
+    end)
+    spec.it('keeps successful empty native parses cached across queries', function()
+        local rel = 'empty_lazy_contract.c'
+        nav_write(rel, 'int luaopen_empty_lazy_contract(lua_State *L) { return 0; }\n')
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local idx = service.resident(nav_root)
+        local G = idx:symbols()
+        local foreign = require('codeoutline.foreign')
+        local read, reads = docs.read, 0
+        docs.read = function(path, ...)
+            if path:sub(-#rel) == rel then reads = reads + 1 end
+            return read(path, ...)
+        end
+        local ok, err = pcall(function()
+            for _ = 1, 2 do
+                local ctx = require('codeoutline.lua_bindings').context(G)
+                spec.equal(#foreign.modules(G, 'lua', 'empty_lazy_contract', ctx), 0)
+            end
+            spec.equal(reads, 1)
+        end)
+        docs.read = read
+        assert(ok, err)
+    end)
+    spec.it('reuses a verified source snapshot within one navigation request', function()
+        local rel = 'detail_snapshot.lua'
+        nav_write(rel, 'function detail_snapshot(alpha) return alpha end\n')
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local idx = service.resident(nav_root)
+        local G = idx:symbols()
+        local f = G.file_index[rel]
+        local V = setmetatable({ idx = idx, disk = {} }, { __index = G })
+        local doc = navigation.source_doc(V, f)
+        nav_write(rel, 'function detail_snapshot(bravo) return bravo end\n')
+        spec.equal(navigation.source_doc(V, f), doc)
+        spec.contains(navigation.detail(V, f, G.files[f].nodes[1]).sig, 'alpha')
+        local other = setmetatable({ idx = idx, disk = {} }, { __index = G })
+        local ok, err = pcall(navigation.source_doc, other, f)
+        spec.equal(ok, false); spec.contains(err, 'source changed during query')
+    end)
     spec.it('opens a quoted Lua path that lives deeper than the workspace root', function()
         assert(xutils.mkdir_p(nav_root .. '/deep/scripts'))
         nav_write('deep/scripts/mod.lua', 'local M = {}\nfunction M.save() end\nreturn M\n')

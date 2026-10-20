@@ -160,18 +160,21 @@ overlay never writes to the resident tables.
 
 ## Configurable definition rules
 
-Create `.codeoutline.json` in the workspace root to map a literal argument in
-one Lua call to a matching literal argument in another call:
+Create `.codeoutline.json` in the workspace root. A shared event contract under
+`rules` maps an event argument to its registration for navigation, and also
+connects senders to resolved handlers in explore/callers:
 
 ```json
 {
-  "definitionRules": [
+  "rules": [
     {
+      "kind": "event",
       "language": "lua",
       "call": "xthread.post",
       "argument": 2,
-      "target": "xthread.register",
-      "targetArgument": 1
+      "register": "xthread.register",
+      "keyArgument": 1,
+      "handlerArgument": 2
     }
   ]
 }
@@ -182,14 +185,59 @@ With this rule, Go to Definition on `'xmysql_business_done'` in
 `xthread.register('xmysql_business_done', ...)` in the same workspace root.
 The destination selects the matching string at the registration site. Multiple
 registrations return multiple locations; thread routing is not inferred.
+Navigation still works for anonymous or unresolved handlers: reaching a
+registration does not establish an executable call edge. Shared `callback`
+rules navigate to the resolved callback, while `target` rules navigate to the
+named declarations across the project, including remote service table members
+such as `Ntf.handle`. Multiple matching declarations return multiple locations;
+these navigation candidates do not establish graph edges. Shared contracts reuse the bounded, query-time alias
+resolution described in [Indirect calls](INDIRECT-CALLS.md#configured-api-contracts).
+Lua, JS/TS, Python and C/C++ aliases have the same supported forms as graph
+queries; other languages retain direct contract matching. Shared API matching
+is exact and does not use the legacy method-segment shortcut below. Lua `target`/`event`
+navigation also honors the explicitly written API when its receiver cannot be
+inferred (for example, a conditionally assigned `dservice`). This yields
+declaration candidates without creating graph edges. Its optional `qualifiers`
+array filters those navigation candidates by owner, as with declaration rules.
+Lua strings, including quoted escapes and long strings, are compared by value;
+commas inside preceding anonymous functions do not change argument numbering.
+When shared and legacy rules both match, their navigation results are combined
+and deduplicated. Use `kind: "definition"` to preserve the legacy method-name
+shortcut while keeping that rule out of graph inference.
 
-`"targetKind": "declaration"` instead maps the literal to a function or method
+Lua `target` navigation can narrow RPC declarations to a known service file.
+For example, `local redis = skynet.uniqueservice("redisSrv")` followed by
+`dservice.call(redis, "init")` searches `init` declarations in indexed
+`redisSrv.lua` files. `skynet.newservice` and bounded local aliases also work;
+handles declared earlier and assigned once before use are supported too:
+`local target; target = skynet.uniqueservice("redisSrv")`. The assignment and
+use must be in the same block; conditional initialization outside that block,
+multiple writes and assignments in other functions do not establish the source.
+Shadowed bindings are not used to narrow candidates. Skynet module
+aliases are resolved before recognizing the factory. Matching uses exact relative
+path suffixes; duplicate service filenames remain multiple candidates. A known
+indexed service without the requested handler returns no unrelated declarations.
+If the service cannot be inferred or no service file is indexed, ordinary
+declaration candidates remain available. Dynamic forwarding to another module
+is not inferred.
+
+For `skynet.call`/`skynet.send`, the service is argument 1. Other target rules
+inspect the argument preceding the command; `serviceArgument` can override this
+one-based position. Literal service names are supported for explicit
+`serviceArgument` and the `dservice`, `skynet` and `cluster` RPC conventions.
+This narrowing is query-time navigation only; it adds no index fields or graph
+edges. Existing `definitionRules` and `kind: "definition"` retain their original
+declaration lookup behavior.
+
+For Lua navigation-only rules, `"kind": "definition"` with
+`"targetKind": "declaration"` maps the literal to a function or method
 declaration whose name equals the literal, resolved through the symbol tables:
 
 ```json
 {
-  "definitionRules": [
+  "rules": [
     {
+      "kind": "definition",
       "language": "lua",
       "call": "dservice.send",
       "argument": 2,
@@ -214,7 +262,8 @@ For key rules `qualifiers` restricts assignments to the named table (`t` in
 `other.t["name"]` does not bind the qualifier `t`. Constructor keys have no owner and only match when
 `qualifiers` is absent.
 
-Argument numbers start at 1 and count explicit arguments in the source, including
+For `kind: "definition"` and legacy `definitionRules`, argument numbers start
+at 1 and count explicit arguments in the source, including
 for colon calls. Function names must match the written name exactly, except
 that a rule naming only the method segment also binds colon calls
 (`self:callCluster` matches the rule `callCluster`). Calls must
@@ -225,11 +274,15 @@ other arguments do not change argument numbering.
 
 Configuration is read on each definition request, so edits take effect without
 restarting the server. Searches include unsaved documents and unsaved new files.
-Each root has its own configuration, limited to 64 KiB and 32 rules; argument
+Each root has its own configuration, limited to 64 KiB and 32 rules per array
+and combined consumer list; argument
 numbers are limited to 1 through 32. Invalid configuration fails the definition
 request with a validation message. Searches stop after 1,000 locations or 3 s
-and report truncation through `window/showMessage`. These rules affect definition
-navigation only.
+and report truncation through `window/showMessage`. Definition-only rules never
+generate graph edges. Legacy `definitionRules` and `dispatchRules` keep their
+original scope; shared `rules` are processed first and duplicate contracts are
+removed. Configuration edits affect both consumers on the next request without
+an index rebuild. Existing callers need not change their configuration.
 
 ## Completion
 

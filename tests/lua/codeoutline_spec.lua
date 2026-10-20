@@ -1591,7 +1591,109 @@ return M
     end)
 end)
 
+spec.describe('unified project rules', function()
+    local config_rules = require('codeoutline.rules')
+    local event = { kind = 'event', language = 'lua', call = 'bus.emit', argument = 1,
+        register = 'bus.on', keyArgument = 1, handlerArgument = 2 }
+    spec.it('normalizes one contract for both consumers without mutating configuration', function()
+        local config = { rules = { event } }
+        local normalized = config_rules.normalize(config)
+        spec.equal(#normalized.dispatch, 1); spec.equal(#normalized.definitions, 1)
+        spec.equal(normalized.definitions[1].target, 'bus.on')
+        spec.equal(normalized.definitions[1].targetArgument, 1)
+        spec.equal(normalized.definitions[1].shared, true)
+        spec.equal(event.target, nil); spec.equal(event.shared, nil)
+    end)
+    spec.it('deduplicates shared and legacy contracts while preserving legacy scope', function()
+        local normalized = config_rules.normalize({ rules = { event, event }, dispatchRules = { event },
+            definitionRules = { { language = 'lua', call = 'bus.emit', argument = 1, target = 'bus.on', targetArgument = 1 } } })
+        spec.equal(#normalized.dispatch, 1); spec.equal(#normalized.definitions, 1)
+        spec.equal(normalized.definitions[1].shared, true)
+        normalized = config_rules.normalize({ dispatchRules = { event } })
+        spec.equal(#normalized.definitions, 0)
+        normalized = config_rules.normalize({ definitionRules = {
+            { call = 'bus.emit', argument = 1, target = 'bus.on', targetArgument = 1 } } })
+        spec.equal(#normalized.dispatch, 0)
+    end)
+    spec.it('keeps definition-only contracts out of graph inference', function()
+        local normalized = config_rules.normalize({ rules = {
+            { kind = 'definition', call = 'lookup', argument = 1, targetKind = 'key', qualifiers = { 'Items' } } } })
+        spec.equal(#normalized.dispatch, 0)
+        spec.equal(normalized.definitions[1].qualifiers.Items, true)
+    end)
+    spec.it('validates optional RPC service argument positions', function()
+        local r = { kind = 'target', call = 'rpc.send', argument = 4, serviceArgument = 1 }
+        local n = config_rules.normalize({ rules = { r } })
+        spec.equal(n.definitions[1].serviceArgument, 1)
+        for _, value in ipairs({ 0, 33, 1.5, '1' }) do
+            r.serviceArgument = value
+            spec.equal(pcall(config_rules.normalize, { rules = { r } }), false)
+        end
+        r.kind, r.serviceArgument = 'callback', 1
+        spec.equal(pcall(config_rules.normalize, { rules = { r } }), false)
+    end)
+    spec.it('preserves navigation qualifiers and legacy matching on duplicate shared contracts', function()
+        local target = { kind = 'target', language = 'lua', call = 'rpc.send', argument = 2, qualifiers = { 'CMD' } }
+        local normalized = config_rules.normalize({ rules = { target }, definitionRules = {
+            { language = 'lua', call = 'rpc.send', argument = 2, targetKind = 'declaration', qualifiers = { 'CMD' } } } })
+        spec.equal(#normalized.definitions, 1)
+        spec.equal(normalized.definitions[1].legacy, true)
+        spec.equal(normalized.definitions[1].qualifiers.CMD, true)
+        spec.equal(target.qualifiers[1], 'CMD', 'configuration stays unchanged')
+        for _, q in ipairs({ { CMD = true }, { 'CMD', false }, { 'other.CMD' } }) do
+            target.qualifiers = q
+            spec.equal(pcall(config_rules.normalize, { rules = { target } }), false)
+        end
+    end)
+    spec.it('rejects invalid arrays, positions and excessive combined contracts', function()
+        for _, config in ipairs({ { rules = { bad = event } }, { rules = { { kind = 'event', call = 'bus.emit', argument = 1 } } },
+            { rules = { { kind = 'callback', call = 'schedule', argument = 0 } } } }) do
+            spec.equal(pcall(config_rules.normalize, config), false)
+        end
+        local unified, legacy = {}, {}
+        for i = 1, 32 do unified[i] = { kind = 'callback', call = 'call' .. i, argument = 1 } end
+        legacy[1] = { kind = 'callback', call = 'extra', argument = 1 }
+        spec.equal(pcall(config_rules.normalize, { rules = unified, dispatchRules = legacy }), false)
+    end)
+end)
+
 spec.describe('configured indirect dispatch', function()
+    spec.it('does not turn identity module imports into broad dispatch hints', function()
+        local rec = ci.parse('hint.lua', 'local skynet = require "skynet"\nfunction run() skynet.start(function() end) end')
+        for _, name in ipairs(rec.dispatch_calls or {}) do spec.truthy(name ~= '@skynet') end
+        rec = ci.parse('hint.lua', 'local skynet = require "skynet"\nlocal api = skynet\nfunction run() api.call(1, "lua", "go") end')
+        local found = false
+        for _, name in ipairs(rec.dispatch_calls or {}) do if name == '@skynet' then found = true end end
+        spec.truthy(found, 'real module aliases retain conservative candidates')
+    end)
+    spec.it('filters incoming target literals without losing escaped aliases or caching negatives', function()
+        local root = tmp_root .. '/incoming_literal_filter'
+        write(root .. '/handlers.lua', 'function filter_first() end\nfunction filter_second() end\nfunction other() end\n')
+        write(root .. '/first.lua', 'local api = require "filter_rpc"\nlocal key = "filter_\\102irst"\nfunction run_first() api.post(1, key) end\n')
+        write(root .. '/second.lua', 'local api = require "filter_rpc"\nfunction run_second() api.post(1, "filter_second") end\n')
+        write(root .. '/negative.lua', 'local api = require "filter_rpc"\nlocal escaped = "\\120"\nfunction run_other() api.post(1, "other") end\n')
+        local _, G = svc.get(root, { cache_path = root .. '/cache.bin' })
+        local original, parsed = ci.parse, {}
+        ci.parse = function(path, ...)
+            parsed[path] = (parsed[path] or 0) + 1
+            return original(path, ...)
+        end
+        local ok, err = pcall(function()
+            local I = require('codeoutline.indirect').query(G, { { kind = 'target', language = 'lua', call = 'filter_rpc.post', argument = 2 } })
+            local first = I.incoming({ [G.by_name.filter_first[1]] = true })
+            spec.equal(#first[G.by_name.run_first[1]], 1)
+            spec.equal(parsed['negative.lua'], nil)
+            spec.equal(parsed['second.lua'], nil)
+            local second = I.incoming({ [G.by_name.filter_second[1]] = true })
+            spec.equal(#second[G.by_name.run_second[1]], 1)
+            spec.equal(parsed['second.lua'], 1)
+            local outgoing = I.outgoing(G.by_name.run_other[1])
+            spec.equal(#outgoing, 1)
+            spec.equal(G.nodes[outgoing[1].target].name, 'other')
+        end)
+        ci.parse = original
+        assert(ok, err)
+    end)
     spec.it('preserves dispatch sites and node identities in query-only parsing', function()
         local sources = {
             ['a.lua'] = "local m = require('mod')\nfunction outer() local function inner() schedule(1, done) end; bus.emit('tick'); pcall(m.run) end\nbus.on('tick', outer)",

@@ -1041,6 +1041,121 @@ int luaopen_native_test(lua_State *L) { luaL_setfuncs(L, methods, 0); luaL_newli
             position = doc:position(assert(source:find('mod.lua', 1, true))) })
         spec.equal(#found, 1); spec.equal(found[1].uri, nav_uri('deep/scripts/mod.lua'))
     end)
+    spec.it('shares event rules and aliases between navigation and relationship queries', function()
+        local config = nav_root .. '/.codeoutline.json'
+        local source = 'local api = require("unified_bus")\nlocal key = "unified_tick"\nfunction unified_send() api.emit(key) end\n'
+        local target = 'local api = unified_bus\nlocal event = "unified_tick"\nlocal function unified_done() end\nlocal cb = unified_done\napi.on(event, cb)\n'
+        nav_write('unified_send.lua', source); nav_write('unified_target.lua', target)
+        write(config, '{"rules":[{"kind":"event","language":"lua","call":"unified_bus.emit","argument":1,'
+            .. '"register":"unified_bus.on","keyArgument":1,"handlerArgument":2}]}')
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local ok, err = pcall(function()
+            local doc = docs.read(nav_root .. '/unified_send.lua')
+            local req = { method = 'lsp_definition', uri = doc.uri, position = doc:position(assert(source:find('key)', 1, true)) - 1) }
+            local found = nav(req)
+            spec.equal(#found, 1); spec.equal(found[1].uri, nav_uri('unified_target.lua'))
+            spec.equal(range_text('unified_target.lua', found[1].range), 'event')
+            local _, info = service.callers(nav_root, 'unified_done', { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+            spec.equal(#info.callers, 1); spec.equal(info.callers[1].name, 'unified_send')
+            -- Navigation still finds a registration whose callback is anonymous.
+            nav_write('unified_target.lua', target:gsub('api.on%(event, cb%)', 'api.on(event, function() end)'))
+            service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+            found = nav(req); spec.equal(#found, 1)
+            _, info = service.callers(nav_root, 'unified_done', { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+            spec.equal(#info.callers, 0)
+            write(config, '{"rules":[]}')
+            found = nav(req)
+            for _, loc in ipairs(found) do spec.truthy(loc.uri ~= nav_uri('unified_target.lua')) end
+        end)
+        os.remove(config); if not ok then error(err, 0) end
+    end)
+    spec.it('navigates shared callbacks and RPC targets in other languages', function()
+        local config = nav_root .. '/.codeoutline.json'
+        local cases = {
+            { 'js', 'function shared_js_done() {} const cb = shared_js_done; function shared_js_run() { schedule(1, cb); }', 'shared_js_done', 'cb)' },
+            { 'ts', 'function shared_ts_done() {} const cb: Handler = shared_ts_done; function shared_ts_run() { schedule(1, cb); }', 'shared_ts_done', 'cb)' },
+            { 'py', 'def shared_py_done():\n    pass\ncb = shared_py_done\ndef shared_py_run():\n    schedule(1, cb)\n', 'shared_py_done', 'cb)' },
+            { 'c', 'void shared_c_done(void) {} void shared_c_run(void) { void (*cb)(void) = &shared_c_done; schedule(1, cb); }', 'shared_c_done', 'cb);' },
+        }
+        write(config, '{"rules":[{"kind":"callback","call":"schedule","argument":2}]}')
+        local ok, err = pcall(function()
+            for _, case in ipairs(cases) do
+                local rel = 'shared_callback.' .. case[1]
+                nav_write(rel, case[2])
+                service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+                local doc = docs.read(nav_root .. '/' .. rel)
+                local found = nav({ method = 'lsp_definition', uri = doc.uri,
+                    position = doc:position(assert(case[2]:find(case[4], 1, true)) - 1) })
+                spec.equal(#found, 1, case[1]); spec.equal(found[1].uri, doc.uri, case[1])
+                spec.equal(range_text(rel, found[1].range), case[3], case[1])
+            end
+            nav_write('shared_target.lua', 'function shared_rpc_done() end\nfunction shared_rpc_run() worker.post(2, "shared_rpc_done") end\n')
+            write(config, '{"rules":[{"kind":"target","call":"worker.post","argument":2}]}')
+            service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+            local doc = docs.read(nav_root .. '/shared_target.lua')
+            local found = nav({ method = 'lsp_definition', uri = doc.uri, position = { line = 1, character = 51 } })
+            spec.equal(#found, 1); spec.equal(range_text('shared_target.lua', found[1].range), 'shared_rpc_done')
+        end)
+        os.remove(config); if not ok then error(err, 0) end
+    end)
+    spec.it('navigates shared imported event aliases in TS and Python', function()
+        local config = nav_root .. '/.codeoutline.json'
+        write(config, '{"rules":[{"kind":"event","call":"shared_bus.emit","argument":1,'
+            .. '"register":"shared_bus.on","keyArgument":1,"handlerArgument":2}]}')
+        local cases = {
+            { 'ts', 'import {emit as publish} from "shared_bus"; function event_run() { publish("shared_cross_tick"); }',
+                'import {on as subscribe} from "shared_bus"; subscribe("shared_cross_tick", () => {});' },
+            { 'py', 'from shared_bus import emit as publish\ndef event_run():\n    publish("shared_cross_tick")\n',
+                'from shared_bus import on as subscribe\nsubscribe("shared_cross_tick", unknown_callback)\n' },
+        }
+        local ok, err = pcall(function()
+            for _, case in ipairs(cases) do
+                nav_write('shared_event_send.' .. case[1], case[2]); nav_write('shared_event_target.' .. case[1], case[3])
+                service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+                local doc = docs.read(nav_root .. '/shared_event_send.' .. case[1])
+                local found = nav({ method = 'lsp_definition', uri = doc.uri,
+                    position = doc:position(assert(case[2]:find('shared_cross_tick', 1, true))) })
+                spec.equal(#found, 1, case[1]); spec.equal(found[1].uri, nav_uri('shared_event_target.' .. case[1]))
+                spec.equal(range_text('shared_event_target.' .. case[1], found[1].range), '"shared_cross_tick"')
+            end
+        end)
+        os.remove(config); if not ok then error(err, 0) end
+    end)
+    spec.it('uses shared rules in unsaved new registration documents', function()
+        local config = nav_root .. '/.codeoutline.json'
+        write(config, '{"rules":[{"kind":"event","call":"draft_bus.emit","argument":1,'
+            .. '"register":"draft_bus.on","keyArgument":1,"handlerArgument":2}]}')
+        local source = 'function draft_send() draft_bus.emit("draft_rule_tick") end'
+        nav_write('shared_draft_send.lua', source)
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local target = nav_uri('shared_unsaved_registration.lua')
+        navigation.sync({ session = 'shared-rules', open = { [target] = 1 }, changed = {
+            [target] = { version = 1, language = 'lua', source = 'local api = draft_bus\napi.on("draft_rule_tick", function() end)' } } })
+        local ok, err = pcall(function()
+            local doc = docs.read(nav_root .. '/shared_draft_send.lua')
+            local found = nav({ method = 'lsp_definition', session = 'shared-rules', uri = doc.uri,
+                position = doc:position(assert(source:find('draft_rule_tick', 1, true))) })
+            spec.equal(#found, 1); spec.equal(found[1].uri, target); spec.equal(found[1].range.start.line, 1)
+        end)
+        navigation.close('shared-rules'); os.remove(config); if not ok then error(err, 0) end
+    end)
+    spec.it('does not collect shared dispatch sites for unrelated definition requests', function()
+        local config = nav_root .. '/.codeoutline.json'
+        write(config, '{"rules":[{"kind":"event","call":"unused.emit","argument":1,'
+            .. '"register":"unused.on","keyArgument":1,"handlerArgument":2}]}')
+        local source = 'local function ordinary_leaf() end\nfunction ordinary_run() ordinary_leaf() end\nunused.emit("unrelated")'
+        nav_write('shared_ordinary.lua', source)
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local doc = docs.read(nav_root .. '/shared_ordinary.lua')
+        local methods = getmetatable(doc)
+        local original, count = methods.dispatch, 0
+        methods.dispatch = function(...) count = count + 1; return original(...) end
+        local ok, err = pcall(function()
+            local found = nav({ method = 'lsp_definition', uri = doc.uri, position = { line = 1, character = 26 } })
+            spec.equal(#found, 1); spec.equal(count, 0)
+        end)
+        methods.dispatch = original; os.remove(config); if not ok then error(err, 0) end
+    end)
     spec.it('uses configurable literal argument rules and ignores unrelated strings and comments', function()
         local config = nav_root .. '/.codeoutline.json'
         nav_write('messages.lua', "xthread.post(nested(1, 2), 'xmysql_business_done', false)\n")
@@ -1119,9 +1234,237 @@ int luaopen_native_test(lua_State *L) { luaL_setfuncs(L, methods, 0); luaL_newli
             local colon = nav({ method = 'lsp_definition', uri = doc.uri, position = { line = 1, character = 53 } })
             spec.equal(#colon, 1, 'self:callCluster binds the callCluster rule')
             spec.equal(range_text('rpc_impl.lua', colon[1].range), 'req_friend')
+            write(config, '{"rules":[{"kind":"definition","call":"dservice.send","argument":2,'
+                .. '"targetKind":"declaration","qualifiers":["Ntf"]},{"kind":"definition",'
+                .. '"call":"callCluster","argument":3,"targetKind":"declaration"}]}')
+            spec.equal(#nav({ method = 'lsp_definition', uri = doc.uri,
+                position = { line = 0, character = 29 } }), 1, 'definition-only migration retains qualifiers')
+            colon = nav({ method = 'lsp_definition', uri = doc.uri, position = { line = 1, character = 53 } })
+            spec.equal(#colon, 1, 'definition-only migration retains method shorthand')
         end)
         os.remove(config)
         if not ok then error(err, 0) end
+    end)
+    spec.it('preserves cross-service table declarations when migrating to unified target rules', function()
+        local config = nav_root .. '/.codeoutline.json'
+        nav_write('rpc_migrated_call.lua', 'local dservice = require "dservice"\n'
+            .. 'dservice.send(mysqlpool, "rpc_migrated_execute", sql)\n')
+        nav_write('rpc_migrated_impl.lua', 'local Ntf = {}\nfunction Ntf.rpc_migrated_execute(sql) end\n')
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local ok, err = pcall(function()
+            local req = { method = 'lsp_definition', uri = nav_uri('rpc_migrated_call.lua'),
+                position = { line = 1, character = 30 } }
+            write(config, '{"definitionRules":[{"language":"lua","call":"dservice.send",'
+                .. '"argument":2,"targetKind":"declaration"}]}')
+            local before = nav(req)
+            spec.equal(#before, 1)
+            write(config, '{"rules":[{"language":"lua","call":"dservice.send","argument":2,"kind":"target"}]}')
+            local after = nav(req)
+            spec.equal(#after, #before, 'migration retains remote table declarations')
+            spec.equal(after[1].uri, before[1].uri)
+            spec.equal(range_text('rpc_migrated_impl.lua', after[1].range), 'rpc_migrated_execute')
+        end)
+        os.remove(config)
+        if not ok then error(err, 0) end
+    end)
+    spec.it('keeps Lua literal forms and argument positions in shared target rules', function()
+        local config = nav_root .. '/.codeoutline.json'
+        nav_write('audit_rpc_impl.lua', 'local CMD = {}\nfunction CMD.audit_rpc_done() end\n')
+        local lines = { 'worker.post(1, "audit_rpc_\\100one")',
+            'worker.post(1, [=[audit_rpc_done]=])',
+            'worker.post(function() local a, b = 1, 2; return a, b end, "audit_rpc_done")' }
+        local source = table.concat(lines, '\n') .. '\n'
+        nav_write('audit_rpc_call.lua', source)
+        write(config, '{"rules":[{"kind":"target","language":"lua","call":"worker.post","argument":2}]}')
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local ok, err = pcall(function()
+            local doc = docs.read(nav_root .. '/audit_rpc_call.lua')
+            for line, text in ipairs(lines) do
+                local found = nav({ method = 'lsp_definition', uri = doc.uri,
+                    position = { line = line - 1, character = assert(text:find('audit_rpc_', 1, true)) } })
+                spec.equal(#found, 1, 'literal/anonymous-function case ' .. line)
+                spec.equal(found[1].uri, nav_uri('audit_rpc_impl.lua'))
+            end
+        end)
+        os.remove(config); if not ok then error(err, 0) end
+    end)
+    spec.it('honors qualifiers on shared declaration navigation', function()
+        local config = nav_root .. '/.codeoutline.json'
+        nav_write('audit_qualified.lua', 'worker.post(1, "audit_qualified")\n'
+            .. 'function CMD.audit_qualified() end\nfunction Ntf.audit_qualified() end\n')
+        write(config, '{"rules":[{"kind":"target","language":"lua","call":"worker.post",'
+            .. '"argument":2,"qualifiers":["CMD"]}]}')
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local ok, err = pcall(function()
+            local found = nav({ method = 'lsp_definition', uri = nav_uri('audit_qualified.lua'),
+                position = { line = 0, character = 20 } })
+            spec.equal(#found, 1); spec.equal(found[1].range.start.line, 1)
+        end)
+        os.remove(config); if not ok then error(err, 0) end
+    end)
+    spec.it('combines matching shared and legacy navigation rules', function()
+        local config = nav_root .. '/.codeoutline.json'
+        nav_write('audit_mixed.lua', 'audit_emit("audit_mixed")\naudit_on("audit_mixed", function() end)\n'
+            .. 'function audit_mixed() end\n')
+        write(config, '{"rules":[{"kind":"event","call":"audit_emit","argument":1,"register":"audit_on",'
+            .. '"keyArgument":1,"handlerArgument":2}],"definitionRules":[{"call":"audit_emit",'
+            .. '"argument":1,"targetKind":"declaration"}]}')
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local ok, err = pcall(function()
+            local found = nav({ method = 'lsp_definition', uri = nav_uri('audit_mixed.lua'),
+                position = { line = 0, character = 14 } })
+            spec.equal(#found, 2, 'registration and declaration both survive migration')
+        end)
+        os.remove(config); if not ok then error(err, 0) end
+    end)
+    spec.it('retains the legacy matcher when shared and legacy rules deduplicate', function()
+        local config = nav_root .. '/.codeoutline.json'
+        nav_write('audit_dedup.lua', 'local transport = make_transport()\ntransport.send("audit_dedup")\n'
+            .. 'transport.on("audit_dedup", function() end)\n')
+        write(config, '{"rules":[{"kind":"event","language":"lua","call":"transport.send","argument":1,'
+            .. '"register":"transport.on","keyArgument":1,"handlerArgument":2}],'
+            .. '"definitionRules":[{"language":"lua","call":"transport.send","argument":1,'
+            .. '"target":"transport.on","targetArgument":1}]}')
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local ok, err = pcall(function()
+            local found = nav({ method = 'lsp_definition', uri = nav_uri('audit_dedup.lua'),
+                position = { line = 1, character = 19 } })
+            spec.equal(#found, 1); spec.equal(found[1].range.start.line, 2)
+        end)
+        os.remove(config); if not ok then error(err, 0) end
+    end)
+    spec.it('navigates explicit Lua target APIs without inferring unknown receivers', function()
+        local config = nav_root .. '/.codeoutline.json'
+        nav_write('audit_receiver.lua', 'local dservice\nif active then dservice = require "dservice" end\n'
+            .. 'dservice.send(1, "audit_receiver")\nlocal CMD = {}\nfunction CMD.audit_receiver() end\n')
+        write(config, '{"rules":[{"kind":"target","language":"lua","call":"dservice.send","argument":2}]}')
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local ok, err = pcall(function()
+            local found = nav({ method = 'lsp_definition', uri = nav_uri('audit_receiver.lua'),
+                position = { line = 2, character = 21 } })
+            spec.equal(#found, 1); spec.equal(found[1].range.start.line, 4)
+        end)
+        os.remove(config); if not ok then error(err, 0) end
+    end)
+    spec.it('keeps explicit Lua event registration navigation with unknown receivers', function()
+        local config = nav_root .. '/.codeoutline.json'
+        nav_write('audit_event_receiver.lua', 'local bus = make_bus()\nbus.emit([=[audit_event_receiver]=])\n')
+        nav_write('audit_event_registration.lua', 'local bus = make_bus()\nbus.on("audit_event_receiver", function() end)\n')
+        write(config, '{"rules":[{"kind":"event","language":"lua","call":"bus.emit","argument":1,'
+            .. '"register":"bus.on","keyArgument":1,"handlerArgument":2}]}')
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local ok, err = pcall(function()
+            local found = nav({ method = 'lsp_definition', uri = nav_uri('audit_event_receiver.lua'),
+                position = { line = 1, character = 15 } })
+            spec.equal(#found, 1); spec.equal(found[1].uri, nav_uri('audit_event_registration.lua'))
+        end)
+        os.remove(config); if not ok then error(err, 0) end
+    end)
+    spec.it('narrows Lua RPC target navigation by known service provenance', function()
+        local config = nav_root .. '/.codeoutline.json'
+        nav_write('audit_redis_service.lua', 'local CMD = {}\nfunction CMD.service_scope_init() end\n')
+        nav_write('audit_other_service.lua', 'local CMD = {}\nfunction CMD.service_scope_init() end\n')
+        local cases = {
+            { 'local redis = skynet.uniqueservice("audit_redis_service")\ndservice.call(redis, "service_scope_init")', 'dservice.call', 2 },
+            { 'local redis = kernel.newservice("audit_redis_service", 1)\nlocal alias = redis\ndservice.call(alias, "service_scope_init")', 'dservice.call', 2 },
+            { 'local redis = skynet.uniqueservice("audit_redis_service")\nskynet.call(redis, "lua", "service_scope_init")', 'skynet.call', 3 },
+            { 'dservice.call("audit_redis_service", "service_scope_init")', 'dservice.call', 2 },
+            { 'cluster.call("node", "audit_redis_service", "service_scope_init")', 'cluster.call', 3 },
+            { 'custom.request("audit_redis_service", 0, "mode", "service_scope_init")', 'custom.request', 4, 1 },
+        }
+        local ok, err = pcall(function()
+            for _, case in ipairs(cases) do
+                local source = 'local skynet = require "skynet"\nlocal kernel = skynet\nlocal dservice = require "dservice"\n' .. case[1]
+                nav_write('audit_service_caller.lua', source)
+                write(config, xutils.json_pack({ rules = { { kind = 'target', language = 'lua', call = case[2],
+                    argument = case[3], serviceArgument = case[4] } } }))
+                service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+                local doc = docs.read(nav_root .. '/audit_service_caller.lua')
+                local found = nav({ method = 'lsp_definition', uri = doc.uri,
+                    position = doc:position(assert(source:find('service_scope_init', 1, true))) })
+                spec.equal(#found, 1, case[1]); spec.equal(found[1].uri, nav_uri('audit_redis_service.lua'))
+            end
+        end)
+        os.remove(config); if not ok then error(err, 0) end
+    end)
+    spec.it('tracks a single service assignment to a previously declared or global variable', function()
+        local config = nav_root .. '/.codeoutline.json'
+        write(config, '{"rules":[{"kind":"target","language":"lua","call":"dservice.call","argument":2}]}')
+        local cases = {
+            'local cservice = nil\nfunction boot() cservice = skynet.uniqueservice("audit_redis_service", skynet.self())\ndservice.call(cservice, "service_scope_init") end',
+            'function boot() assigned_service = skynet.newservice("audit_redis_service")\ndservice.call(assigned_service, "service_scope_init") end',
+            'local cservice\nfunction boot() local redis = skynet.uniqueservice("audit_redis_service")\ncservice = redis\nlocal target = cservice\ndservice.call(target, "service_scope_init") end',
+        }
+        local ok, err = pcall(function()
+            for _, body in ipairs(cases) do
+                local source = 'local skynet = require "skynet"\nlocal dservice = require "dservice"\n' .. body
+                nav_write('audit_assigned_service.lua', source)
+                service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+                local doc = docs.read(nav_root .. '/audit_assigned_service.lua')
+                local found = nav({ method = 'lsp_definition', uri = doc.uri,
+                    position = doc:position(assert(source:find('service_scope_init', 1, true))) })
+                spec.equal(#found, 1, body); spec.equal(found[1].uri, nav_uri('audit_redis_service.lua'))
+            end
+        end)
+        os.remove(config); if not ok then error(err, 0) end
+    end)
+    spec.it('does not narrow RPC targets through reassigned or shadowed service bindings', function()
+        local config = nav_root .. '/.codeoutline.json'
+        write(config, '{"rules":[{"kind":"target","language":"lua","call":"dservice.call","argument":2}]}')
+        local cases = {
+            'local redis = skynet.uniqueservice("audit_redis_service")\nredis = other\ndservice.call(redis, "service_scope_init")',
+            'local redis = skynet.uniqueservice("audit_redis_service")\nfunction run(redis) dservice.call(redis, "service_scope_init") end',
+            'local skynet = {}\nfunction skynet.uniqueservice(name) end\nlocal redis = skynet.uniqueservice("audit_redis_service")\ndservice.call(redis, "service_scope_init")',
+            'local redis = skynet.uniqueservice("not_indexed_service")\ndservice.call(redis, "service_scope_init")',
+            'local skynet = require "./fake_skynet"\nlocal redis = skynet.uniqueservice("audit_redis_service")\ndservice.call(redis, "service_scope_init")',
+            'local redis = skynet.uniqueservice("audit_redis_service") or other\ndservice.call(redis, "service_scope_init")',
+            'local redis\nif active then redis = skynet.uniqueservice("audit_redis_service") end\ndservice.call(redis, "service_scope_init")',
+            'local redis\nredis = skynet.uniqueservice("audit_redis_service")\nredis = other\ndservice.call(redis, "service_scope_init")',
+            'local redis\nfunction assign() redis = skynet.uniqueservice("audit_redis_service") end\ndservice.call(redis, "service_scope_init")',
+            'local redis\ndservice.call(redis, "service_scope_init")\nredis = skynet.uniqueservice("audit_redis_service")',
+            'local redis\nfunction first() redis = skynet.uniqueservice("audit_redis_service") end\nfunction second() redis = other end\ndservice.call(redis, "service_scope_init")',
+        }
+        local ok, err = pcall(function()
+            for _, body in ipairs(cases) do
+                local source = 'local skynet = require "skynet"\nlocal dservice = require "dservice"\n' .. body
+                nav_write('audit_service_caller.lua', source)
+                service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+                local doc = docs.read(nav_root .. '/audit_service_caller.lua')
+                local found = nav({ method = 'lsp_definition', uri = doc.uri,
+                    position = doc:position(assert(source:find('service_scope_init', 1, true))) })
+                spec.equal(#found, 2, body)
+            end
+        end)
+        os.remove(config); if not ok then error(err, 0) end
+    end)
+    spec.it('does not fall back to unrelated declarations when a known service lacks a handler', function()
+        local config = nav_root .. '/.codeoutline.json'
+        nav_write('audit_empty_service.lua', 'local CMD = {}\nfunction CMD.other_handler() end\n')
+        nav_write('audit_missing_handler.lua', 'local skynet = require "skynet"\n'
+            .. 'local redis = skynet.uniqueservice("audit_empty_service")\ndservice.call(redis, "service_scope_init")\n')
+        write(config, '{"rules":[{"kind":"target","language":"lua","call":"dservice.call","argument":2}]}')
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local ok, err = pcall(function()
+            local found = nav({ method = 'lsp_definition', uri = nav_uri('audit_missing_handler.lua'), position = { line = 2, character = 26 } })
+            spec.equal(#found, 0)
+        end)
+        os.remove(config); if not ok then error(err, 0) end
+    end)
+    spec.it('retains every exact service filename match without unrelated handlers', function()
+        local config = nav_root .. '/.codeoutline.json'
+        assert(xutils.mkdir_p(nav_root .. '/service_one')); assert(xutils.mkdir_p(nav_root .. '/service_two'))
+        nav_write('service_one/ambiguous_rpc.lua', 'function CMD.ambiguous_rpc_init() end\n')
+        nav_write('service_two/ambiguous_rpc.lua', 'function CMD.ambiguous_rpc_init() end\n')
+        nav_write('audit_ambiguous_rpc.lua', 'local skynet = require "skynet"\nlocal target = skynet.newservice("ambiguous_rpc")\n'
+            .. 'dservice.call(target, "ambiguous_rpc_init")\nfunction unrelated.ambiguous_rpc_init() end\n')
+        write(config, '{"rules":[{"kind":"target","language":"lua","call":"dservice.call","argument":2}]}')
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local ok, err = pcall(function()
+            local found = nav({ method = 'lsp_definition', uri = nav_uri('audit_ambiguous_rpc.lua'), position = { line = 2, character = 26 } })
+            spec.equal(#found, 2)
+            for _, loc in ipairs(found) do spec.truthy(loc.uri:find('/ambiguous_rpc.lua', 1, true)) end
+        end)
+        os.remove(config); if not ok then error(err, 0) end
     end)
     spec.it('resolves string key targets in assignments and table constructors', function()
         local config = nav_root .. '/.codeoutline.json'
@@ -1269,6 +1612,31 @@ int luaopen_native_test(lua_State *L) { luaL_setfuncs(L, methods, 0); luaL_newli
         spec.equal(range_text('m.lua', top[1].range), 'go')
         local member = nav({ method = 'lsp_definition', uri = nav_uri('shape.py'), position = { line = 2, character = 22 } })
         spec.equal(member[1].range.start.line, 3)
+    end)
+    spec.it('does not leak outer signature help into Lua callback bodies', function()
+        local header = 'local function signature_start(callback, rest) end\nlocal function signature_inner(value) end\n'
+        local cases = {
+            { 'signature_start(function() ', false },
+            { 'signature_start(function() local a, b = 1, 2; ', false },
+            { 'signature_start(function() if true then ', false },
+            { 'signature_start(function() if true then signature_inner(1) end; ', false },
+            { 'signature_start(function() local function nested() ', false },
+            { 'signature_start(function() signature_inner(', 'signature_inner', 0 },
+            { 'signature_start(function() signature_inner(1) ', false },
+            { 'signature_start(function() if true then signature_inner(1) end end, ', 'signature_start', 1 },
+        }
+        for _, case in ipairs(cases) do
+            local source = header .. case[1]
+            nav_write('signature_callback.lua', source)
+            service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+            local doc = docs.read(nav_root .. '/signature_callback.lua')
+            local out = nav({ method = 'lsp_signature', uri = doc.uri, position = doc:position(#source) })
+            if case[2] == false then spec.equal(out, false, case[1])
+            else
+                spec.contains(out.signatures[1].label, case[2])
+                spec.equal(out.activeParameter, case[3], case[1])
+            end
+        end
     end)
     spec.it('hovers with the signature and location of the target', function()
         local hover = nav({ method = 'lsp_hover', uri = nav_uri('main.c'), position = { line = 1, character = 35 } })

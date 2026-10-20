@@ -141,6 +141,11 @@ function Doc:tokens()
     return tokens
 end
 
+-- Transient sites use the same alias/literal resolver as relationship queries.
+function Doc:dispatch(names)
+    return parse.parse(parser_name(self), self.source, { dispatch = names, dispatch_only = true })
+end
+
 -- An indexed target must still match its raw on-disk snapshot before decoding.
 function M.read(path, indexed)
     local f = io.open(path, 'rb')

@@ -108,13 +108,13 @@ MCP arguments and relationship evidence remain available.
 
 ## Configured API contracts
 
-Configure exact API contracts in project-root `.codeoutline.json`. Rules are
-read on every explore request; editing them does not require rebuilding.
-Existing `definitionRules` for editor navigation remain independent.
+Configure exact API contracts in project-root `.codeoutline.json` under `rules`.
+One contract serves both editor definition navigation and explore/callers.
+Rules are read per request; editing them does not require rebuilding.
 
 ```json
 {
-  "dispatchRules": [
+  "rules": [
     { "kind": "target", "language": "lua", "call": "worker.post", "argument": 2 },
     { "kind": "callback", "call": "schedule", "argument": 2 },
     {
@@ -138,8 +138,33 @@ are exact, with no wildcard matching. A maximum of 32 rules is allowed.
 
 These edges participate in explore paths, neighbors, and reverse callers.
 Neighbor lists label them `indirect:event#3`, for example, identifying the rule
-kind and its one-based position in `dispatchRules`. They are potential execution
+kind and its one-based position in the normalized relationship rules. They are potential execution
 relationships, not proof that registration or callback invocation runs at runtime.
+
+For editor definitions, `event` selects the matching registration key, `target`
+selects the named declaration, and `callback` selects the resolved callback
+declaration. Event navigation can find an anonymous or dynamic registration even
+when its handler cannot produce a graph edge. Shared navigation uses the same
+bounded alias resolution as relationships, with request-local site reuse and
+candidate filtering. String target navigation lists same-language declarations
+across the project, including table members such as `CMD.handle`, without
+requiring a lexical dependency between remote services. Optional `qualifiers`
+filter the declaration owners for navigation only. Lua target/event navigation also
+keeps explicit written-API matching when the receiver cannot be inferred.
+These candidate lookups do not broaden graph edges. Open/unsaved documents are included. Matching
+still obeys the rule's language and exact canonical API name.
+
+Use `kind: "definition"` with the existing `targetKind`, `target`,
+`targetArgument` and optional `qualifiers` fields for Lua navigation-only
+call/declaration/key rules; these never create relationship edges. See [LSP
+rules](LSP.md#configurable-definition-rules).
+
+Legacy `definitionRules` (navigation only) and `dispatchRules` (relationships
+only) remain supported with their original semantics. They are appended after
+`rules`; identical consumer contracts are deduplicated, preferring the shared
+rule. Each array and each combined consumer list is capped at 32 rules. Migrate
+to `rules` to enable both consumers without maintaining duplicate configuration.
+Old definition rules do not guess a callback argument or acquire graph edges.
 
 The collector uses the existing language parsers and tokenizers. Named callback
 expressions and simple quoted literals are supported. Lua, JavaScript/TypeScript,

@@ -150,14 +150,14 @@ test('official SDK Lua registry aliases resolve callers and refresh after reassi
     } finally { await c.close(); await f.cleanup(); }
 });
 
-test('official SDK configured dispatch follows multilingual aliases and refreshes callbacks', { timeout: 30000 }, async () => {
+test('official SDK unified rules follow multilingual aliases and refresh callbacks', { timeout: 30000 }, async () => {
     const f = await fixture();
     const transport = new StdioClientTransport({ command: defaultRuntime,
         args: [main, 'STDIO=1', `PROJECT=${f.project}`], cwd: tmpdir(), stderr: 'pipe' });
     transport.stderr?.on('data', () => {});
     const c = client();
     try {
-        await writeFile(join(f.project, '.codeoutline.json'), JSON.stringify({ dispatchRules: [
+        await writeFile(join(f.project, '.codeoutline.json'), JSON.stringify({ rules: [
             { kind: 'event', call: 'bus.emit', argument: 1, register: 'bus.on', keyArgument: 1, handlerArgument: 2 },
             { kind: 'callback', call: 'schedule', argument: 2 },
         ] }));

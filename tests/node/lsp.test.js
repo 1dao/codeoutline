@@ -312,6 +312,11 @@ test('LSP signature help follows incomplete calls and draft signatures', { timeo
     assert.equal((await signature('test_rpc_target(inner(1, 2), ')).activeParameter, 1);
     assert.equal(await signature('test_rpc_target()'), null);
     assert.equal(await signature('unknown('), null);
+    assert.equal(await signature('test_rpc_target(function() local a, b = 1, 2; '), null);
+    assert.equal(await signature('test_rpc_target(function() if true then unknown() end; '), null);
+    assert.equal((await signature('test_rpc_target(function() test_rpc_target(')).activeParameter, 0);
+    assert.equal(await signature('test_rpc_target(function() test_rpc_target() '), null);
+    assert.equal((await signature('test_rpc_target(function() local a, b = 1, 2; end, ')).activeParameter, 1);
     const changed = await signature('test_rpc_target(', 'local function test_rpc_target(updated) end\n');
     assert.deepEqual(changed.signatures[0].parameters, [{ label: 'updated' }]);
     const empty = await signature('test_rpc_target(', 'local function test_rpc_target() end\n');

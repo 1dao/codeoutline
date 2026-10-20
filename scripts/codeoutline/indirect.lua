@@ -4,9 +4,13 @@ local M = {}
 local aliases = require('codeoutline.dispatch_aliases')
 local member = { ['.'] = true, [':'] = true, ['::'] = true, ['->'] = true }
 
-local function value(T, a, b)
+local function value(T, a, b, language)
     if a == b and T.k[a] == 'str' then
         local raw = T:text(a)
+        if language == 'lua' then
+            local literal = require('codeoutline.lua_literal').decode(raw)
+            return literal and { literal = literal } or false
+        end
         local q = raw:sub(1, 1)
         if (q == '"' or q == "'") and raw:sub(-1) == q then
             local body = raw:sub(2, -2)
@@ -35,22 +39,33 @@ function M.collect(r, T)
             if close then
                 local first = x
                 while first > 2 and member[T:text(first - 1)] and T.k[first - 2] == 'id' do first = first - 2 end
-                local call = value(T, first, x)
+                local call = value(T, first, x, r.language)
                 if call then calls[call.symbol] = true end
                 if not r.collect_dispatch then goto next_ref end
                 local api = call and expand(call, first)
                 if not api or not api.symbol or type(r.collect_dispatch) == 'table'
                     and not r.collect_dispatch[call.symbol] and not r.collect_dispatch[api.symbol] then goto next_ref end
-                local args, a, i = {}, x + 2, x + 2
+                local args, ranges, a, i = {}, r.ranges and {} or nil, x + 2, x + 2
                 while i <= close do
                     if i == close or T:text(i) == ',' then
-                        args[#args + 1] = expand(value(T, a, i - 1), a)
+                        args[#args + 1] = expand(value(T, a, i - 1, r.language), a)
+                        if ranges then ranges[#args] = a < i and { T.s[a] - 1, T.e[i - 1] } or false end
                         a = i + 1
-                    elseif T:match(i) and T:match(i) > i then i = T:match(i) end
+                    elseif T:match(i) and T:match(i) > i then i = T:match(i)
+                    elseif r.language == 'lua' and T.k[i] == 'kw' and T:text(i) == 'function' then
+                        local depth = 1
+                        while depth > 0 and i < close do
+                            i = i + 1
+                            local kw = T.k[i] == 'kw' and T:text(i)
+                            if kw == 'function' or kw == 'if' or kw == 'do' or kw == 'repeat' then depth = depth + 1
+                            elseif kw == 'end' or kw == 'until' then depth = depth - 1 end
+                        end
+                        if depth > 0 then break end
+                    end
                     i = i + 1
                 end
                 if call then sites[#sites + 1] = { call = call.symbol, api = api.symbol,
-                    args = args, from = ref.from, line = ref.line } end
+                    args = args, ranges = ranges, from = ref.from, line = ref.line } end
             end
         end
         ::next_ref::
@@ -64,29 +79,23 @@ function M.collect(r, T)
 end
 
 local function rules_for(G, rules)
-    if rules == nil and G.root then
-        local f = io.open(G.root .. '/.codeoutline.json', 'rb')
-        if f then
-            local raw = f:read(65537); f:close()
-            assert(#raw <= 65536, '.codeoutline.json exceeds 64 KiB')
-            local ok, config = pcall(xutils.json_unpack, raw)
-            assert(ok and type(config) == 'table', 'invalid .codeoutline.json')
-            rules = config.dispatchRules
+    local config = require('codeoutline.rules')
+    if rules ~= nil then return config.dispatch(rules) end
+    return config.load(G.root).dispatch
+end
+
+function M.candidate(rec, call)
+    if rec.dispatch_sites then return true end -- explicit in-memory parse option
+    for _, name in ipairs(rec.dispatch_calls or {}) do
+        if name == call then return true end
+        if name:sub(1, 1) == '@' then
+            local root = name:sub(2)
+            if root == call or call:sub(1, #root + 1) == root .. '.'
+                or call:sub(1, #root + 1) == root .. ':'
+                or call:sub(1, #root + 2) == root .. '->' then return true end
         end
     end
-    rules = rules or {}
-    assert(type(rules) == 'table' and #rules <= 32, 'dispatchRules must contain at most 32 rules')
-    for _, r in ipairs(rules) do
-        assert(type(r) == 'table' and type(r.call) == 'string' and r.call:match('^[%a_][%w_%.:>%-]*$'), 'invalid dispatchRules.call')
-        assert(r.kind == 'target' or r.kind == 'callback' or r.kind == 'event', 'invalid dispatchRules.kind')
-        assert(r.language == nil or type(r.language) == 'string', 'invalid dispatchRules.language')
-        for _, key in ipairs(r.kind == 'event' and { 'argument', 'keyArgument', 'handlerArgument' } or { 'argument' }) do
-            local n = r[key]
-            assert(type(n) == 'number' and n >= 1 and n <= 32 and n % 1 == 0, 'invalid dispatchRules.' .. key)
-        end
-        if r.kind == 'event' then assert(type(r.register) == 'string' and r.register:match('^[%a_][%w_%.:>%-]*$'), 'invalid dispatchRules.register') end
-    end
-    return rules
+    return false
 end
 
 function M.query(G, rules, report)
@@ -96,20 +105,8 @@ function M.query(G, rules, report)
     local names, cache, order, bytes, registrations_by_rule = {}, {}, {}, 0, {}
     local dependencies = {}
     for _, rule in ipairs(rules) do names[rule.call] = true; if rule.register then names[rule.register] = true end end
-    local function candidate(rec, call)
-        if rec.dispatch_sites then return true end -- explicit in-memory parse option
-        for _, name in ipairs(rec.dispatch_calls or {}) do
-            if name == call then return true end
-            if name:sub(1, 1) == '@' then
-                local root = name:sub(2)
-                if root == call or call:sub(1, #root + 1) == root .. '.'
-                    or call:sub(1, #root + 1) == root .. ':'
-                    or call:sub(1, #root + 2) == root .. '->' then return true end
-            end
-        end
-        return false
-    end
-    local function sites(f)
+    local candidate = M.candidate
+    local function sites(f, literals)
         local rec = G.files[f]
         if rec.dispatch_sites then return rec.dispatch_sites end
         if cache[f] then return cache[f].sites end
@@ -121,6 +118,24 @@ function M.query(G, rules, report)
         local source = raw
         if rec.encoding ~= 'utf-8' and rec.encoding ~= 'utf-8-bom' then
             source = assert(xutils.to_utf8(raw, rec.encoding == 'gbk' and 'gbk' or 'auto'))
+        end
+        -- Target rules can only obtain a literal command from this file. Reject
+        -- broad module hints before scope/registry analysis, but decode escaped
+        -- Lua literals so aliases and alternate spellings remain candidates.
+        if literals and rec.language == 'lua' then
+            local relevant = false
+            for name in pairs(literals) do if source:find(name, 1, true) then relevant = true; break end end
+            if not relevant and source:find('\\', 1, true) then
+                local T = require('codeoutline.lang.lua').lang:tokenize(source)
+                local decode = require('codeoutline.lua_literal').decode
+                for i = 1, T.n do
+                    if i % 4096 == 0 then control.check() end
+                    if T.k[i] == 'str' and literals[decode(T:text(i))] then relevant = true; break end
+                end
+            end
+            -- Do not cache negatives: later incoming calls can request other
+            -- targets within this same query, and outgoing needs all sites.
+            if not relevant then return {} end
         end
         local parsed = assert(require('codeoutline.parse').parse(rec.path, source,
             { ranges = false, dispatch = names, dispatch_only = true }))
@@ -221,6 +236,18 @@ function M.query(G, rules, report)
     end
     local function scan(only, wanted)
         local out = {}
+        local literals
+        if wanted then
+            local targets_only = true
+            for _, rule in ipairs(rules) do if rule.kind ~= 'target' then targets_only = false; break end end
+            if targets_only then
+                literals = {}
+                for id in pairs(wanted) do
+                    local node = G.nodes[id]
+                    literals[node.name], literals[node.qualified or node.name] = true, true
+                end
+            end
+        end
         local files = only and { G.node_file[only] } or G.file_order
         for _, f in ipairs(files) do
             control.check()
@@ -229,7 +256,7 @@ function M.query(G, rules, report)
                 if (not rule.language or rule.language == rec.language) and candidate(rec, rule.call) then
                     -- Process every applicable rule while this file is available,
                     -- even if event registration scans evict it from the FIFO.
-                    file_sites = file_sites or sites(f)
+                    file_sites = file_sites or sites(f, literals)
                     for _, site in ipairs(file_sites) do
                         if (site.call == rule.call or site.api == rule.call) and site.from > 0 and (not only or G.id_of[f][site.from] == only) then
                             local ids, arg, registered = {}, site.args[rule.argument], nil
@@ -265,7 +292,8 @@ function M.query(G, rules, report)
         end
         return out
     end
-    return { outgoing = function(id) return scan(id)[id] or {} end, incoming = function(wanted) return scan(nil, wanted) end }
+    return { outgoing = function(id) return scan(id)[id] or {} end, incoming = function(wanted) return scan(nil, wanted) end,
+        resolve_targets = targets }
 end
 
 return M

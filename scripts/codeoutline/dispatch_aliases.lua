@@ -9,8 +9,9 @@ local statements = { ['local'] = true, ['function'] = true, ['end'] = true, ['re
     ['if'] = true, ['else'] = true, ['elseif'] = true, ['until'] = true, ['for'] = true,
     ['while'] = true, ['do'] = true, ['repeat'] = true, ['break'] = true }
 
-local function quoted(T, i)
+local function quoted(T, i, language)
     local s = T:text(i)
+    if T.k[i] == 'str' and language == 'lua' then return require('codeoutline.lua_literal').decode(s) end
     if T.k[i] == 'str' and (s:sub(1, 1) == '"' or s:sub(1, 1) == "'")
         and s:sub(-1) == s:sub(1, 1) and not s:find('[\\$]') then return s:sub(2, -2) end
 end
@@ -25,11 +26,11 @@ local function name(T, i)
     return result, i
 end
 
-local function simple(T, i, language)
+local function simple(T, i, language, symbols_only)
     local start = i
     if T:text(i) == '&' then i = i + 1 end
     local symbol, ending = name(T, i)
-    local literal = quoted(T, i)
+    local literal = not symbols_only and quoted(T, i, language)
     if literal then ending = i + 1 end
     if not symbol and not literal then return false end
     local next = T:text(ending)
@@ -39,6 +40,26 @@ local function simple(T, i, language)
             and (T.k[ending] == 'id' or T.k[ending] == 'kw' and next ~= 'and' and next ~= 'or')
     if not boundary then return false end
     return { symbol = symbol, literal = literal, token = start }, ending
+end
+
+-- Only remember literal service constructors; validate the factory's lexical
+-- identity during expansion, after imports, shadowing and writes are known.
+local function service_initializer(T, i)
+    local factory, open = name(T, i)
+    if not factory or T:text(open) ~= '(' or not T.m[open] then return nil end
+    local service = quoted(T, open + 1, 'lua')
+    if not service or (T:text(open + 2) ~= ',' and open + 2 ~= T.m[open]) then return nil end
+    local ending = T.m[open] + 1
+    local next = T:text(ending)
+    if next ~= '' and next ~= ';' and not statements[next]
+        and not (T.l[ending] and T.l[ending] > T.l[ending - 1]
+            and (T.k[ending] == 'id' or T.k[ending] == 'kw' and next ~= 'and' and next ~= 'or')) then return nil end
+    return { service = service, factory = { symbol = factory }, token = i }
+end
+
+local function is_service_factory(value)
+    return value and not value.node and (not value.import or value.import.path == 'skynet')
+        and (value.symbol == 'skynet.uniqueservice' or value.symbol == 'skynet.newservice')
 end
 
 local function initializer(T, i, typed)
@@ -77,9 +98,11 @@ local function imports(r, T)
         if i % 4096 == 0 then control.check() end
         local s = T.k[i] == 'kw' and T:text(i)
         if r.language == 'lua' and s == 'local' and T.k[i + 1] == 'id' and T:text(i + 2) == '='
-            and (T:text(i + 3) == 'require' or T:text(i + 3) == 'dofile') and T:text(i + 4) == '('
-            and T.m[i + 4] == i + 6 and quoted(T, i + 5) then
-            add(T:text(i + 1), quoted(T, i + 5), '*', i + 1)
+            and (T:text(i + 3) == 'require' or T:text(i + 3) == 'dofile')
+            and (T:text(i + 4) == '(' and T.m[i + 4] == i + 6 and quoted(T, i + 5, 'lua')
+                or quoted(T, i + 4, 'lua')) then
+            local path = quoted(T, i + 4, 'lua') or quoted(T, i + 5, 'lua')
+            add(T:text(i + 1), path, '*', i + 1)
             result[#result].loader = T:text(i + 3)
         elseif (r.language == 'javascript' or r.language == 'typescript') and s == 'import'
             and T:text(i + 1) ~= '(' then
@@ -146,7 +169,7 @@ function M.hints(r, T, calls)
             -- A type annotation may separate the local name from `=`. All
             -- identifier components are conservative roots, not proven bindings.
             if lhs then
-                local v = simple(T, i + 1, r.language)
+                local v = simple(T, i + 1, r.language, true)
                 if v and v.symbol then
                     add(T:text(lhs), v.symbol)
                     local j = lhs
@@ -157,14 +180,14 @@ function M.hints(r, T, calls)
                 local p = T.m[i - 1]
                 if T:text(p - 1) == ')' and T.k[p - 2] == 'id' and T:text(p - 3) == '*'
                     and T:text(p - 4) == '(' then
-                    local v = simple(T, i + 1, r.language)
+                    local v = simple(T, i + 1, r.language, true)
                     if v and v.symbol then add(T:text(p - 2), v.symbol) end
                 end
             end
         end
     end
     for _, imp in ipairs(imports(r, T)) do
-        if imp.path:match('^[%a_][%w_%.]*$') then
+        if imp.path:match('^[%a_][%w_%.]*$') and not (imp.imported == '*' and imp.name == imp.path) then
             add(imp.name, imp.path .. (imp.imported ~= '*' and '.' .. imp.imported or ''))
         end
     end
@@ -309,6 +332,7 @@ function M.prepare(r, T)
                 local scope, finish = scopes[i], nil
                 if python or js and prev == 'var' then scope, finish = function_scope(i) end
                 local v = eq and simple(T, eq + 1, r.language) or false
+                if lua and eq and not v then v = service_initializer(T, eq + 1) or false end
                 if lua and eq and T:text(eq + 1) == '{' then v = { namespace = true } end
                 local b = add(T:text(i), i, scope, v, finish)
                 if python or js and prev == 'var' then
@@ -319,6 +343,7 @@ function M.prepare(r, T)
             end
         end
     end
+    local service_writes = {}
     -- Any later write poisons that lexical binding for this whole query. This
     -- deliberately avoids inventing execution order across functions/branches.
     for i = 1, T.n do
@@ -339,6 +364,15 @@ function M.prepare(r, T)
                 or last and T:text(last) == '=' or T:text(i - 1) == '++' or T:text(i - 1) == '--' then
                 local b = binding(T:text(i), i)
                 if b then b.invalid = true end
+                if lua then
+                    local name = T:text(i)
+                    local value = next == '=' and tail == i + 1 and T:text(i - 1) ~= ','
+                        and (service_initializer(T, i + 2) or simple(T, i + 2, 'lua')) or false
+                    service_writes[name] = service_writes[name] or {}
+                    service_writes[name][#service_writes[name] + 1] = {
+                        binding = b, token = i, scope = scopes[i], value = value,
+                    }
+                end
             end
         end
     end
@@ -349,9 +383,41 @@ function M.prepare(r, T)
         if depth > 8 then return false end
         local head, suffix = v.symbol:match('^([%w_$]+)(.*)$')
         local b = binding(head, at)
+        -- A single later initialization of a nil/uninitialized handle is useful
+        -- for navigation. Keep ordinary aliases poisoned, and require assignment
+        -- and use in the same block; no branch or cross-function ordering guesses.
+        if suffix == '' and (not b or not b.value) then
+            local write
+            for _, candidate in ipairs(service_writes[head] or {}) do
+                if candidate.binding == b then
+                    if write then write = false; break end
+                    write = candidate
+                end
+            end
+            if write and write.token < at and write.scope == scopes[at] and write.value then
+                local value = write.value
+                if value.factory then
+                    local factory = expand(value.factory, value.token, depth + 1)
+                    if is_service_factory(factory) then
+                        return { service = value.service, token = write.token }
+                    end
+                else
+                    local resolved = expand(value, write.token, depth + 1)
+                    if resolved and resolved.service then return resolved end
+                end
+            end
+        end
         if not b then return v end
         if b.invalid or not b.value or b.token > at and not b.value.node then return false end
         local target = b.value
+        if target.factory then
+            if suffix ~= '' then return false end
+            local factory = expand(target.factory, target.token, depth + 1)
+            if is_service_factory(factory) then
+                return { service = target.service, token = b.token }
+            end
+            return false
+        end
         if target.namespace then
             local short = suffix:match('^[%.:]([%w_]+)$')
             if not short then return false end

@@ -619,83 +619,11 @@ end
 
 -- Project-local declarative rules; read per request so configuration edits are live.
 local function definition_rules(root)
-    local file = io.open(root .. '/.codeoutline.json', 'rb')
-    if not file then return {} end
-    local raw = file:read(65537); file:close()
-    assert(#raw <= 65536, '.codeoutline.json exceeds 64 KiB')
-    local ok, config = pcall(xutils.json_unpack, raw)
-    assert(ok and type(config) == 'table', 'invalid .codeoutline.json')
-    local rules = config.definitionRules or {}
-    assert(type(rules) == 'table' and #rules <= 32, 'definitionRules must contain at most 32 rules')
-    for _, rule in ipairs(rules) do
-        assert(type(rule) == 'table' and (rule.language == nil or rule.language == 'lua'),
-            'definitionRules currently support language lua')
-        assert(type(rule.call) == 'string' and rule.call:match('^[%a_][%w_%.:]*$'),
-            'definitionRules.call must be a qualified function name')
-        assert(type(rule.argument) == 'number' and rule.argument >= 1 and rule.argument <= 32
-            and rule.argument % 1 == 0,
-            'definitionRules.argument must be an integer from 1 to 32')
-        local kind = rule.targetKind or 'call'
-        assert(kind == 'call' or kind == 'declaration' or kind == 'key',
-            "definitionRules.targetKind must be 'call', 'declaration' or 'key'")
-        if kind ~= 'call' then
-            assert(rule.target == nil and rule.targetArgument == nil,
-                'declaration and key rules must not set target or targetArgument')
-            if rule.qualifiers ~= nil then
-                assert(type(rule.qualifiers) == 'table', 'definitionRules.qualifiers must be an array of names')
-                local qualifiers = {}
-                for _, q in ipairs(rule.qualifiers) do
-                    assert(type(q) == 'string' and q:match('^[%a_][%w_]*$'),
-                        'definitionRules.qualifiers must contain plain names')
-                    qualifiers[q] = true
-                end
-                rule.qualifiers = qualifiers
-            end
-        else
-            assert(type(rule.target) == 'string' and rule.target:match('^[%a_][%w_%.:]*$'),
-                'definitionRules.target must be a qualified function name')
-            assert(type(rule.targetArgument) == 'number' and rule.targetArgument >= 1
-                and rule.targetArgument <= 32 and rule.targetArgument % 1 == 0,
-                'definitionRules.targetArgument must be an integer from 1 to 32')
-        end
-    end
-    return rules
+    return require('codeoutline.rules').load(root).definitions
 end
 
 -- Decode literals without running source code. Lua long strings and quoted escapes.
-local function string_value(raw)
-    local eq, body = raw:match('^%[(=*)%[(.*)%]%1%]$')
-    if eq then return body:gsub('^\r?\n', '', 1) end
-    local quote = raw:sub(1, 1)
-    if (quote ~= '"' and quote ~= "'") or raw:sub(-1) ~= quote then return nil end
-    local escaped = { a = '\a', b = '\b', f = '\f', n = '\n', r = '\r', t = '\t', v = '\v',
-        ['\\'] = '\\', ['"'] = '"', ["'"] = "'", ['\n'] = '\n' }
-    local out, i, stop = {}, 2, #raw - 1
-    while i <= stop do
-        local c = raw:sub(i, i)
-        if c ~= '\\' then out[#out + 1] = c; i = i + 1
-        else
-            c = raw:sub(i + 1, i + 1); i = i + 2
-            if escaped[c] then out[#out + 1] = escaped[c]
-            elseif c == 'z' then
-                while i <= stop and raw:sub(i, i):match('%s') do i = i + 1 end
-            elseif c == '\r' then
-                if raw:sub(i, i) == '\n' then i = i + 1 end
-                out[#out + 1] = '\n'
-            elseif c == 'x' then
-                local hex = raw:sub(i, i + 1)
-                if not hex:match('^%x%x$') then return nil end
-                out[#out + 1] = string.char(tonumber(hex, 16)); i = i + 2
-            elseif c:match('%d') then
-                local digits = (c .. raw:sub(i, stop)):match('^%d%d?%d?')
-                local n = tonumber(digits)
-                if n > 255 then return nil end
-                out[#out + 1] = string.char(n); i = i + #digits - 1
-            else return nil end
-        end
-    end
-    return table.concat(out)
-end
+local string_value = require('codeoutline.lua_literal').decode
 
 local function call_name(T, i)
     if T.k[i] ~= 'id' or T:text(i + 1) ~= '(' then return nil end
@@ -768,9 +696,183 @@ local function call_matches(name, rule_name)
     return name:find(':') ~= nil and name:match('([%w_]+)$') == rule_name
 end
 
-local function configured_definition(V, doc, offset)
+local function service_argument(rule)
+    if rule.serviceArgument then return rule.serviceArgument end
+    if rule.call == 'skynet.call' or rule.call == 'skynet.send' then return 1 end
+    return rule.argument - 1
+end
+
+-- Service filenames are candidate locations, not proof of a runtime RPC edge.
+-- Keep every exact suffix match if several indexed service roots use the name.
+local function service_files(V, site, rule)
+    local arg = site.args[service_argument(rule)]
+    if not arg then return nil end
+    local name = arg.service
+    if not name and (rule.serviceArgument or rule.call:match('^dservice%.')
+        or rule.call == 'skynet.call' or rule.call == 'skynet.send'
+        or rule.call == 'cluster.call' or rule.call == 'cluster.send') then name = arg.literal end
+    if not name or not name:match('^[%w_][%w_/-]*$') then return nil end
+    local suffix, result = name .. '.lua', {}
+    local function add(file)
+        local rec = V.files[file]
+        if rec.language == 'lua' and (rec.path == suffix or rec.path:sub(-#suffix - 1) == '/' .. suffix) then result[file] = true end
+    end
+    for _, file in ipairs(V.file_order) do control.check(); add(file) end
+    for _, file in ipairs(V.new_files) do control.check(); add(file) end
+    return next(result) and result or nil
+end
+
+-- Shared rules reuse graph sites and aliases. String targets navigate to project
+-- declarations: remote services need not be lexical dependencies of the caller.
+local function shared_definition(V, doc, offset, rules)
+    local record = doc:parse()
+    local language = record.language
+    local names, applicable, literals = {}, {}, {}
+    local function literal_position(name, argument)
+        literals[name] = literals[name] or {}
+        literals[name][argument] = true
+    end
+    for _, rule in ipairs(rules) do
+        if rule.shared and (not rule.language or rule.language == language)
+            and require('codeoutline.indirect').candidate(record, rule.call) then
+            applicable[#applicable + 1] = rule
+            names[rule.call] = true
+            if rule.register then names[rule.register] = true end
+            if rule.kind == 'target' or rule.kind == 'event' then literal_position(rule.call, rule.argument) end
+            if rule.kind == 'target' and service_argument(rule) > 0 then literal_position(rule.call, service_argument(rule)) end
+            if rule.kind == 'event' then literal_position(rule.register, rule.keyArgument) end
+        end
+    end
+    if #applicable == 0 then return nil end
+    local parsed = {}
+    local function sites(source)
+        if not parsed[source] then
+            local record = source:dispatch(names)
+            parsed[source] = record and record.dispatch_sites or {}
+            -- Preserve the explicit Lua literal contract even when conservative
+            -- alias analysis cannot prove a receiver's identity. These sites
+            -- belong only to navigation, never to the relationship resolver.
+            if language == 'lua' then
+                local T = source:tokens()
+                local known = {}
+                for _, site in ipairs(parsed[source]) do
+                    for argument in pairs(literals[site.call] or {}) do
+                        local arg, range = site.args[argument], site.ranges[argument]
+                        if arg and arg.literal and range then
+                            known[site.call .. ':' .. argument .. ':' .. range[1]] = true
+                        end
+                    end
+                end
+                for i = 1, T.n do
+                    if i % 128 == 0 then control.check() end
+                    local name = call_name(T, i)
+                    if literals[name] then
+                        local site = { call = name, args = {}, ranges = {} }
+                        for argument in pairs(literals[name]) do
+                            local value, first, last = literal_argument(T, i, argument)
+                            if value and not known[name .. ':' .. argument .. ':' .. first] then
+                                site.args[argument] = { literal = value }
+                                site.ranges[argument] = { first, last }
+                            end
+                        end
+                        if next(site.args) then parsed[source][#parsed[source] + 1] = site end
+                    end
+                end
+            end
+        end
+        return parsed[source]
+    end
+    local matched = {}
+    for _, site in ipairs(sites(doc)) do
+        for _, rule in ipairs(applicable) do
+            local range, arg = site.ranges[rule.argument], site.args[rule.argument]
+            if (site.call == rule.call or site.api == rule.call) and arg and range
+                and range[1] <= offset and offset < range[2]
+                and (rule.kind == 'callback' and arg.symbol or rule.kind ~= 'callback' and arg.literal) then
+                matched[#matched + 1] = { rule = rule, site = site, arg = arg }
+            end
+        end
+    end
+    if #matched == 0 then return nil end
+    local result, seen, events = {}, {}, {}
+    local deadline = os.clock() + M.SCAN_SECONDS
+    local function add(loc)
+        local key = loc.uri .. ':' .. loc.range.start.line .. ':' .. loc.range.start.character
+        if not seen[key] then result[#result + 1] = loc; seen[key] = true end
+        return #result >= M.MAX_RESULTS
+    end
+    local f = V.add(doc)
+    local resolver
+    for _, match in ipairs(matched) do
+        local rule = match.rule
+        if rule.kind == 'event' then events[#events + 1] = match
+        elseif rule.kind == 'target' then
+            local name = match.arg.literal
+            local services = language == 'lua' and service_files(V, match.site, rule)
+            local short = name:match('([%w_]+)$')
+            if short and name:match('^[%a_][%w_%.:>%-]*$') then
+                for _, id in ipairs(V.by_name[short]) do
+                    control.check()
+                    if os.clock() > deadline then return result, true end
+                    local node = V.nodes[id]
+                    if DECLARABLE[node.kind] and V.files[V.node_file[id]].language == language
+                        and (name == short or node.qualified == name)
+                        and (not services or services[V.node_file[id]])
+                        and qualifier_matches(rule, graph.owner(node.qualified or node.name)) then
+                        if add(location(V, id)) then return result, true end
+                    end
+                end
+            end
+        else
+            resolver = resolver or require('codeoutline.indirect').query(V, { rule }).resolve_targets
+            for _, id in ipairs(resolver(f, match.site, match.arg, rule.kind == 'target')) do
+                control.check()
+                if os.clock() > deadline then return result, true end
+                if add(location(V, id)) then return result, true end
+            end
+        end
+    end
+    if #events == 0 then return result, false end
+    local files = {}
+    for _, file in ipairs(V.file_order) do files[#files + 1] = file end
+    for _, file in ipairs(V.new_files) do files[#files + 1] = file end
+    table.sort(files, function(a, b) return V.files[a].path < V.files[b].path end)
+    for _, file in ipairs(files) do
+        control.check()
+        if os.clock() > deadline then return result, true end
+        local candidate = false
+        if V.files[file].language == language then
+            for _, match in ipairs(events) do
+                if require('codeoutline.indirect').candidate(V.files[file], match.rule.register) then candidate = true; break end
+            end
+        end
+        if candidate then
+            local source = source_doc(V, file)
+            if source then
+                for _, site in ipairs(sites(source)) do
+                    for _, match in ipairs(events) do
+                        local rule = match.rule
+                        local arg, range = site.args[rule.keyArgument], site.ranges[rule.keyArgument]
+                        if (site.call == rule.register or site.api == rule.register) and arg and range
+                            and arg.literal == match.arg.literal then
+                            if add({ uri = source.uri, range = source:range(range[1], range[2]) }) then return result, true end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return result, false
+end
+
+local function legacy_definition(V, doc, offset, rules)
     if doc:parse().language ~= 'lua' then return nil end
-    local rules = definition_rules(V.root)
+    local legacy = {}
+    for _, rule in ipairs(rules) do
+        if (not rule.shared or rule.legacy)
+            and (not rule.language or rule.language == 'lua') then legacy[#legacy + 1] = rule end
+    end
+    rules = legacy
     if #rules == 0 then return nil end
     local tokens = doc:tokens()
     local matched = {}
@@ -868,6 +970,27 @@ local function configured_definition(V, doc, offset)
     return result, false
 end
 
+local function configured_definition(V, doc, offset)
+    local rules = definition_rules(V.root)
+    if #rules == 0 then return nil end
+    local shared, incomplete = shared_definition(V, doc, offset, rules)
+    local legacy, legacy_incomplete = legacy_definition(V, doc, offset, rules)
+    if shared == nil then return legacy, legacy_incomplete end
+    local seen = {}
+    local function key(loc)
+        return loc.uri .. ':' .. loc.range.start.line .. ':' .. loc.range.start.character
+    end
+    for _, loc in ipairs(shared) do seen[key(loc)] = true end
+    for _, loc in ipairs(legacy or {}) do
+        if not seen[key(loc)] then
+            if #shared >= M.MAX_RESULTS then return shared, true end
+            seen[key(loc)] = true
+            shared[#shared + 1] = loc
+        end
+    end
+    return shared, incomplete or legacy_incomplete or false
+end
+
 local function at(req)
     local doc = request_doc(req)
     if not doc then return nil end
@@ -887,7 +1010,12 @@ local handlers = {}
 function handlers.lsp_definition(req)
     local V, doc, c, targets, f, offset = at(req)
     if not V then return false end
-    local configured, incomplete = configured_definition(V, doc, offset)
+    local configured, incomplete
+    -- Rule arguments are strings or referenced values, never the name of a
+    -- call/declaration itself. Avoid collecting dispatch sites for ordinary F12.
+    if not c or not c.decl and c.kind ~= 'call' and c.kind ~= 'member_call' and c.kind ~= 'new' then
+        configured, incomplete = configured_definition(V, doc, offset)
+    end
     if configured then return configured, incomplete end
     local line = doc:position(offset).line + 1
     local importer = false
@@ -922,12 +1050,21 @@ function handlers.lsp_signature(req)
     if not doc then return false end
     local T, offset = doc:tokens(), doc:offset(req.position)
     if not T then return false end
+    local language = doc:parse().language
     local stack = {}
     local close = { [')'] = '(', [']'] = '[', ['}'] = '{' }
+    local lua_blocks = { ['function'] = true, ['if'] = true, ['do'] = true, ['repeat'] = true }
     for i = 1, T.n do
         if T.s[i] - 1 >= offset then break end
         if i % 128 == 0 then control.check() end
-        if T.k[i] == 'op' then
+        if language == 'lua' and T.k[i] == 'kw' then
+            local s = T:text(i)
+            if lua_blocks[s] then
+                stack[#stack + 1] = { token = i, delimiter = s, block = true, argument = 0 }
+            elseif s == 'end' or s == 'until' then
+                while #stack > 0 do if table.remove(stack).block then break end end
+            end
+        elseif T.k[i] == 'op' then
             local s = T:text(i)
             if s == '(' or s == '[' or s == '{' then
                 stack[#stack + 1] = { token = i, delimiter = s, argument = 0 }
@@ -939,9 +1076,12 @@ function handlers.lsp_signature(req)
         end
     end
     local call
-    local kotlin = doc:parse().language == 'kotlin'
+    local kotlin = language == 'kotlin'
     for i = #stack, 1, -1 do
         local entry = stack[i]
+        -- A callback body is not an argument-editing context for its caller.
+        -- Inner calls can still supply help; after `end` the outer call resumes.
+        if entry.delimiter == 'function' then break end
         local name_token = entry.token - 1
         if kotlin and entry.delimiter == '(' and T:text(name_token) == '>' then
             local depth, k = 1, name_token - 1

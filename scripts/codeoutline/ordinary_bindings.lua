@@ -52,9 +52,9 @@ function M.context(G, ctx, source, options)
         end
         -- Keep only compact query evidence; source, tokens, and duplicate symbols die here.
         local data = { refs = { binding = parsed.refs.binding, js_receiver = parsed.refs.js_receiver },
-            js_exports = parsed.js_exports, python_imports = parsed.python_imports }
+            js_exports = parsed.js_exports, python_imports = parsed.python_imports, cpp_aliases = parsed.cpp_aliases }
         local weight = #raw + #parsed.refs.name * 128 + #(parsed.js_exports or {}) * 256
-            + #(parsed.python_imports or {}) * 256
+            + #(parsed.python_imports or {}) * 256 + #(parsed.cpp_aliases or {}) * 256
         if cache[f] then
             bytes = bytes - cache[f].weight; cache[f] = nil
             for i, old in ipairs(order) do if old == f then table.remove(order, i); break end end

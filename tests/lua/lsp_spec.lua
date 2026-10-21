@@ -715,6 +715,72 @@ int luaopen_native_test(lua_State *L) { luaL_setfuncs(L, methods, 0); luaL_newli
             navigation.close('ordinary-caller-draft')
         end
     end)
+    spec.it('shares C++ alias lookup across completion, definitions, references and edited headers', function()
+        local header = 'namespace AliasTest {\n'
+            .. 'class A { public: void save() {} void only_a() {} };\n'
+            .. 'class B { public: void save() {} void only_b() {} };\n'
+            .. 'using Actual = A; typedef const Actual* Ptr;\n}\n'
+        local source = '#include "AliasTypes.hpp"\nvoid alias_run(AliasTest::Ptr p) { p->save(); }\n'
+        nav_write('AliasTypes.hpp', header); nav_write('AliasClient.cpp', source)
+        local options = { cache_path = nav_root .. '/cache.idx', lister = 'walk' }
+        service.refresh(nav_root, options)
+        local idx = service.resident(nav_root)
+        idx:save(); service.forget(nav_root); service.refresh(nav_root, options)
+        local doc = docs.read(nav_root .. '/AliasClient.cpp')
+        local position = doc:position(assert(source:find('p->save', 1, true)) + 2)
+        local function check(session, line, included, excluded)
+            local req = { uri = doc.uri, root = nav_root, session = session, position = position }
+            local result = require('codeoutline.completion').complete(req)
+            local labels = {}
+            for _, item in ipairs(result.items) do labels[item.label] = true end
+            spec.truthy(labels[included]); spec.nil_value(labels[excluded])
+            req.method = 'lsp_definition'
+            local found = nav(req)
+            spec.equal(#found, 1); spec.equal(found[1].uri, nav_uri('AliasTypes.hpp'))
+            spec.equal(found[1].range.start.line, line)
+            local refs = nav({ method = 'lsp_references', session = session, uri = found[1].uri,
+                position = found[1].range.start, includeDeclaration = false })
+            local hit = false
+            for _, ref in ipairs(refs) do if ref.uri == doc.uri then hit = true end end
+            spec.truthy(hit)
+        end
+        check('alias-types', 1, 'only_a', 'only_b')
+        local uri = nav_uri('AliasTypes.hpp')
+        local changed = header:gsub('Actual = A', 'Actual = B')
+        navigation.sync({ session = 'alias-types', open = { [uri] = 1 }, changed = {
+            [uri] = { version = 1, language = 'cpp', source = changed } } })
+        check('alias-types', 2, 'only_b', 'only_a')
+        navigation.close('alias-types')
+        nav_write('AliasTypes.hpp', changed); service.refresh(nav_root, options)
+        check('alias-types-disk', 2, 'only_b', 'only_a')
+        for _, rec in pairs(service.resident(nav_root).files) do
+            spec.nil_value(rec.cpp_aliases); spec.nil_value(rec.ordinary_bindings)
+        end
+    end)
+    spec.it('keeps local C++ alias shadowing consistent in completion and navigation', function()
+        local source = 'class LocalAliasA { public: void save() {} void only_a() {} };\n'
+            .. 'class LocalAliasB { public: void save() {} void only_b() {} };\n'
+            .. 'using LocalItem = LocalAliasA;\n'
+            .. 'void local_alias_run() { LocalItem a; { using LocalItem = LocalAliasB; LocalItem b; b.save(); a.save(); } }\n'
+            .. 'void unknown_alias() { using LocalItem = MissingType; LocalItem c; c.save(); }\n'
+        nav_write('LocalAliases.cpp', source)
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local doc = docs.read(nav_root .. '/LocalAliases.cpp')
+        for _, case in ipairs({ { 'a.save', 'only_a', 'only_b', 0 }, { 'b.save', 'only_b', 'only_a', 1 }, { 'c.save' } }) do
+            local req = { uri = doc.uri, root = nav_root, session = 'local-alias',
+                position = doc:position(assert(source:find(case[1], 1, true)) + 1) }
+            local labels = {}
+            for _, item in ipairs(require('codeoutline.completion').complete(req).items) do labels[item.label] = true end
+            req.method = 'lsp_definition'
+            local found = nav(req)
+            if case[2] then
+                spec.truthy(labels[case[2]]); spec.nil_value(labels[case[3]])
+                spec.equal(#found, 1); spec.equal(found[1].range.start.line, case[4])
+            else
+                spec.nil_value(next(labels)); spec.equal(#found, 0)
+            end
+        end
+    end)
     spec.it('resolves Lua dofile returned members and unsaved export aliases', function()
         nav_write('LuaModule.lua', 'local M = {}\nlocal function actual() end\nM.save = actual\nreturn M')
         nav_write('LuaWrong.lua', 'local M = {}\nfunction M.save() end\nreturn M')

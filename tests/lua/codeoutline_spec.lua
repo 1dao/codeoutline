@@ -1268,6 +1268,7 @@ spec.describe('C++ declared receiver bindings', function()
                 spec.nil_value(rec.ordinary_bindings)
                 spec.nil_value(rec.refs.binding)
                 spec.nil_value(rec.python_imports)
+                spec.nil_value(rec.cpp_aliases)
                 for _, export in ipairs(rec.js_exports or {}) do spec.nil_value(export.binding) end
             end
         end
@@ -1327,6 +1328,104 @@ void unknown(A* a) { { int a; a.save(); } }
         local G = graph.build({ files = records })
         spec.equal(edges_from(G, 'run'), 'save@a.hpp')
         spec.equal(edges_from(G, 'missing'), '')
+    end)
+end)
+
+spec.describe('C++ query-time type aliases', function()
+    local function build(files)
+        local records = {}
+        for path, source in pairs(files) do records[path] = ci.parse(path, source, { ordinary_bindings = true }) end
+        return graph.build({ files = records })
+    end
+    local function targets(G, name)
+        local out, edges = {}, graph.query(G).out[G.by_name[name][1]]
+        for i = 1, #edges, graph.EDGE do out[#out + 1] = G.nodes[edges[i]].qualified end
+        table.sort(out); return table.concat(out, ',')
+    end
+    spec.it('follows named aliases, qualified aliases and pointer/reference chains', function()
+        local G = build({ ['a.cpp'] = [[
+class A { public: void save() {} class Inner { public: void save() {} }; };
+class B { public: void save() {} };
+namespace chosen { using Item = ::A; typedef const Item* Ptr; using Ref = Item&; }
+using Owner = A;
+void pointer(chosen::Ptr a) { a->save(); }
+void reference(chosen::Ref a) { a.save(); }
+void nested(Owner::Inner* a) { a->save(); }
+]] })
+        spec.equal(targets(G, 'pointer'), 'A::save')
+        spec.equal(targets(G, 'reference'), 'A::save')
+        spec.equal(targets(G, 'nested'), 'A::Inner::save')
+        spec.equal(#graph.query(G).inn[G.by_qualified['A::save'][1]], 2 * graph.EDGE)
+    end)
+    spec.it('uses lexical scope and the receiver declaration position', function()
+        local G = build({ ['a.cpp'] = [[
+class A { public: void save() {} };
+class B { public: void save() {} };
+using Item = A;
+void local_scope() { Item a; { using Item = B; Item b; b.save(); a.save(); } Item c; c.save(); }
+void before() { Item a; using Item = B; a.save(); Item b; b.save(); }
+class Box { public: using Item = B; void member(Item* a) { a->save(); } };
+namespace N { using Item = B; void qualified(::Item* a) { a->save(); } }
+]] })
+        spec.equal(targets(G, 'local_scope'), 'A::save,A::save,B::save')
+        spec.equal(targets(G, 'before'), 'A::save,B::save')
+        spec.equal(targets(G, 'member'), 'B::save')
+        spec.equal(targets(G, 'qualified'), 'A::save')
+    end)
+    spec.it('does not revive outer names for unsupported, missing or cyclic aliases', function()
+        local G = build({ ['a.cpp'] = [[
+class A { public: void save() {} };
+class Item { public: void save() {} };
+namespace N { using Item = Missing; void missing(Item* a) { a->save(); } }
+void primitive() { using Item = int; Item a; a.save(); }
+void cyclic() { using Loop = Loop; Loop* a; a->save(); }
+using Generic = Box<A>;
+void templated(Generic* a) { a->save(); }
+typedef void (*Callback)();
+void function_pointer(Callback a) { a->save(); }
+]] })
+        for _, name in ipairs({ 'missing', 'primitive', 'cyclic', 'templated', 'function_pointer' }) do
+            spec.equal(targets(G, name), '', name)
+        end
+    end)
+    spec.it('resolves header aliases in their declaration scope and keeps metadata query-only', function()
+        local source = 'namespace N { class A { public: void save() {} }; using Item = A; }'
+        local compact = ci.parse('types.hpp', source, { ranges = false, omit_signatures = true })
+        spec.nil_value(compact.cpp_aliases)
+        local G = build({ ['types.hpp'] = source,
+            ['app.cpp'] = '#include "types.hpp"\nclass A { public: void save() {} };\nvoid run(N::Item* a) { a->save(); }' })
+        spec.equal(targets(G, 'run'), 'N::A::save')
+    end)
+    spec.it('bounds alias chains without guessing past unresolved types', function()
+        local source = 'class A { public: void save() {} };\nusing T0 = A;\n'
+        for i = 1, 9 do source = source .. 'using T' .. i .. ' = T' .. (i - 1) .. ';\n' end
+        source = source .. 'void bounded(T7* a) { a->save(); }\nvoid too_deep(T9* a) { a->save(); }'
+        local G = build({ ['a.cpp'] = source })
+        spec.equal(targets(G, 'bounded'), 'A::save')
+        spec.equal(targets(G, 'too_deep'), '')
+    end)
+    spec.it('shares lazy aliases with explore and callers after reload and incremental edits', function()
+        local root = tmp_root .. '/cpp_alias_queries'
+        local header = 'class AliasA { public: void save() {} };\nclass AliasB { public: void save() {} };\nusing Selected = AliasA;\n'
+        write(root .. '/types.hpp', header)
+        write(root .. '/app.cpp', '#include "types.hpp"\nvoid alias_entry(Selected* p) { p->save(); }\n')
+        local options = { cache_path = root .. '/cache.idx', lister = 'walk' }
+        local idx, G = svc.get(root, options)
+        idx:save(); svc.forget(root); idx, G = svc.get(root, options)
+        local function check(which)
+            local text = explore.run(G, idx, 'alias_entry ' .. which .. '::save')
+            spec.contains(text, 'alias_entry -> ' .. which .. '::save')
+            local _, info = require('codeoutline.callers').run(G, idx, which .. '::save')
+            spec.equal(#info.callers, 1); spec.equal(info.callers[1].name, 'alias_entry')
+            for _, rec in pairs(idx.files) do spec.nil_value(rec.cpp_aliases) end
+        end
+        check('AliasA')
+        write(root .. '/types.hpp', header:gsub('Selected = AliasA', 'Selected = AliasB'))
+        idx, G = svc.get(root, options)
+        check('AliasB')
+        local _, info = require('codeoutline.callers').run(G, idx, 'AliasA::save')
+        spec.equal(#info.callers, 0)
+        svc.forget(root)
     end)
 end)
 

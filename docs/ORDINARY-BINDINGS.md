@@ -38,12 +38,28 @@ Type lookup walks the caller's enclosing qualified scopes and uses same-file
 or directly included class/struct declarations. Simple base-class method lookup
 is cycle-safe and limited to eight hops.
 
+Completion and ordinary call resolution share C++ named-type lookup. Simple
+`using Name = Type` and `typedef Type Name` aliases can include qualified names,
+cv qualifiers, pointers and references. Alias chains are limited to eight hops;
+class aliases can also qualify nested types (`Alias::Inner`). Alias targets are
+looked up in their declaration scope. Function-local aliases honor block lifetime
+and declaration order, using the receiver variable's declaration position so a
+later alias shadow does not change an already declared variable's type.
+
+Alias bodies and lexical ranges are collected only during query parsing, kept
+in the existing bounded query cache and never written to the index. Unsaved LSP
+documents supply the same data to completion and navigation. A visible alias
+whose target is missing, unsupported or cyclic blocks outer same-name guesses.
+
 A known declaration with no resolvable type or member does not fall back to an
 unrelated same-name method. Primitive and `auto` declarations also act as
 barriers to an enclosing receiver binding. This does not infer `auto`, templates,
-type aliases, using-directives, smart pointers, chained field types, or virtual
+using-directives, namespace aliases, inherited type aliases, alias templates,
+dependent types, function-pointer/array aliases, smart pointers, chained field types, or virtual
 runtime dispatch. Include resolution retains the existing graph's limitations.
 Unsupported declaration forms can still use the existing generic resolver.
+Completion retains its pre-existing broader initializer/member-chain suggestions;
+these heuristics are not promoted to proven call relationships.
 
 ## Storage and validation
 

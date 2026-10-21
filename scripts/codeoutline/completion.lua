@@ -53,8 +53,12 @@ end
 
 -- Type name for a declared type text: modifiers, pointers, references,
 -- arrays, namespaces and well-known wrappers removed.
-local function normalize(text)
+local function normalize(text, language)
     if type(text) ~= 'string' then return nil end
+    if language == 'cpp' then
+        local named = require('codeoutline.cpp_types').normalize(text)
+        if named then return named end
+    end
     text = text:gsub('^%s+', ''):gsub('%s+$', '')
     for _ = 1, 8 do
         local first, rest = text:match('^([%a_]+)%s+(.+)$')
@@ -87,7 +91,7 @@ end
 
 -- Declared type of a node from its signature (or the full-parse `type`).
 local function declared(node, language)
-    if node.type then return normalize(node.type) end
+    if node.type then return normalize(node.type, language) end
     local sig, name = node.sig, node.name
     if not sig then return nil end
     if node.kind == 'constructor' then return nil end
@@ -113,7 +117,7 @@ local function declared(node, language)
         end
         local at = sig:find('[%w_]*' .. name .. '%s*%(')
         if not at then return nil end
-        return normalize(strip_name(sig:sub(1, at - 1), name))
+        return normalize(strip_name(sig:sub(1, at - 1), name), language)
     end
     if language == 'go' then
         return normalize(sig:match('^%s*' .. name .. '%s+(.+)$'))
@@ -126,7 +130,7 @@ local function declared(node, language)
     local at
     for position in sig:gmatch('()' .. name .. '%f[^%w_]') do at = position end
     if not at or at == 1 then return nil end
-    return normalize(sig:sub(1, at - 1))
+    return normalize(sig:sub(1, at - 1), language)
 end
 
 -- Full record and tokens of file f: the overlay document, else a cached
@@ -176,7 +180,7 @@ local function parameters(T, a, b, language, out)
         else
             local name
             for k = y, x, -1 do if T.k[k] == 'id' then name = k; break end end
-            if name and name > x then out[#out + 1] = { name = text_of(T, name), type = normalize(span(T, x, name - 1)) } end
+            if name and name > x then out[#out + 1] = { name = text_of(T, name), type = normalize(span(T, x, name - 1), language), at = name } end
         end
     end
     for _, name in ipairs(pending) do out[#out + 1] = { name = name } end
@@ -246,7 +250,7 @@ local function declarations(T, a, b, language, skip, out)
         return b
     end
     local function add(name_tok, type, init)
-        local entry = { name = text_of(T, name_tok), type = normalize(type), at = name_tok }
+        local entry = { name = text_of(T, name_tok), type = normalize(type, language), at = name_tok }
         if init then
             local stop = statement_end(init)
             local value = initializer(T, init, stop, language)
@@ -440,11 +444,21 @@ local Completion = {}
 Completion.__index = Completion
 
 -- Type nodes named name, as seen from file f.
-function Completion:types(name, f)
+function Completion:types(name, f, scope, at)
     if not name then return {} end
     f = f or self.f
     local accept = self.language == 'lua' and LUA_TYPES or TYPES
     local direct, paired = navigation.deps(self.V, f)
+    if self.V.files[f].language == 'cpp' then
+        if not scope and f == self.f then
+            local owner = self.fn and self.rec.nodes[self.fn] or self.owner and self.rec.nodes[self.owner]
+            scope = owner and (CALLABLE[owner.kind] and owner.qualified:match('^(.*)::[^:]+$') or owner.qualified)
+        end
+        if at == nil and f == self.f then at = self.offset end
+        local ids, known = require('codeoutline.cpp_types').resolve(self.V, f, name,
+            { scope = scope, at = at or nil, deps = direct, context = self.V.js_context, accept = TYPES })
+        if known then return ids end
+    end
     local found = graph.resolve(self.V, f, nil, name, 'call', nil, direct, paired, accept) or {}
     if #found == 0 then
         local family = graph.family(self.V.files[f].language)
@@ -524,7 +538,7 @@ function Completion:members(ids, depth, seen)
         -- Base classes.
         if depth < 3 and node.bases then
             for _, base in ipairs(node.bases) do
-                local base_ids = self:types(normalize(base), f)
+                local base_ids = self:types(normalize(base, self.language), f, node.qualified:match('^(.*)::[^:]+$'), false)
                 for _, entry in ipairs(self:members(base_ids, depth + 1, seen)) do out[#out + 1] = entry end
             end
         end
@@ -752,7 +766,7 @@ function Completion:receiver(item, depth)
         if entry.module then
             return { modules = import_files(self.V, self.f, { kind = entry.module_kind or 'require', path = entry.module }), module_name = entry.module }
         elseif entry.type then
-            local ids = self:types(entry.type)
+            local ids = self:types(entry.type, nil, nil, entry.at and self.T.s[entry.at] - 1)
             if #ids > 0 then return { types = ids } end
         elseif entry.chain and depth < M.MAX_DEPTH then
             return self:chain(entry.chain, depth + 1)
@@ -806,7 +820,7 @@ function Completion:chain(chain, depth)
                     if not type and element.call and FACTORY[element.name] and target.types then
                         for _, id in ipairs(target.types) do next_ids[#next_ids + 1] = id end
                     elseif type then
-                        for _, id in ipairs(self:types(type, entry.file)) do next_ids[#next_ids + 1] = id end
+                        for _, id in ipairs(self:types(type, entry.file, node.qualified:match('^(.*)::[^:]+$'), false)) do next_ids[#next_ids + 1] = id end
                     end
                     if #next_ids == 0 and element.call and self.language == 'lua' then
                         -- A native object: the C implementation names the metatable

@@ -295,7 +295,7 @@ local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired, accept,
     end
     if exact == nil and G.files[f].language == 'cpp' then
         strategy = 'c++ declared receiver'
-        exact = require('codeoutline.cpp_bindings').resolve(G, f, src_id, name, evidence, deps)
+        exact = require('codeoutline.cpp_bindings').resolve(G, f, src_id, name, evidence, deps, js_context)
     end
     if exact == nil then
         strategy = 'lua binding'

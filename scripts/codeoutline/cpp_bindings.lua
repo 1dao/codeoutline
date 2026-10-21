@@ -10,6 +10,7 @@ local primitive = { auto = true, int = true, double = true, float = true, char =
 
 function M.collect(r, T)
     if r.language ~= 'cpp' then return end
+    require('codeoutline.cpp_types').collect(r, T)
     local wanted = {}
     for _, ref in ipairs(r.refs) do
         if ref.kind == 'member_call' and ref.recv and ref.recv ~= 'this' then wanted[ref.recv] = true end
@@ -61,7 +62,7 @@ function M.collect(r, T)
                     and (not best or b.a > best.a or b.a == best.a and b.token > best.token) then best = b end
             end
             if best then
-                ref.binding = 'cpp:type:' .. best.type
+                ref.binding = 'cpp:type:' .. best.type .. '\0' .. (T.s[best.token] - 1)
                 -- A chain's tail is not the simple local sharing that name.
                 if T:text(ref.tok - 3) == '.' or T:text(ref.tok - 3) == '->' then ref.binding = 'cpp:?' end
             end
@@ -69,27 +70,15 @@ function M.collect(r, T)
     end
 end
 
-function M.resolve(G, f, src, name, evidence, deps)
+function M.resolve(G, f, src, name, evidence, deps, ctx)
     if G.files[f].language ~= 'cpp' or not evidence or evidence:sub(1, 4) ~= 'cpp:' then return nil end
     local ty = evidence:match('^cpp:type:(.+)$')
     if not ty then return {} end
-    local function classes(written, scope)
-        if written:sub(1, 2) == '::' then written, scope = written:sub(3), nil end
-        local qualified = {}
-        while scope and scope ~= '' do
-            qualified[#qualified + 1] = scope .. '::' .. written
-            scope = scope:match('^(.*)::[^:]+$')
-        end
-        qualified[#qualified + 1] = written
-        for _, q in ipairs(qualified) do
-            local result = {}
-            for _, id in ipairs(G.by_name[q:match('([^:]+)$')] or {}) do
-                local n, file = G.nodes[id], G.node_file[id]
-                if types[n.kind] and n.qualified == q and (file == f or deps[file]) then result[#result + 1] = id end
-            end
-            if #result > 0 then return result end
-        end
-        return {}
+    local written, at = ty:match('^(.-)%z(%d+)$')
+    ty = written or ty
+    local function classes(written, scope, file, position)
+        return require('codeoutline.cpp_types').resolve(G, file or f, written,
+            { scope = scope, at = position, deps = deps, context = ctx })
     end
     local scope = src and G.nodes[src].qualified:match('^(.*)::[^:]+$')
     local result, seen, emitted = {}, {}, {}
@@ -116,11 +105,11 @@ function M.resolve(G, f, src, name, evidence, deps)
         end
         if #matches == 0 then
             for _, base in ipairs(G.nodes[cls].bases or {}) do
-                for _, id in ipairs(classes(base, G.nodes[cls].qualified:match('^(.*)::[^:]+$'))) do members(id, depth + 1) end
+                for _, id in ipairs(classes(base, G.nodes[cls].qualified:match('^(.*)::[^:]+$'), G.node_file[cls])) do members(id, depth + 1) end
             end
         end
     end
-    for _, cls in ipairs(classes(ty, scope)) do members(cls, 0) end
+    for _, cls in ipairs(classes(ty, scope, f, tonumber(at))) do members(cls, 0) end
     return result
 end
 

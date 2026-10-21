@@ -117,6 +117,21 @@ local function exported(G, f, name, ctx, seen, depth)
     local function add(ids) for _, id in ipairs(ids) do if not unique[id] then unique[id] = true; result[#result + 1] = id end end end
     local rec = G.files[f]
     local entries = rec.js_exports or {}
+    -- Only variable exports may need the new lexical alias analysis. Ordinary
+    -- declared exports continue to resolve entirely from the resident index.
+    if ctx.ordinary and not rec.ordinary_bindings then
+        local needed = false
+        for _, e in ipairs(entries) do
+            if e.name == name and not e.path then
+                for _, id in ipairs(G.by_name[e.local_name] or {}) do
+                    local n = G.nodes[id]
+                    if G.node_file[id] == f and not n.parent and n.kind == 'variable' then needed = true; break end
+                end
+            end
+            if needed then break end
+        end
+        if needed then entries = ctx.ordinary.data(f).js_exports or entries end
+    end
     local explicit = false
     for _, e in ipairs(entries) do if e.name == name then explicit = true end end
     for _, e in ipairs(entries) do
@@ -125,6 +140,16 @@ local function exported(G, f, name, ctx, seen, depth)
             if e.path then
                 local target = M.module(G, f, e.path, ctx)
                 if target then add(exported(G, target, want, ctx, seen, depth + 1)) end
+            elseif e.binding then
+                local node = e.binding:match('^node:(%d+)$')
+                local path, member = e.binding:match('^import:(.-)%z(.*)$')
+                if node then
+                    local id = G.id_of[f][tonumber(node)]
+                    if id then add({ id }) end
+                elseif path then
+                    local target = M.module(G, f, path, ctx)
+                    if target then add(exported(G, target, member, ctx, seen, depth + 1)) end
+                end
             else
                 for _, id in ipairs(G.id_of[f]) do
                     local n = G.nodes[id]
@@ -168,6 +193,8 @@ function M.resolve(G, f, name, kind, recv, evidence, ctx)
     if evidence then
         local node = evidence:match('^node:(%d+)$')
         if node then return { G.id_of[f][tonumber(node)] } end
+        local path, member = evidence:match('^import:(.-)%z(.*)$')
+        if path then return M.imported(G, f, path, member, ctx) end
         local head, tail = evidence:match('^([%w_$]+)%.([%w_$]+)$')
         local classes = binding(head or evidence, tail)
         if classes == nil then

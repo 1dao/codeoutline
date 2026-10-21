@@ -3,6 +3,9 @@
 Explore and LSP call-site navigation use explicit ES module bindings before
 name/locality scoring. No configuration is required for relative imports.
 
+Simple local and exported function aliases also participate in ordinary calls
+and reverse callers; see [ordinary call bindings](ORDINARY-BINDINGS.md).
+
 Supported module evidence:
 
 - Named imports, including `import { save as persist } from './store'`.

@@ -289,6 +289,14 @@ local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired, accept,
     if evidence == '' then evidence = nil end
     local strategy = 'js/ts binding'
     local exact = js_resolution.resolve(G, f, name, kind, recv, evidence, js_context)
+    if exact == nil and G.files[f].language == 'python' then
+        strategy = 'python binding'
+        exact = require('codeoutline.python_bindings').resolve(G, f, evidence, js_context)
+    end
+    if exact == nil and G.files[f].language == 'cpp' then
+        strategy = 'c++ declared receiver'
+        exact = require('codeoutline.cpp_bindings').resolve(G, f, src_id, name, evidence, deps)
+    end
     if exact == nil then
         strategy = 'lua binding'
         exact = lua_bindings.resolve(G, f, name, evidence, js_context and js_context.lua, recv)
@@ -526,6 +534,8 @@ function M.query(symbols, opts)
     local dependencies, references = {}, {}
     local js_context = js_resolution.context(symbols)
     js_context.lua = lua_bindings.context(symbols)
+    js_context.ordinary = require('codeoutline.ordinary_bindings').context(symbols, js_context)
+    Q.stats.ordinary = js_context.ordinary.stats
     local report = opts.explain and require('codeoutline.query_report').new() or nil
     Q.report = report
     local indirect = require('codeoutline.indirect').query(symbols, opts.dispatch_rules, report)
@@ -545,7 +555,7 @@ function M.query(symbols, opts)
         local direct, paired = deps(f)
         Q.stats.resolved_refs = Q.stats.resolved_refs + 1
         local found, reason = resolve_ref(symbols, f, ids[refs.from[i]], refs.name[i], refs.kind[i],
-            refs.recv[i] or nil, direct, paired, nil, refs.lua_binding and refs.lua_binding[i] or refs.js_receiver and refs.js_receiver[i], js_context)
+            refs.recv[i] or nil, direct, paired, nil, js_context.ordinary.evidence(f, i), js_context)
         if report and explain and (refs.kind[i] == 'call' or refs.kind[i] == 'member_call') then
             if (not found or #found == 0) and explain == true then
                 report:add({ source = ids[refs.from[i]], line = refs.line[i], call = refs.name[i], reason = reason or 'unresolved reference' })
@@ -623,10 +633,11 @@ function M.query(symbols, opts)
         -- Hot loop over every reference: numeric loops, hoisted fields, and the
         -- selective name test first. Checkpoints run per file and per chunk.
         local files = symbols.files
+        local candidates = js_context.ordinary.candidates(wanted)
         for _, f in ipairs(symbols.file_order) do
             control.check()
+            local alias_refs = js_context.ordinary.aliases(f, wanted, candidates)
             local aliases = {}
-            for _, binding in ipairs(files[f].js_imports or {}) do aliases[binding.local_name] = true end
             if files[f].language == 'kotlin' then
                 for _, imp in ipairs(files[f].imports) do
                     if imp.alias and names[imp.path:match('([^.]+)$')] then aliases[imp.alias] = true end
@@ -638,7 +649,9 @@ function M.query(symbols, opts)
             for first = 1, count, 4096 do
                 if first > 1 then control.check() end
                 for i = first, math.min(count, first + 4095) do
-                    if (names[ref_names[i]] or aliases[ref_names[i]] or aliases[refs.recv[i]] or (refs.lua_binding and refs.lua_binding[i] ~= '')) and froms[i] > 0 then
+                    if (names[ref_names[i]] or aliases[ref_names[i]] or aliases[refs.recv[i]]
+                        or alias_refs[i]
+                        or (refs.lua_binding and refs.lua_binding[i] ~= '')) and froms[i] > 0 then
                         for _, dst in ipairs(targets(f, i, wanted) or {}) do
                             if wanted[dst] then
                                 push3(incoming, dst, symbols.id_of[f][froms[i]], refs.line[i], refs.kind[i])

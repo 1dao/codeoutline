@@ -41,6 +41,7 @@ local function simple(T, i, language, symbols_only)
     if not boundary then return false end
     return { symbol = symbol, literal = literal, token = start }, ending
 end
+M.simple = simple
 
 -- Only remember literal service constructors; validate the factory's lexical
 -- identity during expansion, after imports, shadowing and writes are known.
@@ -130,16 +131,27 @@ local function imports(r, T)
             local first = i
             while first > 1 and T.k[first - 1] ~= 'nl' do first = first - 1 end
             if T:text(first) ~= 'from' then
-                local path, j = name(T, i + 1)
-                if path then
+                local j = i + 1
+                while T.k[j] == 'id' do
+                    local path
+                    path, j = name(T, j)
                     if T:text(j) == 'as' and T.k[j + 1] == 'id' then add(T:text(j + 1), path, '*', j + 1)
-                    else add(path:match('^[^.]+'), path:match('^[^.]+'), '*', i + 1) end
+                        j = j + 2
+                    else add(path:match('^[^.]+'), path:match('^[^.]+'), '*', j - 1) end
+                    if T:text(j) ~= ',' then break end
+                    j = j + 1
                 end
             end
         elseif r.language == 'python' and s == 'from' then
-            local path, j = name(T, i + 1)
+            local prefix, j = '', i + 1
+            while T:text(j) == '.' or T:text(j) == '...' do prefix = prefix .. T:text(j); j = j + 1 end
+            local path
+            path, j = name(T, j)
+            path = prefix .. (path or '')
+            if path == '' then path = nil end
             if path and T:text(j) == 'import' then
                 j = j + 1
+                if T:text(j) == '(' then j = j + 1 end
                 while T.k[j] == 'id' do
                     local original, alias, tok = T:text(j), T:text(j), j; j = j + 1
                     if T:text(j) == 'as' and T.k[j + 1] == 'id' then alias, tok, j = T:text(j + 1), j + 1, j + 2 end
@@ -152,6 +164,7 @@ local function imports(r, T)
     end
     return result
 end
+M.imports = imports
 
 -- Cheap, conservative roots let aliases reach the query parser without
 -- performing scope analysis at index time. Existing dispatch_calls stores them.
@@ -221,7 +234,7 @@ function M.prepare(r, T)
             if not lua then ends[i] = T.m[i] or T.n end
         end
     end
-    local bindings, imported = {}, {}
+    local bindings, imported, callable_declarations = {}, {}, {}
     local function function_scope(at)
         local owner
         for _, n in ipairs(r.nodes) do
@@ -252,6 +265,14 @@ function M.prepare(r, T)
     -- for parameters, including unsupported typed/destructured parameter forms.
     for id, n in ipairs(r.nodes) do
         if callable[n.kind] then
+            if js and n.kind == 'function' then
+                for j = n.ti, math.min(n.tj, n.ti + 4) do
+                    local prev = T:text(j - 1)
+                    if T:text(j) == n.name and (prev == 'const' or prev == 'let' or prev == 'var') then
+                        callable_declarations[j] = id; break
+                    end
+                end
+            end
             local p = n.ti
             while p <= n.tj and T:text(p) ~= '(' and T:text(p) ~= '{' and T:text(p) ~= '=>' do p = p + 1 end
             if T:text(p) == '(' and T.m[p] then
@@ -332,6 +353,7 @@ function M.prepare(r, T)
                 local scope, finish = scopes[i], nil
                 if python or js and prev == 'var' then scope, finish = function_scope(i) end
                 local v = eq and simple(T, eq + 1, r.language) or false
+                if callable_declarations[i] then v = { node = callable_declarations[i], symbol = T:text(i) } end
                 if lua and eq and not v then v = service_initializer(T, eq + 1) or false end
                 if lua and eq and T:text(eq + 1) == '{' then v = { namespace = true } end
                 local b = add(T:text(i), i, scope, v, finish)

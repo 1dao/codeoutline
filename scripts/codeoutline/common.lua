@@ -26,6 +26,7 @@ function M.new(path, language, opts)
     return { path = path, language = language, nodes = {}, refs = {}, imports = {},
         ranges = not opts or opts.ranges ~= false, collect_dispatch = opts and opts.dispatch,
         dispatch_only = opts and opts.dispatch_only, collect_static_dispatch = opts and opts.static_dispatch,
+        ordinary_bindings = opts and opts.ordinary_bindings,
         collect_foreign = opts and opts.foreign, omit_signatures = opts and opts.omit_signatures }
 end
 
@@ -148,16 +149,23 @@ function M.finish(r, T)
         return r
     end
     if T then require('codeoutline.js_evidence').collect(r, T) end
+    if T and r.ordinary_bindings then
+        require('codeoutline.python_bindings').collect(r, T)
+        require('codeoutline.cpp_bindings').collect(r, T)
+    end
     if T then require('codeoutline.indirect').collect(r, T) end
     r.collect_dispatch = nil
     local name, from, kind, line, recv = {}, {}, {}, {}, {}
     local js_receiver = r.js_imports and {}
     local lua_binding = r.lua_imports and {}
+    local binding = (r.python_imports or r.has_bindings) and {}
+    r.has_bindings = nil
     local start, stop = r.ranges and T and {}, r.ranges and T and {}
     for i, ref in ipairs(r.refs) do
         name[i], from[i], kind[i], line[i], recv[i] = ref.name, ref.from, ref.kind, ref.line, ref.recv or false
         if js_receiver then js_receiver[i] = ref.js_receiver or '' end
         if lua_binding then lua_binding[i] = ref.lua_binding or '' end
+        if binding then binding[i] = ref.binding or '' end
         if start then
             local named = T:text(ref.tok) == ref.name
             start[i], stop[i] = named and T.s[ref.tok] - 1 or false, named and T.e[ref.tok] or false
@@ -166,6 +174,7 @@ function M.finish(r, T)
     r.refs = { name = name, from = from, kind = kind, line = line, recv = recv, start = start or nil, stop = stop or nil }
     r.refs.js_receiver = js_receiver
     r.refs.lua_binding = lua_binding
+    r.refs.binding = binding
     for i, n in ipairs(r.nodes) do
         n.ti, n.tj = nil, nil
         if not r.ranges then

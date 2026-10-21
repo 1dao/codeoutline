@@ -666,6 +666,55 @@ int luaopen_native_test(lua_State *L) { luaL_setfuncs(L, methods, 0); luaL_newli
         spec.contains(hover.contents.value, 'save(id:number, arg2:string, count?:int = 10)')
         navigation.close('native-overlay')
     end)
+    spec.it('shares ordinary bindings with definitions, references and unsaved targets', function()
+        local cases = {
+            { file = 'Ordinary.ts', target = 'OrdinaryTarget.ts', language = 'typescript',
+                source = "import { alias } from './OrdinaryTarget'; const cb = alias;\nfunction run() { cb(); }",
+                declaration = 'export function ordinary_target() {}\nexport const alias = ordinary_target;',
+                call = 'cb();', name = 'ordinary_target' },
+            { file = 'Ordinary.py', target = 'OrdinaryTarget.py', language = 'python',
+                source = 'from OrdinaryTarget import ordinary_target as cb\ndef run():\n    cb()\n',
+                declaration = 'def ordinary_target():\n    pass\n', call = 'cb()', name = 'ordinary_target' },
+            { file = 'Ordinary.cpp', target = 'OrdinaryTarget.hpp', language = 'cpp',
+                source = '#include "OrdinaryTarget.hpp"\nvoid run(Ordinary* a) { a->ordinary_target(); }',
+                declaration = 'class Ordinary { public: void ordinary_target() {} };',
+                call = 'ordinary_target();', name = 'ordinary_target' },
+        }
+        for _, case in ipairs(cases) do
+            nav_write(case.file, case.source); nav_write(case.target, case.declaration)
+        end
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        for _, case in ipairs(cases) do
+            local doc = docs.read(nav_root .. '/' .. case.file)
+            local req = { method = 'lsp_definition', uri = doc.uri,
+                position = doc:position(assert(case.source:find(case.call, 1, true)) - 1) }
+            local found = nav(req)
+            spec.equal(#found, 1, case.file); spec.equal(found[1].uri, nav_uri(case.target))
+            spec.equal(range_text(case.target, found[1].range), case.name)
+            local target_doc = docs.read(nav_root .. '/' .. case.target)
+            local refs = nav({ method = 'lsp_references', uri = target_doc.uri, includeDeclaration = false,
+                position = target_doc:position(assert(case.declaration:find(case.name, 1, true)) - 1) })
+            local hit = false
+            for _, ref in ipairs(refs) do if ref.uri == doc.uri then hit = true end end
+            spec.truthy(hit, case.file .. ' reverse references')
+            navigation.sync({ session = 'ordinary-binding-draft', open = { [target_doc.uri] = 1 }, changed = {
+                [target_doc.uri] = { version = 1, language = case.language, source = '\n' .. case.declaration } } })
+            req.session = 'ordinary-binding-draft'
+            found = nav(req)
+            spec.equal(#found, 1, case.file .. ' overlay'); spec.equal(found[1].range.start.line, 1)
+            navigation.close('ordinary-binding-draft')
+            -- The caller's unsaved bytes also supply query evidence, with the
+            -- original resident reference indices replaced by the overlay's.
+            navigation.sync({ session = 'ordinary-caller-draft', open = { [doc.uri] = 1 }, changed = {
+                [doc.uri] = { version = 1, language = case.language, source = '\n' .. case.source } } })
+            local draft = docs.new(doc.uri, '\n' .. case.source, 1, case.language)
+            req.session = 'ordinary-caller-draft'
+            req.position = draft:position(assert(draft.source:find(case.call, 1, true)) - 1)
+            found = nav(req)
+            spec.equal(#found, 1, case.file .. ' caller overlay'); spec.equal(found[1].uri, nav_uri(case.target))
+            navigation.close('ordinary-caller-draft')
+        end
+    end)
     spec.it('resolves Lua dofile returned members and unsaved export aliases', function()
         nav_write('LuaModule.lua', 'local M = {}\nlocal function actual() end\nM.save = actual\nreturn M')
         nav_write('LuaWrong.lua', 'local M = {}\nfunction M.save() end\nreturn M')

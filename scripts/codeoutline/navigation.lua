@@ -77,6 +77,9 @@ local function view(session, root)
         next_file = G.next_file, next_node = G.next_node, next_dir = G.next_dir }, { __index = G })
     V.js_context = require('codeoutline.js_resolution').context(V)
     V.js_context.lua = require('codeoutline.lua_bindings').context(V)
+    V.js_context.ordinary = require('codeoutline.ordinary_bindings').context(V, V.js_context, function(f)
+        return V.drafts[f] and V.drafts[f].source
+    end)
     for _, name in ipairs({ 'files', 'nodes', 'node_file', 'id_of', 'file_index', 'file_dir' }) do
         V[name] = setmetatable({}, { __index = G[name] })
     end
@@ -188,7 +191,8 @@ local function recursive(node, recv)
 end
 
 -- Targets of one occurrence of name in file f, enclosed by node index from.
-local function resolve_site(V, f, from, name, kind, recv, evidence, offset)
+local function resolve_site(V, f, from, name, kind, recv, evidence, offset, index)
+    if index then evidence = V.js_context.ordinary.evidence(f, index) end
     local src = from > 0 and V.id_of[f][from] or nil
     local direct, paired = deps(V, f)
     local rkind, accept = kind, nil
@@ -259,8 +263,8 @@ local function find_cursor(doc, offset, strict)
             local a = refs.start[i]
             if a and inside(a, refs.stop[i]) then
                 return { from = refs.from[i], name = refs.name[i], kind = refs.kind[i], recv = refs.recv[i],
-                    evidence = refs.lua_binding and refs.lua_binding[i] or refs.js_receiver and refs.js_receiver[i],
-                    first = a, last = refs.stop[i] }
+                    evidence = refs.binding and refs.binding[i] or refs.lua_binding and refs.lua_binding[i] or refs.js_receiver and refs.js_receiver[i],
+                    first = a, last = refs.stop[i], index = i }
             end
         end
     end
@@ -490,12 +494,13 @@ local function scan(V, targets, name)
     local files = {}
     for i, f in ipairs(V.file_order) do files[i] = f end
     for _, f in ipairs(V.new_files) do files[#files + 1] = f end
+    local candidates = V.js_context.ordinary.candidates(targets)
     for _, f in ipairs(files) do
         control.check()
+        local alias_refs = V.js_context.ordinary.aliases(f, targets, candidates)
         local refs = V.files[f].refs
         local names = refs.name
         local aliases = {}
-        for _, binding in ipairs(V.files[f].js_imports or {}) do aliases[binding.local_name] = true end
         if V.files[f].language == 'kotlin' then
             for _, imp in ipairs(V.files[f].imports) do
                 if imp.alias and imp.path:match('([^.]+)$') == name then aliases[imp.alias] = true end
@@ -503,9 +508,11 @@ local function scan(V, targets, name)
         end
         for i = 1, #names do
             if i % 4096 == 0 then control.check() end
-            if wanted[names[i]] or aliases[names[i]] or aliases[refs.recv[i]] or (refs.lua_binding and refs.lua_binding[i] ~= '') then
+            if wanted[names[i]] or aliases[names[i]] or aliases[refs.recv[i]]
+                or alias_refs[i]
+                or (refs.lua_binding and refs.lua_binding[i] ~= '') then
                 if os.clock() > deadline then return hits, true end
-                for _, dst in ipairs(resolve_site(V, f, refs.from[i], names[i], refs.kind[i], refs.recv[i], refs.lua_binding and refs.lua_binding[i] or refs.js_receiver and refs.js_receiver[i], refs.start and refs.start[i] or nil)) do
+                for _, dst in ipairs(resolve_site(V, f, refs.from[i], names[i], refs.kind[i], refs.recv[i], nil, refs.start and refs.start[i] or nil, i)) do
                     if targets[dst] then hits[#hits + 1] = { f, i }; break end
                 end
                 if #hits >= M.MAX_RESULTS then return hits, true end
@@ -1001,7 +1008,7 @@ local function at(req)
     local c = cursor(doc, offset)
     local targets = {}
     if c and c.decl then targets = { V.id_of[f][c.decl] }
-    elseif c then targets = resolve_site(V, f, c.from, c.name, c.kind, c.recv, c.evidence, c.first) end
+    elseif c then targets = resolve_site(V, f, c.from, c.name, c.kind, c.recv, c.evidence, c.first, c.index) end
     return V, doc, c, targets, f, offset
 end
 
@@ -1216,7 +1223,7 @@ function handlers.lsp_outgoing(req)
     for i = 1, #refs.name do
         if i % 128 == 0 then control.check() end
         if refs.from[i] == from then
-            for _, dst in ipairs(resolve_site(V, f, from, refs.name[i], refs.kind[i], refs.recv[i], refs.lua_binding and refs.lua_binding[i] or refs.js_receiver and refs.js_receiver[i], refs.start and refs.start[i] or nil)) do
+            for _, dst in ipairs(resolve_site(V, f, from, refs.name[i], refs.kind[i], refs.recv[i], nil, refs.start and refs.start[i] or nil, i)) do
                 local group = groups[dst]
                 if not group then
                     group = { to = item(V, dst), fromRanges = {} }

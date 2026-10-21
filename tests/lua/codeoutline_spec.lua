@@ -1250,12 +1250,238 @@ spec.describe('watched refresh', function()
     xutils.rmtree(wr)
 end)
 
+spec.describe('C++ declared receiver bindings', function()
+    spec.it('generates ordinary bindings only in queries after cache reload and incremental changes', function()
+        local root = tmp_root .. '/ordinary_bindings'
+        write(root .. '/store.py', 'def save():\n    pass\n')
+        write(root .. '/other.py', 'def save():\n    pass\n')
+        write(root .. '/app.py', 'from store import save as persist\ndef python_run():\n    persist()\n')
+        write(root .. '/lib.ts', 'export const save = () => {};\nexport const alias = save;')
+        write(root .. '/app.ts', "import { alias } from './lib'; const cb = alias; function js_run() { cb(); }")
+        write(root .. '/app.cpp', 'class A { public: void save() {} }; class B { public: void save() {} };\nvoid cpp_run(A* a) { a->save(); }')
+        local options = { cache_path = root .. '/cache.idx', lister = 'walk' }
+        local idx, G = svc.get(root, options)
+        idx:save(); svc.forget(root)
+        idx, G = svc.get(root, options)
+        local function no_evidence()
+            for _, rec in pairs(idx.files) do
+                spec.nil_value(rec.ordinary_bindings)
+                spec.nil_value(rec.refs.binding)
+                spec.nil_value(rec.python_imports)
+                for _, export in ipairs(rec.js_exports or {}) do spec.nil_value(export.binding) end
+            end
+        end
+        no_evidence()
+        local resident = xutils.json_pack(idx.files)
+        spec.equal(edges_from(G, 'python_run'), 'save@store.py')
+        spec.equal(edges_from(G, 'js_run'), 'save@lib.ts')
+        local function cpp_target(symbols)
+            return symbols.nodes[graph.query(symbols).out[symbols.by_name.cpp_run[1]][1]].qualified
+        end
+        spec.equal(cpp_target(G), 'A::save')
+        spec.equal(xutils.json_pack(idx.files), resident, 'queries must not mutate resident records')
+        no_evidence()
+        write(root .. '/app.py', 'from other import save as persist\ndef python_run():\n    persist()\n')
+        write(root .. '/lib.ts', 'export const replacement = () => {};\nexport const alias = replacement;')
+        write(root .. '/app.cpp', 'class A { public: void save() {} }; class B { public: void save() {} };\nvoid cpp_run(B* a) { a->save(); }')
+        idx, G = svc.get(root, options)
+        spec.equal(edges_from(G, 'python_run'), 'save@other.py')
+        spec.equal(edges_from(G, 'js_run'), 'replacement@lib.ts')
+        spec.equal(cpp_target(G), 'B::save')
+        local rebuilt = graph.build(idx)
+        for _, name in ipairs({ 'python_run', 'js_run', 'cpp_run' }) do
+            spec.equal(edges_from(G, name), edges_from(rebuilt, name), name)
+        end
+        spec.equal(cpp_target(rebuilt), cpp_target(G))
+        svc.forget(root)
+    end)
+    spec.it('selects declared classes, inherited methods and lexical shadowing', function()
+        local source = [[class Base { public: void save() {} };
+class A : public Base {};
+class B { public: void save() {} };
+void run(A* a) { a->save(); }
+void nested(A* a) { { B a; a.save(); } a->save(); }
+void unknown(A* a) { { int a; a.save(); } }
+]]
+        local G = graph.build({ files = { ['a.cpp'] = ci.parse('a.cpp', source, { ordinary_bindings = true }) } })
+        local function qualified(name)
+            local out, Q = {}, graph.query(G)
+            for i = 1, #Q.out[G.by_name[name][1]], graph.EDGE do out[#out + 1] = G.nodes[Q.out[G.by_name[name][1]][i]].qualified end
+            table.sort(out); return table.concat(out, ',')
+        end
+        spec.equal(qualified('run'), 'Base::save')
+        spec.equal(qualified('nested'), 'B::save,Base::save')
+        spec.equal(qualified('unknown'), '')
+        spec.equal(#graph.query(G).inn[G.by_qualified['Base::save'][1]], 2 * graph.EDGE)
+    end)
+    spec.it('uses namespace and include visibility without unrelated method fallback', function()
+        local files = {
+            ['a.hpp'] = 'namespace chosen { class A { public: void save() {} }; }',
+            ['b.hpp'] = 'namespace wrong { class A { public: void save() {} }; }',
+            ['app.cpp'] = '#include "a.hpp"\nvoid run(chosen::A& a) { a.save(); }\n'
+                .. 'void missing(chosen::A* a) { a->other(); }\n',
+            ['other.cpp'] = 'void other() {}',
+        }
+        local records = {}
+        for path, source in pairs(files) do records[path] = ci.parse(path, source, { ordinary_bindings = true }) end
+        local G = graph.build({ files = records })
+        spec.equal(edges_from(G, 'run'), 'save@a.hpp')
+        spec.equal(edges_from(G, 'missing'), '')
+    end)
+end)
+
+spec.describe('query-owned ordinary bindings', function()
+    spec.it('uses existing hints for lazy JS aliases and excludes unrelated imported bindings', function()
+        local root = tmp_root .. '/lazy_js_aliases'
+        write(root .. '/lib.ts', 'export function save() {}\nexport function unused() {}\nexport const alias = save;')
+        write(root .. '/barrel.ts', "import { alias } from './lib'; export const renamed = alias;")
+        write(root .. '/app.ts', "import { renamed as imported } from './barrel'; const cb = imported;\n"
+            .. 'function local_save() {} const local_cb = local_save; function run() { cb(); local_cb(); }')
+        write(root .. '/unrelated.ts', "import { unused } from './lib'; function other() { unused(); }")
+        local idx, G = svc.get(root, { cache_path = root .. '/cache.idx', lister = 'walk' })
+        write(root .. '/unrelated.ts', 'function changed() {}')
+        local Q = graph.query(G)
+        spec.equal(#Q.inn[G.by_name.save[1]], graph.EDGE)
+        spec.equal(#Q.inn[G.by_name.local_save[1]], graph.EDGE)
+        spec.equal(#Q.out[G.by_name.run[1]], 2 * graph.EDGE)
+        for _, rec in pairs(idx.files) do
+            spec.nil_value(rec.ordinary_bindings)
+            for _, export in ipairs(rec.js_exports or {}) do spec.nil_value(export.binding) end
+        end
+        svc.forget(root)
+    end)
+    spec.it('filters unrelated files, reuses evidence and rejects stale candidate sources', function()
+        local root = tmp_root .. '/lazy_bindings'
+        write(root .. '/store.py', 'def save():\n    pass\n')
+        write(root .. '/barrel.py', 'from store import save as alias\n')
+        write(root .. '/app.py', 'from barrel import alias as cb\ndef run():\n    cb()\n    cb()\n')
+        write(root .. '/unrelated.py', 'def unrelated():\n    elsewhere()\n')
+        local idx, G = svc.get(root, { cache_path = root .. '/cache.idx', lister = 'walk' })
+        local Q = graph.query(G)
+        spec.equal(Q.stats.ordinary.parses, 0)
+        write(root .. '/unrelated.py', 'def changed():\n    elsewhere()\n')
+        local target, caller = G.by_name.save[1], G.by_name.run[1]
+        spec.equal(#Q.inn[target], 2 * graph.EDGE)
+        local parsed = Q.stats.ordinary.parses
+        spec.truthy(parsed > 0 and parsed < 4, 'only relevant files need binding analysis')
+        spec.equal(#Q.out[caller], 2 * graph.EDGE)
+        spec.equal(Q.stats.ordinary.parses, parsed, 'forward and reverse queries share evidence')
+        write(root .. '/app.py', 'from barrel import alias as cb\ndef run():\n    pass\n')
+        local ok, err = pcall(function() return graph.query(G).out[caller] end)
+        spec.equal(ok, false); spec.contains(tostring(err), 'source changed during query')
+        svc.forget(root)
+    end)
+    spec.it('keeps reverse alias edges after query cache eviction', function()
+        local root = tmp_root .. '/lazy_eviction'
+        write(root .. '/store.py', 'def save():\n    pass\n')
+        for i = 1, 20 do
+            write(root .. '/app' .. i .. '.py', 'from store import save as cb\ndef run' .. i .. '():\n    cb()\n')
+        end
+        local idx, G = svc.get(root, { cache_path = root .. '/cache.idx', lister = 'walk' })
+        local Q = graph.query(G)
+        spec.equal(#Q.inn[G.by_name.save[1]], 20 * graph.EDGE)
+        spec.truthy(Q.stats.ordinary.files <= 16 and Q.stats.ordinary.bytes <= 8 * 1024 * 1024)
+        spec.equal(#Q.out[G.by_name.run1[1]], graph.EDGE)
+        spec.equal(#graph.query(G).inn[G.by_name.save[1]], 20 * graph.EDGE)
+        for _, rec in pairs(idx.files) do spec.nil_value(rec.refs.binding) end
+        svc.forget(root)
+    end)
+end)
+
+spec.describe('Python import bindings', function()
+    local function build(files)
+        local records = {}
+        for path, source in pairs(files) do records[path] = ci.parse(path, source, { ordinary_bindings = true }) end
+        return graph.build({ files = records })
+    end
+    spec.it('follows renamed, module and relative package re-exports', function()
+        local G = build({
+            ['store.py'] = 'def save():\n    pass\n',
+            ['pkg/__init__.py'] = 'from .impl import save as persist\n',
+            ['pkg/impl.py'] = 'def save():\n    pass\n',
+            ['pkg/app.py'] = 'from . import persist as chosen\nimport store as api\n'
+                .. 'from store import save as renamed\n'
+                .. 'def run():\n    chosen()\n    api.save()\n    renamed()\n',
+        })
+        spec.equal(edges_from(G, 'run'), 'save@pkg/impl.py save@store.py save@store.py')
+        for _, id in ipairs(G.by_name.save) do spec.truthy(#graph.query(G).inn[id] > 0) end
+    end)
+    spec.it('rejects missing imports, shadowed and reassigned import names', function()
+        local G = build({
+            ['store.py'] = 'def save():\n    pass\n',
+            ['app.py'] = 'from absent import save\nfrom store import save as cb\n'
+                .. 'def missing():\n    save()\n'
+                .. 'def shadow(cb):\n    cb()\n'
+                .. 'def changed():\n    cb()\n'
+                .. 'cb = other\n',
+        })
+        for _, name in ipairs({ 'missing', 'shadow', 'changed' }) do spec.equal(edges_from(G, name), '', name) end
+    end)
+    spec.it('does not revive deleted re-exports and terminates cyclic package imports', function()
+        local G = build({
+            ['store.py'] = 'def save():\n    pass\n',
+            ['barrel.py'] = 'from store import save\ndel save\n',
+            ['cycle.py'] = 'from loop import save\n',
+            ['loop.py'] = 'from cycle import save\n',
+            ['app.py'] = 'from barrel import save as gone\nfrom cycle import save as cyclic\n'
+                .. 'def run():\n    gone()\n    cyclic()\n',
+        })
+        spec.equal(edges_from(G, 'run'), '')
+    end)
+end)
+
 spec.describe('JS module and receiver resolution', function()
     local function build(files, root)
         local records = {}
-        for path, source in pairs(files) do records[path] = ci.parse(path, source) end
+        for path, source in pairs(files) do records[path] = ci.parse(path, source, { ordinary_bindings = true }) end
         return graph.build({ root = root, files = records })
     end
+    spec.it('follows lexical function aliases and imported alias exports in both directions', function()
+        local G = build({
+            ['lib.ts'] = 'export function save() {}\nexport const persist = save;',
+            ['barrel.ts'] = "import { persist } from './lib'; export const stored = persist;",
+            ['use.ts'] = "import { stored } from './barrel'; function local_save() {}\n"
+                .. 'const one = local_save; const two = one; const imported = stored;\n'
+                .. 'function run() { two(); imported(); }',
+        })
+        spec.equal(edges_from(G, 'run'), 'local_save@use.ts save@lib.ts')
+        spec.equal(#graph.query(G).inn[G.by_name.save[1]], graph.EDGE)
+        spec.equal(#graph.query(G).inn[G.by_name.local_save[1]], graph.EDGE)
+    end)
+    spec.it('does not follow reassigned, shadowed, cyclic or computed function aliases', function()
+        local G = build({
+            ['use.ts'] = [[function save() {}
+let cb = save;
+function run() { cb(); }
+cb = unknown;
+const original = save;
+function shadow(original) { original(); }
+function block() { const original = unknown; original(); }
+const cycle = cycle;
+function cyclic() { cycle(); }
+const computed = save || unknown;
+function dynamic() { computed(); }
+]],
+        })
+        for _, name in ipairs({ 'run', 'shadow', 'block', 'cyclic', 'dynamic' }) do
+            spec.equal(edges_from(G, name), '', name)
+        end
+    end)
+    spec.it('bounds alias chains and respects destructuring and var function scope', function()
+        local G = build({
+            ['use.ts'] = [[function save() {}
+const cb = save;
+function shadow() { { var cb = unknown; } cb(); }
+function overwritten() { cb(); }
+({ cb } = other);
+const a0 = save;
+const a1 = a0; const a2 = a1; const a3 = a2; const a4 = a3;
+const a5 = a4; const a6 = a5; const a7 = a6; const a8 = a7; const a9 = a8;
+function bounded() { a9(); }
+]],
+        })
+        for _, name in ipairs({ 'shadow', 'overwritten', 'bounded' }) do spec.equal(edges_from(G, name), '', name) end
+    end)
     spec.it('binds renamed, default and namespace imports through explicit exports', function()
         local G = build({
             ['a.ts'] = 'export function save() {}\nexport default function main() {}',

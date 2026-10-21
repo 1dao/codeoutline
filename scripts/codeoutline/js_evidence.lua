@@ -82,7 +82,7 @@ function M.collect(r, T)
         scopes[i] = stack[#stack] or 0
         if stack[#stack] and T.m[stack[#stack]] == i then stack[#stack] = nil end
     end
-    local bindings, parameters = {}, {}
+    local bindings, parameters, alias_tokens = {}, {}, {}
     local callable_at = {}
     for _, n in ipairs(r.nodes) do
         if n.kind == 'function' or n.kind == 'method' or n.kind == 'constructor' then
@@ -141,6 +141,10 @@ function M.collect(r, T)
                     if after and T:text(after) ~= '=' and T:text(after) ~= ',' and T:text(after) ~= ')' and T:text(after) ~= ';' then typ = nil end
                 elseif next == '=' and T:text(i + 2) == 'new' then typ = type_name(T, i + 3) end
                 local a, b = scope_for(i, parameter)
+                local eq = next == '=' and i + 1 or after
+                if r.ordinary_bindings and declaration and eq and T:text(eq) == '=' and T.k[eq + 1] == 'id' then
+                    alias_tokens[i] = require('codeoutline.dispatch_aliases').simple(T, eq + 1, r.language, true) and 'simple' or true
+                end
                 bindings[#bindings + 1] = { name = T:text(i), type = typ or '?', token = i, a = a, b = b,
                     declaration = declaration or parameter, target = declaration and callable_at[i] or nil }
             end
@@ -150,6 +154,17 @@ function M.collect(r, T)
     for _, binding in ipairs(bindings) do
         by_name[binding.name] = by_name[binding.name] or {}
         by_name[binding.name][#by_name[binding.name] + 1] = binding
+    end
+    -- Reuse dispatch's bounded lexical validation in explicit query parses.
+    -- Ordinary indexing leaves this extra evidence ungenerated.
+    local expand
+    local function alias_evidence(name, at, token)
+        if alias_tokens[token] ~= 'simple' then return '?' end
+        expand = expand or require('codeoutline.dispatch_aliases').prepare(r, T)
+        local v = expand({ symbol = name }, at)
+        if v and v.node then return 'node:' .. v.node end
+        if v and v.import then return 'import:' .. v.import.path .. '\0' .. v.member end
+        return '?'
     end
     for index, ref in ipairs(r.refs) do
         if index % 128 == 0 then control.check() end
@@ -163,11 +178,24 @@ function M.collect(r, T)
             end
         end
         if best then
-            if not ref.recv and best.target and (best.token <= ref.tok or best.hoisted) then ref.js_receiver = 'node:' .. best.target
+            if not ref.recv and alias_tokens[best.token] then ref.js_receiver = alias_evidence(ref.name, ref.tok, best.token)
+            elseif not ref.recv and best.target and (best.token <= ref.tok or best.hoisted) then ref.js_receiver = 'node:' .. best.target
             else ref.js_receiver = ref.recv and best.token <= ref.tok and best.type or '?' end
         end
         if ref.kind == 'member_call' and (not ref.recv or T:text(ref.tok - 3) == '.' or T:text(ref.tok - 3) == '?.') then
             ref.js_receiver = '?' -- A field/call-result chain is not the local variable sharing its tail.
+        end
+    end
+    if next(alias_tokens) then
+        for _, e in ipairs(r.js_exports) do
+            if not e.path then
+                for _, b in ipairs(by_name[e.local_name] or {}) do
+                    if b.a == 0 and alias_tokens[b.token] then
+                        e.binding = alias_evidence(e.local_name, T.n, b.token)
+                        break
+                    end
+                end
+            end
         end
     end
 end

@@ -52,9 +52,13 @@ function M.context(G, ctx, source, options)
         end
         -- Keep only compact query evidence; source, tokens, and duplicate symbols die here.
         local data = { refs = { binding = parsed.refs.binding, js_receiver = parsed.refs.js_receiver },
-            js_exports = parsed.js_exports, python_imports = parsed.python_imports, cpp_aliases = parsed.cpp_aliases }
+            js_exports = parsed.js_exports, python_imports = parsed.python_imports, cpp_aliases = parsed.cpp_aliases,
+            csharp_usings = parsed.csharp_usings, csharp_statics = parsed.csharp_statics,
+            csharp_scopes = parsed.csharp_scopes, csharp_parameters = parsed.csharp_parameters, csharp_access = parsed.csharp_access }
         local weight = #raw + #parsed.refs.name * 128 + #(parsed.js_exports or {}) * 256
             + #(parsed.python_imports or {}) * 256 + #(parsed.cpp_aliases or {}) * 256
+            + #(parsed.csharp_usings or {}) * 256 + #(parsed.csharp_scopes or {}) * 256
+            + #(parsed.csharp_parameters or {}) * 128 + #parsed.nodes * (rec.language == 'csharp' and 32 or 0)
         if cache[f] then
             bytes = bytes - cache[f].weight; cache[f] = nil
             for i, old in ipairs(order) do if old == f then table.remove(order, i); break end end
@@ -73,7 +77,7 @@ function M.context(G, ctx, source, options)
         local rec = G.files[f]
         local value = evidence(rec, i)
         local kind = rec.refs.kind[i]
-        if kind ~= 'call' and kind ~= 'member_call' then return value end
+        if kind ~= 'call' and kind ~= 'member_call' and not (rec.language == 'csharp' and kind == 'new') then return value end
         -- JS already keeps receiver barriers. Only a bare blocked call can be
         -- a newly supported lexical alias; typed/member calls need no reparse.
         if js(rec) and (kind ~= 'call' or value ~= '?') then return value end
@@ -81,7 +85,7 @@ function M.context(G, ctx, source, options)
         local recv = rec.refs.recv[i]
         if rec.language == 'python' and (recv == 'self' or recv == 'cls') then return value end
         if rec.language == 'cpp' and (not recv or recv == 'this') then return value end
-        if js(rec) or rec.language == 'python' or rec.language == 'cpp' and kind == 'member_call' then
+        if js(rec) or rec.language == 'python' or rec.language == 'csharp' or rec.language == 'cpp' and kind == 'member_call' then
             return evidence(C.data(f), i) or value
         end
         return value
@@ -137,6 +141,9 @@ function M.context(G, ctx, source, options)
         return found
     end
     function C.aliases(f, wanted, candidates)
+        if G.files[f].language == 'csharp' then
+            return require('codeoutline.csharp_bindings').incoming_aliases(G, f, wanted, ctx)
+        end
         if not candidates[f] then return {} end
         local rec, hits, resolved = G.files[f], {}, {}
         local imports = {}

@@ -64,6 +64,10 @@ local function normalize(text, language)
         local first, rest = text:match('^([%a_]+)%s+(.+)$')
         if first and MODIFIERS[first] then text = rest else break end
     end
+    if language == 'csharp' then
+        local named = require('codeoutline.csharp_bindings').name(text)
+        if named then return named end
+    end
     text = text:gsub('^[%*&%[%]]+', ''):gsub('[%*&%?!%s]+$', ''):gsub('%[%]$', '')
     text = text:gsub('^%[%d*%]', ''):gsub('^map%b[]', '')
     local outer, inner = text:match('^([%w_:%.]+)%s*<(.*)>$')
@@ -449,6 +453,11 @@ function Completion:types(name, f, scope, at)
     f = f or self.f
     local accept = self.language == 'lua' and LUA_TYPES or TYPES
     local direct, paired = navigation.deps(self.V, f)
+    if self.V.files[f].language == 'csharp' then
+        local ids = require('codeoutline.csharp_bindings').types(self.V, f, name,
+            at or (f == self.f and self.offset) or 0, self.V.js_context, { scope = scope })
+        return ids
+    end
     if self.V.files[f].language == 'cpp' then
         if not scope and f == self.f then
             local owner = self.fn and self.rec.nodes[self.fn] or self.owner and self.rec.nodes[self.owner]
@@ -784,6 +793,12 @@ function Completion:receiver(item, depth)
         local files = require('codeoutline.lua_bindings').native_modules(self.V, name, self.V.js_context.lua)
         if #files > 0 then return { modules = files, module_name = name } end
     end
+    if self.language == 'csharp' then
+        if name == 'global' then return { csharp_namespace = '' } end
+        local ids, namespace, known = require('codeoutline.csharp_bindings').types(self.V, self.f, name, self.offset, self.V.js_context)
+        if namespace then return { csharp_namespace = namespace } end
+        if known then return #ids > 0 and { types = ids, static = not item.call } or nil end
+    end
     local ids = self:types(name)
     if #ids > 0 then return { types = ids, static = true } end
     -- Dynamic languages: a global table with members defined elsewhere, or a
@@ -794,13 +809,27 @@ end
 
 function Completion:entries(target)
     if not target then return {} end
+    if target.csharp_namespace ~= nil then
+        return require('codeoutline.csharp_bindings').namespace_members(self.V, self.f, target.csharp_namespace, self.V.js_context)
+    end
     if target.modules then return self:module_members(target.modules, target.module_name) end
     if target.owner then
         local out = target.local_only and {} or self:owned(target.owner, graph.family(self.language))
         for _, entry in ipairs(self:assigned(target.owner)) do out[#out + 1] = entry end
         return out
     end
-    return self:members(target.types)
+    local entries = self:members(target.types)
+    if self.language == 'csharp' then
+        local kept = {}
+        for _, entry in ipairs(entries) do
+            local n = entry.node
+            local bindings = require('codeoutline.csharp_bindings')
+            if not n or TYPES[n.kind] or (bindings.static_node(self.V, entry.file, n, self.V.js_context) == (target.static or false)
+                and bindings.visible_node(self.V, self.f, entry.file, n, self.offset, self.V.js_context)) then kept[#kept + 1] = entry end
+        end
+        return kept
+    end
+    return entries
 end
 
 -- Type of a receiver chain, element by element.
@@ -809,18 +838,26 @@ function Completion:chain(chain, depth)
     local target = self:receiver(chain[1], depth)
     for k = 2, #chain do
         if not target or self:expired() then return nil end
-        local element, next_ids, next_files, next_module = chain[k], {}, nil, nil
+        local element, next_ids, next_files, next_module, next_namespace, next_static = chain[k], {}, nil, nil, nil, nil
         for _, entry in ipairs(self:entries(target)) do
             if entry.name == element.name then
                 local node = entry.node
-                if TYPES[node.kind] then
+                if self.language == 'csharp' and node.kind == 'namespace' then next_namespace = node.qualified
+                elseif self.language == 'csharp' and TYPES[node.kind] then
+                    next_static = not element.call
+                    local ids = require('codeoutline.csharp_bindings').types(self.V, self.f, 'global::' .. node.qualified, self.offset, self.V.js_context)
+                    for _, id in ipairs(ids) do next_ids[#next_ids + 1] = id end
+                elseif TYPES[node.kind] then
                     for _, id in ipairs(self:types(node.name, entry.file)) do next_ids[#next_ids + 1] = id end
                 else
-                    local type = declared(navigation.detail(self.V, entry.file, node), self.V.files[entry.file].language)
+                    local detail = navigation.detail(self.V, entry.file, node)
+                    local type = declared(detail, self.V.files[entry.file].language)
                     if not type and element.call and FACTORY[element.name] and target.types then
                         for _, id in ipairs(target.types) do next_ids[#next_ids + 1] = id end
                     elseif type then
-                        for _, id in ipairs(self:types(type, entry.file, node.qualified:match('^(.*)::[^:]+$'), false)) do next_ids[#next_ids + 1] = id end
+                        local scope = node.qualified:match('^(.*)::[^:]+$')
+                            or self.language == 'csharp' and node.qualified:match('^(.*)%.[^.]+$')
+                        for _, id in ipairs(self:types(type, entry.file, scope, self.language == 'csharp' and detail.name_start or false)) do next_ids[#next_ids + 1] = id end
                     end
                     if #next_ids == 0 and element.call and self.language == 'lua' then
                         -- A native object: the C implementation names the metatable
@@ -831,7 +868,7 @@ function Completion:chain(chain, depth)
                 end
             end
         end
-        target = #next_ids > 0 and { types = next_ids }
+        target = next_namespace and { csharp_namespace = next_namespace } or #next_ids > 0 and { types = next_ids, static = next_static }
             or (next_module and { modules = next_files, module_name = next_module } or nil)
     end
     return target
@@ -903,6 +940,21 @@ function M.complete(req)
                 detail = entry.type and (entry.type .. ' ' .. entry.name) or nil }
         end
         for alias in pairs(self.aliases) do entries[#entries + 1] = { name = alias, kind = 'namespace', detail = 'module' } end
+        if self.language == 'csharp' then
+            local bindings = require('codeoutline.csharp_bindings')
+            for _, entry in ipairs(bindings.usings(V, f, self.offset, V.js_context)) do
+                local d = entry.directive
+                if d.alias then entries[#entries + 1] = { name = d.alias:gsub('^@', ''), kind = 'class', detail = d.path }
+                elseif d.static then
+                    local ids = bindings.types(V, entry.file, d.path, d.first, V.js_context,
+                        { exclude = d.first, no_global = true, scope = d.scope })
+                    for _, member in ipairs(self:members(ids)) do
+                        if TYPES[member.kind] or bindings.static_node(V, member.file, member.node, V.js_context)
+                            and bindings.visible_node(V, f, member.file, member.node, self.offset, V.js_context) then entries[#entries + 1] = member end
+                    end
+                end
+            end
+        end
         for _, node in ipairs(self.rec.nodes) do
             if not node.parent and (self.language == 'kotlin' or not node.qualified:find('[%.:]')) then
                 entries[#entries + 1] = { name = node.name, kind = node.kind, node = node, file = f }

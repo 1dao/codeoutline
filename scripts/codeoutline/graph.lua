@@ -285,6 +285,7 @@ local scored_ids, scored_vals = {}, {}
 -- accept overrides the node kinds the ref kind may bind to (navigation only).
 local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired, accept, evidence, js_context)
     if kind == 'annotation' then return nil end
+    if evidence and evidence:sub(1, 7) == 'cs:new:' then kind = 'new' end
     accept = accept or (kind == 'new' and NEWABLE) or (kind == 'ref' and VALUE) or CALLABLE
     if evidence == '' then evidence = nil end
     local strategy = 'js/ts binding'
@@ -296,6 +297,10 @@ local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired, accept,
     if exact == nil and G.files[f].language == 'cpp' then
         strategy = 'c++ declared receiver'
         exact = require('codeoutline.cpp_bindings').resolve(G, f, src_id, name, evidence, deps, js_context)
+    end
+    if exact == nil and G.files[f].language == 'csharp' then
+        strategy = 'c# binding'
+        exact = require('codeoutline.csharp_bindings').resolve(G, f, src_id, name, kind, recv, evidence, js_context)
     end
     if exact == nil then
         strategy = 'lua binding'

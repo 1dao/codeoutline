@@ -29,6 +29,14 @@ There is no execution of `sys.path`, import hooks or package initializers.
 Namespace packages, wildcard imports and general class/member type inference
 are not provided by this resolver. Missing module targets remain unresolved.
 
+## C#
+
+Type/namespace aliases, global usings, static imports, declared receivers and
+constructor aliases share query-time resolution with completion and navigation.
+See [C# using and member resolution](CSHARP-RESOLUTION.md) for scope rules,
+project boundaries and unsupported forms. The normal index stores only a compact
+global-using candidate flag alongside existing import paths.
+
 ## C++
 
 Simple named types written on parameters, local variables and preceding member

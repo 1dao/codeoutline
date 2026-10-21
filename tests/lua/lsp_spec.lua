@@ -781,6 +781,93 @@ int luaopen_native_test(lua_State *L) { luaL_setfuncs(L, methods, 0); luaL_newli
             end
         end
     end)
+    spec.it('shares C# aliases, namespaces and static usings across completion and navigation', function()
+        local library = 'namespace CSharpFeature {\n'
+            .. 'public class StoreA { public void Save() {} public void OnlyA() {} public static void Flush() {} }\n'
+            .. 'public class StoreB { public void Save() {} public void OnlyB() {} public static void Flush() {} }\n}\n'
+        local source = 'namespace AliasClient;\nusing S = global::CSharpFeature.StoreA;\n'
+            .. 'using D = global::CSharpFeature;\nusing static global::CSharpFeature.StoreA;\n'
+            .. 'class App { void Run(S store, Shared shared) { store.Save(); shared.Save(); S.Flush(); D.StoreA.Flush(); D::StoreA.Flush(); Flush(); } }'
+        nav_write('CSharpFeature.cs', library); nav_write('CSharpClient.cs', source)
+        nav_write('CSharpUsings.cs', 'global using Shared = CSharpFeature.StoreA;')
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local doc = docs.read(nav_root .. '/CSharpClient.cs')
+        local function definitions(fragment, skip, session)
+            return nav({ method = 'lsp_definition', uri = doc.uri, session = session or 'cs-alias',
+                position = doc:position(assert(source:find(fragment, 1, true)) - 1 + skip) })
+        end
+        local function labels(fragment, skip, session)
+            local result = require('codeoutline.completion').complete({ root = nav_root, uri = doc.uri,
+                session = session or 'cs-alias', position = doc:position(assert(source:find(fragment, 1, true)) - 1 + skip) })
+            local names = {}
+            for _, item in ipairs(result.items) do names[item.label] = true end
+            return names
+        end
+        for _, fragment in ipairs({ 'store.Save', 'shared.Save' }) do
+            local found = definitions(fragment, #fragment - 4)
+            spec.equal(#found, 1); spec.equal(found[1].uri, nav_uri('CSharpFeature.cs')); spec.equal(found[1].range.start.line, 1)
+        end
+        local instance = labels('store.Save', 6)
+        spec.truthy(instance.Save); spec.truthy(instance.OnlyA); spec.nil_value(instance.OnlyB); spec.nil_value(instance.Flush)
+        local static = labels('S.Flush', 2)
+        spec.truthy(static.Flush); spec.nil_value(static.Save)
+        local namespace = labels('D.StoreA', 2)
+        spec.truthy(namespace.StoreA); spec.truthy(namespace.StoreB)
+        spec.truthy(labels('D.StoreA.Flush', 9).Flush)
+        spec.truthy(labels('D::StoreA.Flush', 10).Flush)
+        local bare = labels('Flush(); }', 0)
+        spec.truthy(bare.S); spec.truthy(bare.D); spec.truthy(bare.Shared); spec.truthy(bare.Flush)
+        local target = definitions('store.Save', 6)[1]
+        local refs = nav({ method = 'lsp_references', uri = target.uri, position = target.range.start, session = 'cs-alias' })
+        spec.equal(#refs, 2)
+        local alias = definitions('S store', 0)
+        spec.equal(#alias, 1); spec.equal(range_text('CSharpFeature.cs', alias[1].range), 'StoreA')
+        for _, fragment in ipairs({ 'S.Flush', 'D.StoreA.Flush', 'D::StoreA.Flush', 'Flush(); }' }) do
+            local skip = fragment:find('Flush', 1, true) - 1
+            local found = definitions(fragment, skip)
+            spec.equal(#found, 1); spec.equal(found[1].range.start.line, 1)
+        end
+        local uri = nav_uri('CSharpUsings.cs')
+        navigation.sync({ session = 'cs-alias', open = { [uri] = 1 }, changed = {
+            [uri] = { version = 1, language = 'csharp', source = 'global using Shared = CSharpFeature.StoreB;' } } })
+        local changed = definitions('shared.Save', 7)
+        spec.equal(#changed, 1); spec.equal(changed[1].range.start.line, 2)
+        local members = labels('shared.Save', 7)
+        spec.truthy(members.OnlyB); spec.nil_value(members.OnlyA)
+        spec.equal(definitions('store.Save', 6)[1].range.start.line, 1)
+        navigation.close('cs-alias')
+        for _, rec in pairs(service.resident(nav_root).files) do
+            spec.nil_value(rec.csharp_usings); spec.nil_value(rec.csharp_scopes); spec.nil_value(rec.csharp_statics)
+        end
+    end)
+    spec.it('does not suggest or navigate through invalid same-scope C# alias chains', function()
+        local source = 'using First = CSharpFeature.StoreA; using Broken = First;\n'
+            .. 'class InvalidAliases { void Run(Broken item) { item.Save(); } }'
+        nav_write('CSharpInvalidAliases.cs', source)
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local doc = docs.read(nav_root .. '/CSharpInvalidAliases.cs')
+        local req = { root = nav_root, uri = doc.uri, session = 'cs-invalid',
+            position = doc:position(assert(source:find('item.Save', 1, true)) + 4) }
+        local result = require('codeoutline.completion').complete(req)
+        spec.equal(#result.items, 0)
+        req.method = 'lsp_definition'
+        spec.equal(#nav(req), 0)
+    end)
+    spec.it('finds C# constructor references through type and namespace aliases', function()
+        local library = 'namespace CSharpCtor { public class Store { public Store() {} } }'
+        local source = 'using S = CSharpCtor.Store; using N = CSharpCtor;\n'
+            .. 'class Creator { void Run() { var a = new S(); var b = new N.Store(); } }'
+        nav_write('CSharpCtor.cs', library); nav_write('CSharpCreator.cs', source)
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local doc = docs.read(nav_root .. '/CSharpCreator.cs')
+        local req = { method = 'lsp_definition', uri = doc.uri, session = 'cs-constructor',
+            position = doc:position(assert(source:find('new S', 1, true)) + 3) }
+        local found = nav(req)
+        spec.equal(#found, 1); spec.equal(found[1].uri, nav_uri('CSharpCtor.cs'))
+        req.method = 'lsp_references'
+        local refs = nav(req)
+        spec.equal(#refs, 2)
+    end)
     spec.it('resolves Lua dofile returned members and unsaved export aliases', function()
         nav_write('LuaModule.lua', 'local M = {}\nlocal function actual() end\nM.save = actual\nreturn M')
         nav_write('LuaWrong.lua', 'local M = {}\nfunction M.save() end\nreturn M')

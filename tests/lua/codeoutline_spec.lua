@@ -1331,6 +1331,183 @@ void unknown(A* a) { { int a; a.save(); } }
     end)
 end)
 
+spec.describe('C# using and member bindings', function()
+    local function build(files)
+        local records = {}
+        for path, source in pairs(files) do records[path] = ci.parse(path, source, { ordinary_bindings = true }) end
+        return graph.build({ files = records })
+    end
+    local function targets(G, name)
+        local result, edges = {}, graph.query(G).out[G.by_name[name][1]]
+        for i = 1, #edges, graph.EDGE do
+            local node = G.nodes[edges[i]]
+            if node.kind == 'method' then result[#result + 1] = node.qualified end
+        end
+        table.sort(result); return table.concat(result, ',')
+    end
+    local library = [[namespace Data {
+public class Store { public void Save() {} public static void Flush() {} }
+public class Other { public void Save() {} public static void Flush() {} }
+}]]
+    spec.it('resolves type and namespace aliases, qualified names, new and static imports', function()
+        local G = build({ ['lib.cs'] = library, ['app.cs'] = [[
+using S = global::Data.Store;
+using D = Data;
+using static global::Data.Store;
+class App {
+void Typed(S s) { s.Save(); }
+void Created() { var s = new S(); s.Save(); }
+void StaticCalls() { S.Flush(); D.Store.Flush(); D::Store.Flush(); global::Data.Store.Flush(); Flush(); }
+void Shadow(object S) { S.Save(); }
+}]] })
+        spec.equal(targets(G, 'Typed'), 'Data.Store.Save')
+        spec.equal(targets(G, 'Created'), 'Data.Store.Save')
+        spec.equal(targets(G, 'StaticCalls'), string.rep('Data.Store.Flush,', 4) .. 'Data.Store.Flush')
+        spec.equal(targets(G, 'Shadow'), '')
+        spec.equal(#graph.query(G).inn[G.by_qualified['Data.Store.Save'][1]], 2 * graph.EDGE)
+        spec.equal(#graph.query(G).inn[G.by_qualified['Data.Other.Save'][1]], 0)
+    end)
+    spec.it('honors file/namespace scope and excludes same-scope using alias chains', function()
+        local G = build({ ['lib.cs'] = library, ['app.cs'] = [[
+using S = Data.Store;
+using Broken = S;
+namespace Outer {
+using Local = Data.Store;
+namespace Inner { using Nested = Local; class App { void NestedRun(Nested s) { s.Save(); } } }
+}
+namespace Twice { using Local = Data.Store; class App { void First(Local s) { s.Save(); } } }
+namespace Twice { class SecondApp { void Second(Local s) { s.Save(); } } }
+class App { void NoChain(Broken s) { s.Save(); } }
+]], ['other.cs'] = 'class OtherApp { void NoLeak(S s) { s.Save(); } }' })
+        spec.equal(targets(G, 'NestedRun'), 'Data.Store.Save')
+        spec.equal(targets(G, 'First'), 'Data.Store.Save')
+        for _, name in ipairs({ 'NoChain', 'NoLeak', 'Second' }) do spec.equal(targets(G, name), '', name) end
+    end)
+    spec.it('blocks unsupported alias targets and limits static imports to static members', function()
+        local G = build({ ['lib.cs'] = library, ['app.cs'] = [[
+using Missing = Absent.Store;
+using Tuple = (int x, int y);
+using Generic = Data.Store<int>;
+using static Data.Store;
+class App {
+void NoMissing(Missing s) { s.Save(); }
+void NoTuple(Tuple s) { s.Save(); }
+void NoGeneric(Generic s) { s.Save(); }
+void NoInstance() { Save(); }
+void NoStatic(Data.Store s) { s.Flush(); }
+}]] })
+        for _, name in ipairs({ 'NoMissing', 'NoTuple', 'NoGeneric', 'NoInstance', 'NoStatic' }) do spec.equal(targets(G, name), '', name) end
+    end)
+    spec.it('prefers nested types and generic parameters over outer aliases', function()
+        local G = build({ ['lib.cs'] = library, ['app.cs'] = [[
+using S = Data.Store;
+class Nested {
+class S { public void Save() {} }
+void Own(S s) { s.Save(); }
+}
+class Generic<S> { void Unknown(S s) { s.Save(); } }
+class Methods { void GenericMethod<S>(S s) { s.Save(); } }
+]] })
+        spec.equal(targets(G, 'Own'), 'Nested.S.Save')
+        spec.equal(targets(G, 'Unknown'), '')
+        spec.equal(targets(G, 'GenericMethod'), '')
+    end)
+    spec.it('uses namespace-relative imports and nested types from using static', function()
+        local G = build({ ['lib.cs'] = [[
+namespace Parent.Model { public class Store { public void Save() {} } }
+namespace NestedTypes { public class Owner { public class Item { public void Save() {} } } }
+]], ['app.cs'] = [[
+using static NestedTypes.Owner;
+namespace Parent {
+using Model;
+class App { void Relative(Store s) { s.Save(); } void NestedStatic(Item s) { s.Save(); } }
+}]] })
+        spec.equal(targets(G, 'Relative'), 'Parent.Model.Store.Save')
+        spec.equal(targets(G, 'NestedStatic'), 'NestedTypes.Owner.Item.Save')
+    end)
+    spec.it('resolves alias constructors in both directions and prefers own members over static imports', function()
+        local G = build({ ['a.cs'] = [[
+using Alias = Constructors.Store;
+using D = Constructors;
+using static Constructors.Store;
+namespace Constructors { public class Store {
+public Store() {} public static void Flush() {} private static void Hidden() {}
+} }
+class App {
+void Flush() {} void Own() { Flush(); }
+void Create() { var a = new Alias(); var b = new D.Store(); }
+void PrivateImport() { Hidden(); }
+}]] })
+        spec.equal(targets(G, 'Own'), 'App.Flush')
+        spec.equal(targets(G, 'PrivateImport'), '')
+        local ctor = G.by_qualified['Constructors.Store.Store'][1]
+        local Q = graph.query(G)
+        local edges = Q.out[G.by_name.Create[1]]
+        spec.equal(#edges, 2 * graph.EDGE); spec.equal(edges[1], ctor); spec.equal(edges[4], ctor)
+        spec.equal(#Q.inn[ctor], 2 * graph.EDGE)
+    end)
+    spec.it('rejects conflicting global and file aliases while allowing nested namespace shadowing', function()
+        local G = build({ ['lib.cs'] = library, ['global.cs'] = 'global using S = Data.Store;',
+            ['app.cs'] = 'using S = Data.Other; class App { void Conflict(S s) { s.Save(); } }',
+            ['namespace.cs'] = 'namespace N { using S = Data.Other; class App { void Scoped(S s) { s.Save(); } } }' })
+        spec.equal(targets(G, 'Conflict'), '')
+        spec.equal(targets(G, 'Scoped'), 'Data.Other.Save')
+    end)
+    spec.it('loads global usings on demand within csproj boundaries and refreshes edits', function()
+        local root = tmp_root .. '/csharp_alias_projects'
+        for _, project in ipairs({ 'P1', 'P2' }) do
+            write(root .. '/' .. project .. '/App.csproj', '<Project Sdk="Microsoft.NET.Sdk" />')
+            write(root .. '/' .. project .. '/lib.cs', library)
+            write(root .. '/' .. project .. '/app.cs', 'class App { void Run' .. project .. '(Shared s) { s.Save(); } '
+                .. 'void Static' .. project .. '() { Flush(); } void Using' .. project .. '(Store s) { s.Save(); } }')
+        end
+        write(root .. '/P1/global.cs', 'global using Shared = Data.Store; global using static Data.Store; global using Data;')
+        write(root .. '/P2/global.cs', 'global using Shared = Data.Other; global using static Data.Other; global using Data;')
+        local options = { cache_path = root .. '/cache.idx', lister = 'walk' }
+        local idx, G = svc.get(root, options)
+        idx:save(); svc.forget(root); idx, G = svc.get(root, options)
+        local function check(caller, qualified, file)
+            local Q = graph.query(G)
+            local edges = Q.out[G.by_name[caller][1]]
+            spec.equal(#edges, graph.EDGE)
+            spec.equal(G.nodes[edges[1]].qualified, qualified)
+            spec.equal(G.files[G.node_file[edges[1]]].path, file)
+        end
+        check('RunP1', 'Data.Store.Save', 'P1/lib.cs')
+        check('RunP2', 'Data.Other.Save', 'P2/lib.cs')
+        check('StaticP1', 'Data.Store.Flush', 'P1/lib.cs')
+        check('StaticP2', 'Data.Other.Flush', 'P2/lib.cs')
+        check('UsingP1', 'Data.Store.Save', 'P1/lib.cs')
+        check('UsingP2', 'Data.Store.Save', 'P2/lib.cs')
+        write(root .. '/P1/global.cs', 'global using Shared = Data.Other;')
+        idx, G = svc.get(root, options)
+        check('RunP1', 'Data.Other.Save', 'P1/lib.cs')
+        for _, rec in pairs(idx.files) do
+            spec.nil_value(rec.csharp_usings); spec.nil_value(rec.csharp_scopes)
+            spec.nil_value(rec.csharp_statics); spec.nil_value(rec.csharp_access)
+            spec.nil_value(rec.csharp_parameters); spec.nil_value(rec.refs.binding)
+        end
+        svc.forget(root)
+    end)
+    spec.it('preserves global-alias callers after query cache eviction', function()
+        local root = tmp_root .. '/csharp_alias_eviction'
+        write(root .. '/library.cs', 'namespace Eviction { public class Store { public void Save() {} } }')
+        write(root .. '/global.cs', 'global using Shared = Eviction.Store;')
+        for i = 1, 20 do
+            write(root .. '/app' .. i .. '.cs', 'class App' .. i .. ' { void Run' .. i .. '(Shared s) { s.Save(); } }')
+        end
+        local idx, G = svc.get(root, { cache_path = root .. '/cache.idx', lister = 'walk' })
+        local resident = xutils.json_pack(idx.files)
+        local Q = graph.query(G)
+        spec.equal(#Q.inn[G.by_qualified['Eviction.Store.Save'][1]], 20 * graph.EDGE)
+        spec.truthy(Q.stats.ordinary.parses > 16)
+        spec.truthy(Q.stats.ordinary.files <= 16 and Q.stats.ordinary.bytes <= 8 * 1024 * 1024)
+        spec.equal(#Q.out[G.by_name.Run1[1]], graph.EDGE)
+        spec.equal(xutils.json_pack(idx.files), resident)
+        svc.forget(root)
+    end)
+end)
+
 spec.describe('C++ query-time type aliases', function()
     local function build(files)
         local records = {}

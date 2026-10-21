@@ -190,10 +190,22 @@ parse_members = function(T, r, a, b, parent, class_name)
             local j = i
             while j <= b and not is(T, j, ';') do j = j + 1 end
             local x = kw(T, i, 'using') and i + 1 or i + 2
-            if kw(T, x, 'static') then x = x + 1 end
-            if T.k[x] == 'id' and is(T, x + 1, '=') then x = x + 2 end   -- alias
+            local global = t == 'global'
+            local static = kw(T, x, 'static')
+            if static or T:text(x) == 'unsafe' then x = x + 1 end
+            local alias = T.k[x] == 'id' and is(T, x + 1, '=') and T:text(x) or nil
+            if alias then x = x + 2 end
+            local target = x
+            if T:text(x) == 'global' and is(T, x + 1, '::') then x = x + 2 end
             local path = dotted(T, x)
-            if path ~= '' then r.imports[#r.imports + 1] = { path = path, line = T:line(i) } end
+            if path ~= '' or global then r.imports[#r.imports + 1] = { path = path, line = T:line(i), global = global or nil } end
+            if r.ordinary_bindings and (not parent or r.nodes[parent].kind == 'namespace') then
+                local owner = parent and r.nodes[parent]
+                r.csharp_usings = r.csharp_usings or {}
+                r.csharp_usings[#r.csharp_usings + 1] = { alias = alias, static = static or nil, global = global or nil,
+                    path = common.sig(T, target, j - 1, 4096), scope = owner and owner.qualified or '',
+                    first = owner and T.s[owner.ti] - 1 or 0, last = owner and T.e[owner.tj] or #T.src }
+            end
             i = j + 1
         elseif k == 'kw' and t == 'namespace' then
             local name, x = dotted(T, i + 1)

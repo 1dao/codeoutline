@@ -299,7 +299,14 @@ local function cursor(doc, offset)
             from, span = n, node.end_byte - node.start_byte
         end
     end
-    return { from = from, name = T:text(t), kind = kind, recv = recv, first = T.s[t] - 1, last = T.e[t] }
+    local evidence
+    if rec.language == 'csharp' then
+        local first = t
+        while (T:text(first - 1) == '.' or T:text(first - 1) == '::') and T.k[first - 2] == 'id' do first = first - 2 end
+        local name = require('codeoutline.csharp_bindings').name(T.src:sub(T.s[first], T.e[t]))
+        evidence = name and 'cs:name:' .. name .. '\0' .. (T.s[first] - 1)
+    end
+    return { from = from, name = T:text(t), kind = kind, recv = recv, first = T.s[t] - 1, last = T.e[t], evidence = evidence }
 end
 
 -- Source document for file f: its overlay, else the disk file read once per request.
@@ -1249,7 +1256,8 @@ function handlers.lsp_references(req)
         set[id] = true
     end
     set = expand(V, set)
-    local name = V.files[V.node_file[targets[1]]].language == 'kotlin' and V.nodes[targets[1]].name or c.name
+    local language = V.files[V.node_file[targets[1]]].language
+    local name = (language == 'kotlin' or language == 'csharp') and V.nodes[targets[1]].name or c.name
     local hits, incomplete = scan(V, set, name)
     local result, t0 = {}, os.clock()
     if req.includeDeclaration then

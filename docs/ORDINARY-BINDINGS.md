@@ -69,6 +69,11 @@ Unsupported declaration forms can still use the existing generic resolver.
 Completion retains its pre-existing broader initializer/member-chain suggestions;
 these heuristics are not promoted to proven call relationships.
 
+TypeScript interface/abstract implementation queries reuse the same cache and module lookup.
+Only explicitly declared inheritance with exact annotated parameter/return types is linked.
+Named type identities retain their declaring module; unsupported generic/structural syntax is
+a barrier. Method modifiers and signatures remain query-owned `implementation_evidence`.
+
 C++ virtual implementation queries additionally compare declaration signatures and declared
 single inheritance, using the same source cache and include/import lookup. Class declarations
 and matching out-of-line definitions share method evidence. This supports implementation

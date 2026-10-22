@@ -2,7 +2,7 @@
 -- These are possible implementations, not evidence of a particular runtime type.
 local M = { MAX_CANDIDATES = 512, MAX_TARGETS = 64, MAX_DEPTH = 16, MAX_HIERARCHY = 1024 }
 local control = require('codeoutline.control')
-local languages = { csharp = true, java = true, kotlin = true }
+local languages = { csharp = true, java = true, kotlin = true, typescript = true }
 local types = { class = true, interface = true, struct = true, record = true, enum = true }
 local callable = { method = true, ['function'] = true, constructor = true }
 local function base_names(n)
@@ -56,6 +56,7 @@ end
 
 function M.collect(r, T)
     if r.language == 'cpp' then return require('codeoutline.cpp_implementations').collect(r, T) end
+    if r.language == 'typescript' then return require('codeoutline.ts_implementations').collect(r, T) end
     if not languages[r.language] then return end
     local evidence = {}
     for index, n in ipairs(r.nodes) do
@@ -148,6 +149,9 @@ function M.collect(r, T)
 end
 
 function M.types(G, f, written, ctx, scope, at)
+    if G.files[f].language == 'typescript' then
+        return require('codeoutline.ts_implementations').types(G, f, written, ctx)
+    end
     if G.files[f].language == 'csharp' then
         return require('codeoutline.csharp_bindings').types(G, f, written, at or 0, ctx, { scope = scope })
     end
@@ -249,10 +253,12 @@ function M.context(G, ctx, report)
         C.stats.hierarchy = C.stats.hierarchy + 1
         seen[id], path[id] = true, true
         local n, f = G.nodes[id], G.node_file[id]
+        if G.files[f].language == 'typescript' and (n.parent or info(id).generic or info(id).declare) then path[id] = nil; return false end
         local valid = true
         for _, base in ipairs(base_names(n)) do
             local at = G.files[f].language == 'csharp' and info(id).at or nil
             local ids = M.types(G, f, base, ctx, n.qualified, at)
+            if G.files[f].language == 'typescript' and #ids ~= 1 then valid = false end
             if #ids == 1 and not bases(ids[1], seen, depth + 1, path) then valid = false end
         end
         path[id] = nil
@@ -272,6 +278,7 @@ function M.context(G, ctx, report)
         ulong = 'System.UInt64', char = 'System.Char', double = 'System.Double', float = 'System.Single', decimal = 'System.Decimal' },
         java = { String = 'java.lang.String', int = 'int', boolean = 'boolean', long = 'long', Object = 'java.lang.Object',
             byte = 'byte', short = 'short', char = 'char', double = 'double', float = 'float' },
+        typescript = { string = 'string', number = 'number', boolean = 'boolean', void = 'void', bigint = 'bigint', symbol = 'symbol', never = 'never' },
         kotlin = { Int = 'kotlin.Int', String = 'kotlin.String', Boolean = 'kotlin.Boolean', Long = 'kotlin.Long',
             Any = 'kotlin.Any', Unit = 'kotlin.Unit', Byte = 'kotlin.Byte', Short = 'kotlin.Short', Char = 'kotlin.Char',
             Double = 'kotlin.Double', Float = 'kotlin.Float' } }
@@ -280,7 +287,13 @@ function M.context(G, ctx, report)
         if not cls or not d.params or d.generic or info(cls).generic then return nil end
         local out, f = {}, G.node_file[id]
         local lang = G.files[f].language
-        for _, written in ipairs(d.params) do
+        local written_types = d.params
+        if lang == 'typescript' then
+            if not d.returns or d.declare or d.accessor or G.nodes[cls].parent then return nil end
+            written_types = {}; for _, p in ipairs(d.params) do written_types[#written_types + 1] = p end
+            written_types[#written_types + 1] = d.returns
+        end
+        for _, written in ipairs(written_types) do
             local mode, rest = written:match('^(%w+)|(.+)$')
             mode, written = mode or '', rest or written
             local raw, suffix = written:match('^(.-)([%[%]%?]*)$')
@@ -290,11 +303,12 @@ function M.context(G, ctx, report)
                 if #ids > 1 then return nil end
                 if #ids == 1 then canonical = G.nodes[ids[1]].qualified end
             end
-            if not canonical and (raw:match('^System%.') or raw:match('^java%.lang%.') or raw:match('^kotlin%.')) then canonical = raw end
+            if not canonical and lang ~= 'typescript' and (raw:match('^System%.') or raw:match('^java%.lang%.') or raw:match('^kotlin%.')) then canonical = raw end
             if not canonical then
                 local ids = M.types(G, f, raw, ctx, G.nodes[cls].qualified, d.at)
                 if #ids ~= 1 then return nil end
-                canonical = G.nodes[ids[1]].qualified
+                if lang == 'typescript' and info(ids[1]).generic then return nil end
+                canonical = lang == 'typescript' and ('node:' .. ids[1]) or G.nodes[ids[1]].qualified
             end
             out[#out + 1] = mode .. ':' .. canonical .. suffix
         end
@@ -304,7 +318,8 @@ function M.context(G, ctx, report)
         local cls = owner(G, id)
         if not cls or G.nodes[id].kind ~= 'method' or not languages[G.files[G.node_file[id]].language] then return false end
         local d, lang = info(id), G.files[G.node_file[id]].language
-        if d.static or d.private or d.final or d.sealed or d.new or d.explicit then return false end
+        if d.static or d.private or d.final or d.sealed or d.new or d.explicit or d.declare or d.accessor then return false end
+        if lang == 'typescript' then return G.nodes[cls].kind == 'interface' or d.abstract end
         return G.nodes[cls].kind == 'interface' or G.nodes[id].abstract or d.virtual or d.abstract or d.open or d.override or lang == 'java'
     end
     local function matches(base, candidate)
@@ -312,6 +327,7 @@ function M.context(G, ctx, report)
         if not cls or not parent or not ancestry(cls)[parent] then return false end
         local d, language = info(candidate), G.files[G.node_file[candidate]].language
         if G.nodes[candidate].abstract or d.abstract or d.static or d.private and not d.explicit or d.new then return false end
+        if language == 'typescript' and (not d.body or d.protected and G.nodes[parent].kind == 'interface') then return false end
         if language == 'kotlin' and not d.override then return false end
         if language == 'csharp' then
             if d.explicit then

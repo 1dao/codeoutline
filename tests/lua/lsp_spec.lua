@@ -1128,6 +1128,28 @@ int luaopen_native_test(lua_State *L) { luaL_setfuncs(L, methods, 0); luaL_newli
         navigation.close('implementations')
         for _, rec in pairs(service.resident(nav_root).files) do spec.nil_value(rec.implementation_evidence) end
     end)
+    spec.it('finds TS implementations through imports and revalidates unsaved signatures', function()
+        local contract = 'export interface TsImplementation { save(value: number): void; }'
+        local concrete = "import { TsImplementation } from './TsImplementation';\nclass TsImplementationStore implements TsImplementation { save(item: number): void {} }"
+        local use = "import { TsImplementation } from './TsImplementation';\nfunction tsImplementationUse(value: TsImplementation) { value.save(1); }"
+        nav_write('TsImplementation.ts', contract); nav_write('TsImplementationStore.ts', concrete); nav_write('TsImplementationUse.ts', use)
+        local options = { cache_path = nav_root .. '/cache.idx', lister = 'walk' }
+        service.refresh(nav_root, options); service.resident(nav_root):save(); service.forget(nav_root); service.refresh(nav_root, options)
+        local doc = docs.read(nav_root .. '/TsImplementationUse.ts')
+        local req = { method = 'lsp_implementation', session = 'ts-implementations', uri = doc.uri,
+            position = doc:position(assert(use:find('value.save', 1, true)) + 5) }
+        local result = nav(req); spec.equal(#result, 1); spec.equal(result[1].uri, nav_uri('TsImplementationStore.ts'))
+        req.method = 'lsp_definition'; result = nav(req); spec.equal(#result, 1); spec.equal(result[1].uri, nav_uri('TsImplementation.ts'))
+        local uri = nav_uri('TsImplementationStore.ts')
+        navigation.sync({ session = req.session, open = { [uri] = 1 }, changed = {
+            [uri] = { version = 1, language = 'typescript', source = concrete:gsub('item: number', 'item: string') } } })
+        req.method = 'lsp_implementation'; result = nav(req); spec.equal(#result, 0)
+        navigation.sync({ session = req.session, open = { [uri] = 1 }, changed = {
+            [uri] = { version = 2, language = 'typescript', source = concrete } } })
+        result = nav(req); spec.equal(#result, 1)
+        navigation.close(req.session)
+        for _, rec in pairs(service.resident(nav_root).files) do spec.nil_value(rec.implementation_evidence) end
+    end)
     spec.it('finds C++ virtual implementations in out-of-line bodies and revalidates draft signatures', function()
         local header = 'namespace CppImplementation {\n'
             .. 'struct Base { virtual void save(int) const = 0; };\n'

@@ -1806,6 +1806,122 @@ spec.describe('query-time implementation relationships', function()
         end
         table.sort(result); return table.concat(result, ','), Q
     end
+    spec.it('links TS imported contracts, abstract bases and namespace imports in both directions', function()
+        local G = build({ ['api.ts'] = 'export interface TsItem {}\nexport interface TsContract { save(value: TsItem): void; }',
+            ['barrel.ts'] = "export { TsContract as Contract, TsItem as Item } from './api';",
+            ['store.ts'] = [[import type { Contract as C, Item } from './barrel';
+abstract class TsBase implements C { abstract save(value: Item): void; }
+class TsStore extends TsBase { save(item: Item): void {} }
+]], ['other.ts'] = [[import * as api from './api';
+class TsOther implements api.TsContract { save(item: api.TsItem): void {} }
+]], ['use.ts'] = "import { TsContract } from './api';\nfunction tsUse(value: TsContract) { value.save(item); }" })
+        spec.equal(links(G, 'TsContract.save'), 'TsOther.save,TsStore.save')
+        spec.equal(links(G, 'TsBase.save'), 'TsStore.save')
+        local Q = graph.query(G)
+        spec.equal(G.nodes[Q.out[G.by_qualified.tsUse[1]][1]].qualified, 'TsContract.save')
+        local contracts = {}; for i = 1, #Q.inn[G.by_qualified['TsStore.save'][1]], graph.EDGE do
+            contracts[G.nodes[Q.inn[G.by_qualified['TsStore.save'][1]][i]].qualified] = true
+        end
+        spec.truthy(contracts['TsContract.save'] and contracts['TsBase.save'])
+    end)
+    spec.it('rejects TS incompatible signatures, inaccessible methods and unrelated structural matches', function()
+        local G = build({ ['types.ts'] = [[interface TsI { run(value: number): string; }
+class TsGood implements TsI { run(item: number): string { return ''; } }
+class TsWrong implements TsI { run(item: string): string { return ''; } }
+class TsReturn implements TsI { run(item: number): number { return 0; } }
+class TsStatic implements TsI { static run(item: number): string { return ''; } }
+class TsPrivate implements TsI { private run(item: number): string { return ''; } }
+class TsProtected implements TsI { protected run(item: number): string { return ''; } }
+class TsUnrelated { run(item: number): string { return ''; } }
+class TsInferred implements TsI { run(item: number) { return ''; } }
+class TsOptional implements TsI { run(item?: number): string { return ''; } }
+class TsDefault implements TsI { run(item: number = 1): string { return ''; } }
+class TsUnion implements TsI { run(item: number | string): string { return ''; } }
+class TsAny implements TsI { run(item: any): string { return ''; } }
+declare class TsDeclared implements TsI { run(item: number): string; }
+]] })
+        spec.equal(links(G, 'TsI.run'), 'TsGood.run')
+    end)
+    spec.it('keeps TS named parameter identity local to its module and rejects ambiguous declarations', function()
+        local G = build({ ['api.ts'] = 'export class Item {}\nexport interface TsI { run(value: Item): void; }',
+            ['good.ts'] = "import { Item, TsI } from './api'; class TsGood implements TsI { run(value: Item): void {} }",
+            ['wrong.ts'] = "import { TsI } from './api'; class Item {} class TsWrong implements TsI { run(value: Item): void {} }",
+            ['alias.ts'] = "import { TsI } from './api'; type Item = number; class TsAlias implements TsI { run(value: Item): void {} }",
+            ['merged.ts'] = 'interface TsMerged { go(): void; }\ninterface TsMerged { other(): void; }\nclass TsMergedStore implements TsMerged { go(): void {} }' })
+        spec.equal(links(G, 'TsI.run'), 'TsGood.run')
+        spec.equal(links(G, 'TsMerged.go'), '')
+    end)
+    spec.it('rejects TS generic heritage, aliases, nested types and unsupported signatures', function()
+        local G = build({ ['types.ts'] = [[interface TsGeneric<T> { run(): void; }
+class TsGenericStore implements TsGeneric<string> { run(): void {} }
+interface TsPlain { go(): void; }
+class TsGenericChild<T> implements TsPlain { go(): void {} }
+type TsAlias = TsPlain;
+class TsAliasStore implements TsAlias { go(): void {} }
+namespace TsNested { export interface TsPlain { go(): void; } export class Store implements TsPlain { go(): void {} } }
+interface TsComplex { union(x: string | number): void; generic<T>(x: T): void; rest(...x: number[]): void; optional?(): void; }
+class TsComplexStore implements TsComplex { union(x: string | number): void {} generic<T>(x: T): void {} rest(...x: number[]): void {} optional(): void {} }
+interface TsFakeBuiltin { work(x: System.Item): void; }
+class TsFakeStore implements TsFakeBuiltin { work(x: System.Item): void {} }
+class TsParameter<T = string> {}
+interface TsGenericParameter { work(x: TsParameter): void; }
+class TsParameterStore implements TsGenericParameter { work(x: TsParameter): void {} }
+]] })
+        for _, q in ipairs({ 'TsGeneric.run', 'TsPlain.go', 'TsComplex.union', 'TsComplex.generic', 'TsComplex.rest', 'TsComplex.optional', 'TsFakeBuiltin.work', 'TsGenericParameter.work' }) do spec.equal(links(G, q), '', q) end
+    end)
+    spec.it('bounds TS hierarchy cycles and target lists using shared implementation limits', function()
+        local G = build({ ['types.ts'] = [[interface TsI { run(): void; }
+class TsA implements TsI { run(): void {} }
+class TsB implements TsI { run(): void {} }
+class TsCycleA extends TsCycleB implements TsI { run(): void {} }
+class TsCycleB extends TsCycleA { run(): void {} }
+]] })
+        local found, Q = links(G, 'TsI.run'); spec.equal(found, 'TsA.run,TsB.run'); spec.truthy(Q.incomplete)
+        local impl = require('codeoutline.implementations'); local previous = impl.MAX_TARGETS; impl.MAX_TARGETS = 1
+        local ok, err = pcall(function() local _, limited = links(G, 'TsI.run'); spec.truthy(limited.incomplete) end)
+        impl.MAX_TARGETS = previous; assert(ok, err)
+    end)
+    spec.it('does not treat TS overload declarations as abstract contracts and preserves array signatures', function()
+        local G = build({ ['types.ts'] = [[class TsOverload { run(value: number): void;
+run(value: number): void {} }
+class TsOverride extends TsOverload { run(value: number): void {} }
+interface TsArray { save(value: number[]): string[]; }
+class TsArrays implements TsArray { save(value: number[]): string[] { return []; } }
+class TsScalar implements TsArray { save(value: number): string[] { return []; } }
+class TsUnknown extends Missing implements TsArray { save(value: number[]): string[] { return []; } }
+]] })
+        for _, id in ipairs(G.by_qualified['TsOverload.run']) do spec.equal(#graph.query(G).out[id], 0) end
+        spec.equal(links(G, 'TsArray.save'), 'TsArrays.save')
+    end)
+    spec.it('uses workspace package exports for TS interface and parameter identities', function()
+        local root = tmp_root .. '/ts_implementation_workspace'
+        write(root .. '/package.json', '{"workspaces":["packages/*"]}')
+        write(root .. '/packages/api/package.json', '{"name":"@ts-impl/api","exports":{".":"./index.ts"}}')
+        write(root .. '/packages/api/index.ts', 'export class TsWorkspaceItem {}\nexport default interface TsWorkspaceContract { save(value: TsWorkspaceItem): void; }')
+        write(root .. '/app.ts', "import Contract, { TsWorkspaceItem as Item } from '@ts-impl/api';\nclass TsWorkspaceStore implements Contract { save(value: Item): void {} }")
+        local idx, G = svc.get(root, { cache_path = root .. '/cache.idx', lister = 'walk' })
+        spec.equal(links(G, 'TsWorkspaceContract.save'), 'TsWorkspaceStore.save')
+        for _, rec in pairs(idx.files) do spec.nil_value(rec.implementation_evidence) end
+        svc.forget(root)
+    end)
+    spec.it('keeps TS implementation evidence query-only across compact reload and source edits', function()
+        local root = tmp_root .. '/ts_implementations'
+        write(root .. '/api.ts', 'export interface TsI { run(value: number): void; }')
+        write(root .. '/store.ts', "import { TsI } from './api'; export class TsStore implements TsI { run(value: number): void {} }")
+        write(root .. '/use.ts', "import { TsI } from './api'; export function tsRun(value: TsI) { value.run(1); }")
+        local options = { cache_path = root .. '/cache.idx', lister = 'walk' }
+        local idx, G = svc.get(root, options); idx:save(); svc.forget(root); idx, G = svc.get(root, options)
+        spec.equal(links(G, 'TsI.run'), 'TsStore.run')
+        local output, info = explore.run(G, idx, 'tsRun TsStore.run', { explain = true })
+        spec.contains(output, 'TsI.run -> TsStore.run'); spec.equal(info.relationships_incomplete, false)
+        local _, result = require('codeoutline.callers').run(G, idx, 'TsStore.run')
+        local names = {}; for _, item in ipairs(result.callers) do names[item.name] = true end
+        spec.truthy(names['TsI.run'] and names.tsRun)
+        for _, rec in pairs(idx.files) do spec.nil_value(rec.implementation_evidence) end
+        write(root .. '/store.ts', "import { TsI } from './api'; export class TsStore implements TsI { run(value: string): void {} }")
+        idx, G = svc.get(root, options); spec.equal(links(G, 'TsI.run'), '')
+        svc.forget(root)
+    end)
     spec.it('links C# interface methods to public and explicit implementations by parameter types', function()
         local G = build({ ['contract.cs'] = 'namespace Api { public interface IStore { void Save(int value); } }',
             ['store.cs'] = [[using Api;

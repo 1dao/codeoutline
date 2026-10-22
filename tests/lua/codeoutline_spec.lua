@@ -1950,6 +1950,148 @@ class Use { void call(I value) { { Object value = unknown; value.run(1); } value
     end)
 end)
 
+spec.describe('query-owned JS workspace packages', function()
+    local function build(files, root)
+        local records = {}
+        for path, source in pairs(files) do records[path] = ci.parse(path, source, { ordinary_bindings = true }) end
+        return graph.build({ files = records, root = root })
+    end
+    local function target(G, path, specifier, mode)
+        local id, reason = require('codeoutline.js_resolution').module(G, G.file_index[path], specifier, nil, mode)
+        return id and G.files[id].path or nil, reason
+    end
+    spec.it('resolves scoped workspace packages, cross-package re-exports and imported receiver methods', function()
+        local root = tmp_root .. '/workspace_packages'
+        write(root .. '/package.json', '{"private":true,"workspaces":["packages/*"]}')
+        write(root .. '/packages/core/package.json', '{"name":"@repo/core","exports":"./src/index.js"}')
+        write(root .. '/packages/api/package.json', '{"name":"@repo/api","main":"src/index.ts"}')
+        local G = build({
+            ['packages/core/src/index.ts'] = 'export function save() {} export class Store { flush() {} }',
+            ['packages/api/src/index.ts'] = "export { save as persist, Store } from '@repo/core';",
+            ['app.ts'] = "import { persist, Store } from '@repo/api'; function run() { persist(); const s = new Store(); s.flush(); }",
+        }, root)
+        spec.equal(target(G, 'app.ts', '@repo/core'), 'packages/core/src/index.ts')
+        local Q, hit = graph.query(G), {}
+        for i = 1, #Q.out[G.by_name.run[1]], graph.EDGE do hit[G.nodes[Q.out[G.by_name.run[1]][i]].name] = true end
+        spec.truthy(hit.save and hit.flush)
+        spec.equal(#Q.inn[G.by_name.save[1]], graph.EDGE)
+        spec.equal(Q.stats.workspace.packages, 2)
+    end)
+    spec.it('honours export condition order, import modes and explicit unindexed targets', function()
+        local root = tmp_root .. '/workspace_conditions'
+        write(root .. '/package.json', '{"workspaces":{"packages":["packages/*"]}}')
+        write(root .. '/packages/ordered/package.json', '{"name":"ordered","exports":{"default":"./default.ts","types":"./types.ts"}}')
+        write(root .. '/packages/dual/package.json', '{"name":"dual","exports":{"types":"./types.ts","import":"./import.ts","require":"./require.ts"}}')
+        write(root .. '/packages/missing/package.json', '{"name":"missing","exports":"./dist/index.js","main":"./index.ts"}')
+        local G = build({ ['app.ts'] = '', ['app.js'] = '',
+            ['packages/ordered/default.ts'] = '', ['packages/ordered/types.ts'] = '',
+            ['packages/dual/import.ts'] = '', ['packages/dual/require.ts'] = '', ['packages/dual/types.ts'] = '',
+            ['packages/missing/index.ts'] = '',
+        }, root)
+        spec.equal(target(G, 'app.ts', 'ordered'), 'packages/ordered/default.ts')
+        spec.equal(target(G, 'app.ts', 'dual'), 'packages/dual/types.ts')
+        spec.equal(target(G, 'app.js', 'dual'), 'packages/dual/import.ts')
+        spec.equal(target(G, 'app.js', 'dual', 'require'), 'packages/dual/require.ts')
+        local id, reason = target(G, 'app.ts', 'missing')
+        spec.nil_value(id); spec.contains(reason, 'not indexed')
+    end)
+    spec.it('enforces exports, wildcard specificity, exclusions and duplicate package barriers', function()
+        local root = tmp_root .. '/workspace_exports'
+        write(root .. '/package.json', '{"workspaces":["packages/*","!packages/legacy"]}')
+        write(root .. '/packages/core/package.json', [[{"name":"@repo/core","exports":{
+            "./feature/*":"./src/*.ts", "./feature/special/*":"./special/*.ts", "./feature/private":null}}]])
+        write(root .. '/packages/legacy/package.json', '{"name":"@repo/core","main":"index.ts"}')
+        write(root .. '/packages/dup1/package.json', '{"name":"duplicate","main":"index.ts"}')
+        write(root .. '/packages/dup2/package.json', '{"name":"duplicate","main":"index.ts"}')
+        local G = build({ ['app.ts'] = '', ['packages/core/src/save.ts'] = '', ['packages/core/special/save.ts'] = '',
+            ['packages/core/src/private.ts'] = '', ['packages/legacy/index.ts'] = '',
+            ['packages/dup1/index.ts'] = '', ['packages/dup2/index.ts'] = '',
+        }, root)
+        spec.equal(target(G, 'app.ts', '@repo/core/feature/save'), 'packages/core/src/save.ts')
+        spec.equal(target(G, 'app.ts', '@repo/core/feature/special/save'), 'packages/core/special/save.ts')
+        for _, name in ipairs({ '@repo/core', '@repo/core/src/save', '@repo/core/feature/private',
+            '@repo/core/feature/../src/save', '@repo/core/feature/%2e%2e/save', 'duplicate' }) do
+            spec.nil_value(target(G, 'app.ts', name), name)
+        end
+    end)
+    spec.it('reads pnpm package globs and keeps nested workspace boundaries separate', function()
+        local root = tmp_root .. '/workspace_pnpm'
+        write(root .. '/package.json', '{"workspaces":["ignored/*"]}')
+        write(root .. '/pnpm-workspace.yaml', "packages:\n  - 'packages/**'\n  - '!**/test/**'\ncatalog:\n  other: 1\n")
+        write(root .. '/packages/core/package.json', '{"name":"core","main":"index.ts"}')
+        write(root .. '/packages/test/hidden/package.json', '{"name":"hidden","main":"index.ts"}')
+        write(root .. '/nested/package.json', '{"workspaces":["libs/*"]}')
+        write(root .. '/nested/libs/core/package.json', '{"name":"core","main":"index.ts"}')
+        local G = build({ ['app.ts'] = '', ['packages/core/index.ts'] = '', ['packages/test/hidden/index.ts'] = '',
+            ['nested/app.ts'] = '', ['nested/libs/core/index.ts'] = '' }, root)
+        spec.equal(target(G, 'app.ts', 'core'), 'packages/core/index.ts')
+        spec.equal(target(G, 'nested/app.ts', 'core'), 'nested/libs/core/index.ts')
+        spec.nil_value(target(G, 'app.ts', 'hidden'))
+        write(root .. '/pnpm-workspace.yaml', 'packages: ["packages/core"]\n')
+        spec.equal(target(G, 'app.ts', 'core'), 'packages/core/index.ts')
+    end)
+    spec.it('reloads changed manifests and preserves tsconfig paths precedence', function()
+        local root = tmp_root .. '/workspace_reload'
+        write(root .. '/package.json', '{"workspaces":["packages/*"]}')
+        write(root .. '/packages/core/package.json', '{"name":"core","main":"a.ts"}')
+        local G = build({ ['app.ts'] = '', ['packages/core/a.ts'] = '', ['packages/core/b.ts'] = '', ['override.ts'] = '' }, root)
+        spec.equal(target(G, 'app.ts', 'core'), 'packages/core/a.ts')
+        write(root .. '/packages/core/package.json', '{"name":"core","main":"b.ts"}')
+        spec.equal(target(G, 'app.ts', 'core'), 'packages/core/b.ts')
+        write(root .. '/tsconfig.json', '{"compilerOptions":{"paths":{"core":["override.ts"]}}}')
+        spec.equal(target(G, 'app.ts', 'core'), 'override.ts')
+        write(root .. '/packages/core/package.json', 'invalid json')
+        spec.equal(target(G, 'app.ts', 'core'), 'override.ts')
+    end)
+    spec.it('bounds manifest discovery, reports incomplete queries and preserves cancellation', function()
+        local root = tmp_root .. '/workspace_limits'
+        write(root .. '/package.json', '{"workspaces":["packages/*"]}')
+        write(root .. '/packages/core/package.json', '{"name":"core","main":"index.ts"}')
+        local G = build({ ['app.ts'] = "import { save } from 'core'; function run() { save(); }",
+            ['packages/core/index.ts'] = 'export function save() {}' }, root)
+        local workspace = require('codeoutline.js_workspace')
+        local limit = workspace.MAX_CONFIGS; workspace.MAX_CONFIGS = 1
+        local ok, err = pcall(function()
+            local Q = graph.query(G, { explain = true })
+            spec.equal(#Q.out[G.by_name.run[1]], 0); spec.truthy(Q.incomplete)
+            spec.contains(require('codeoutline.query_report').render(Q.report, G), 'configuration limit')
+            Q = graph.query(G)
+            spec.equal(#Q.inn[G.by_name.save[1]], 0); spec.truthy(Q.incomplete)
+            local js = require('codeoutline.js_resolution')
+            local ctx = js.context(G)
+            js.module(G, G.file_index['app.ts'], 'core', ctx)
+            local probes = ctx.workspace.probes
+            js.module(G, G.file_index['app.ts'], 'another-package', ctx)
+            spec.equal(ctx.workspace.probes, probes)
+        end)
+        workspace.MAX_CONFIGS = limit; assert(ok, err)
+        local control = require('codeoutline.control')
+        local interrupted = control.cancelled()
+        control.callback = function() error(interrupted, 0) end
+        ok, err = pcall(target, G, 'app.ts', 'core')
+        control.callback = nil
+        spec.equal(ok, false); spec.equal(err, interrupted)
+    end)
+    spec.it('rejects malformed configuration without inventing workspace targets', function()
+        local root = tmp_root .. '/workspace_invalid'
+        write(root .. '/packages/core/package.json', '{"name":"core","main":"index.ts"}')
+        local G = build({ ['app.ts'] = '', ['packages/core/index.ts'] = '' }, root)
+        for _, yaml in ipairs({ 'packages: {}\n', 'packages:\n  - "packages/*" trailing\n',
+            "packages:\n  - 'packages/*' trailing\n", 'packages:\n  - &alias packages/*\n' }) do
+            write(root .. '/pnpm-workspace.yaml', yaml)
+            local id, reason = target(G, 'app.ts', 'core')
+            spec.nil_value(id); spec.contains(reason, 'unsupported')
+        end
+        os.remove(root .. '/pnpm-workspace.yaml')
+        write(root .. '/package.json', '{"workspaces":["packages/*"]}')
+        write(root .. '/packages/core/package.json', '{"name":"core","exports":{"node":{"browser":"./missing.ts"},"default":"./index.ts"}}')
+        spec.equal(target(G, 'app.ts', 'core'), 'packages/core/index.ts')
+        write(root .. '/packages/core/package.json', '{"name":"core","main":"index.ts","main":"missing.ts"}')
+        local id, reason = target(G, 'app.ts', 'core')
+        spec.nil_value(id); spec.contains(reason, 'duplicate')
+    end)
+end)
+
 spec.describe('query-owned ordinary bindings', function()
     spec.it('uses existing hints for lazy JS aliases and excludes unrelated imported bindings', function()
         local root = tmp_root .. '/lazy_js_aliases'

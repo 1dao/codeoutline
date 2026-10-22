@@ -406,7 +406,7 @@ local function module_aliases(T, language)
                 out[text_of(T, i + 1)] = { kind = 'import', path = text_of(T, i + 3):sub(2, -2) }
             elseif (kw(T, i, 'const') or kw(T, i, 'let') or kw(T, i, 'var')) and T.k[i + 1] == 'id' and is(T, i + 2, '=') then
                 local value = initializer(T, i + 3, math.min(T.n, i + 6))
-                if value.module then out[text_of(T, i + 1)] = { kind = 'import', path = value.module } end
+                if value.module then out[text_of(T, i + 1)] = { kind = 'require', path = value.module } end
             end
         elseif language == 'go' and kw(T, i, 'import') then
             local first, last = i + 1, i + 2
@@ -1060,7 +1060,7 @@ function M.complete(req)
             items[#items + 1] = item_for(entry, self.language, V, not self:expired())
         end
     end
-    return { items = items, incomplete = self.incomplete or V.js_context.include_incomplete }
+    return { items = items, incomplete = self.incomplete or V.js_context.include_incomplete or V.js_context.workspace_incomplete }
 end
 
 navigation.register('lsp_completion', function(req)

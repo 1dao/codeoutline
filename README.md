@@ -117,6 +117,20 @@ ambiguous imported names remain unresolved. Import evidence is generated on dema
 than stored in the index. This is heuristic lookup: preprocessing/include order, compiler
 include-search configuration, dependent templates, ADL and full overload resolution are not modeled.
 
+JS/TS package imports resolve local npm/Yarn workspaces (`workspaces` arrays or `packages` lists)
+and pnpm `packages` lists. Package discovery reuses indexed directories; manifests and resolution
+maps exist only during a query. The nearest workspace owns an import, pnpm configuration takes
+precedence, and relative imports and existing tsconfig paths retain their priority. Supported globs
+are `*`, `**`, `?` and `!` exclusions; pnpm accepts block string lists or JSON flow lists.
+Lookup covers scoped names, subpaths, exact/wildcard exports, ordered `types`/`import`/`require`/
+`node`/`default` conditions, and legacy `types`/`typings`/`module`/`main` entries. An unavailable
+declared export stays unresolved rather than guessing a source directory. Duplicate package names
+also stay unresolved. Configuration changes apply on the next query without reindexing sources.
+Discovery is bounded to 4,096 directories, 512 packages, 1,024 configuration probes and 8 MiB of
+configuration per query (1 MiB per file); exceeded limits report incomplete results. This is source
+navigation, not full Node/TypeScript module resolution: dependency installation, lockfiles, package
+`imports`, custom conditions, arbitrary YAML, and CommonJS export analysis are not provided.
+
 C#, Java and Kotlin implementation relationships use declared inheritance and matching named
 parameter types. Explore and callers label these edges `implementation`: they describe possible
 implementations, not calls made by the method or a proven runtime receiver. Go to Implementation

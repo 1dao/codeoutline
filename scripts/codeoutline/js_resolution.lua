@@ -43,7 +43,8 @@ local function config(path, seen, depth)
 end
 
 function M.context(G)
-    local ctx = { modules = {}, exports = {} }
+    local ctx = { modules = {}, exports = {}, module_reasons = {},
+        workspace_stats = { reads = 0, bytes = 0, directories = 0, packages = 0 } }
     if G.root then
         for _, name in ipairs({ 'tsconfig.json', 'jsconfig.json', 'tsconfig.base.json' }) do
             local opts = config(G.root .. '/' .. name, {}, 0)
@@ -70,10 +71,11 @@ end
 
 local extensions = { '', '.ts', '.tsx', '.js', '.jsx', '.mts', '.cts', '.mjs', '.cjs',
     '/index.ts', '/index.tsx', '/index.js', '/index.jsx', '/index.mts', '/index.mjs' }
-function M.module(G, f, spec, ctx)
+function M.module(G, f, spec, ctx, mode)
     ctx = ctx or M.context(G)
-    local key = f .. '\0' .. spec
-    if ctx.modules[key] ~= nil then return ctx.modules[key] or nil end
+    mode = mode or 'import'
+    local key = G.files[f].path .. '\0' .. spec .. '\0' .. mode
+    if ctx.modules[key] ~= nil then return ctx.modules[key] or nil, ctx.module_reasons[key] end
     local bases = {}
     if spec:sub(1, 1) == '.' then bases[1] = norm(dir(G.files[f].path) .. '/' .. spec):gsub('^/', '')
     else
@@ -94,20 +96,41 @@ function M.module(G, f, spec, ctx)
             end
         end
     end
-    for _, base in ipairs(bases) do
+    local function find(base)
         local candidates = { base }
         if G.files[f].language == 'arkts' then
             candidates[#candidates + 1] = base .. '.ets'
             candidates[#candidates + 1] = base .. '/index.ets'
         end
-        if base:match('%.js$') then candidates[#candidates + 1] = base:gsub('%.js$', '.ts'); candidates[#candidates + 1] = base:gsub('%.js$', '.tsx') end
+        if base:match('%.js$') then candidates[#candidates + 1] = base:gsub('%.js$', '.ts'); candidates[#candidates + 1] = base:gsub('%.js$', '.tsx')
+        elseif base:match('%.mjs$') then candidates[#candidates + 1] = base:gsub('%.mjs$', '.mts')
+        elseif base:match('%.cjs$') then candidates[#candidates + 1] = base:gsub('%.cjs$', '.cts') end
         for _, ext in ipairs(extensions) do candidates[#candidates + 1] = base .. ext end
         for _, candidate in ipairs(candidates) do
             local target = G.file_index[candidate]
-            if target and js(G.files[target]) then ctx.modules[key] = target; return target end
+            if target and js(G.files[target]) then return target end
         end
     end
+    for _, base in ipairs(bases) do
+        local target = find(base)
+        if target then ctx.modules[key] = target; return target end
+    end
+    if spec:sub(1, 1) ~= '.' then
+        if ctx.workspace_error then
+            ctx.modules[key], ctx.module_reasons[key] = false, ctx.workspace_error
+            return nil, ctx.workspace_error
+        end
+        local ok, target, reason = pcall(require('codeoutline.js_workspace').resolve, G, f, spec, ctx, mode, find)
+        if not ok then
+            if control.is_interrupted(target) then error(target, 0) end
+            ctx.workspace_incomplete = true; reason, target = tostring(target), nil
+            ctx.workspace_error = reason
+        end
+        if target then ctx.modules[key] = target; return target end
+        ctx.module_reasons[key] = reason
+    end
     ctx.modules[key] = false
+    return nil, ctx.module_reasons[key]
 end
 
 local function exported(G, f, name, ctx, seen, depth)
@@ -175,8 +198,8 @@ end
 -- Shared named/namespace import lookup for query-owned callback aliases.
 function M.imported(G, f, path, name, ctx)
     ctx = ctx or M.context(G)
-    local target = M.module(G, f, path, ctx)
-    return target and name ~= '' and exported(G, target, name, ctx, {}, 0) or {}
+    local target, reason = M.module(G, f, path, ctx)
+    return target and name ~= '' and exported(G, target, name, ctx, {}, 0) or {}, reason
 end
 
 function M.resolve(G, f, name, kind, recv, evidence, ctx)
@@ -186,8 +209,8 @@ function M.resolve(G, f, name, kind, recv, evidence, ctx)
     local function binding(local_name, member)
         for _, b in ipairs(rec.js_imports or {}) do
             if b.local_name == local_name then
-                local target = M.module(G, f, b.path, ctx)
-                if not target then return {} end
+                local target, reason = M.module(G, f, b.path, ctx)
+                if not target then return {}, reason end
                 if b.imported == '*' then return member and exported(G, target, member, ctx, {}, 0) or {} end
                 return exported(G, target, b.imported, ctx, {}, 0)
             end

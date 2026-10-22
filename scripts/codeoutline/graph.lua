@@ -147,7 +147,7 @@ local function resolve_deps(G, f, js_context)
                 if hit then break end
             end
         elseif rec.language == 'javascript' or rec.language == 'typescript' or rec.language == 'arkts' then
-            add(js_resolution.module(G, f, path, js_context))
+            add(js_resolution.module(G, f, path, js_context, imp.kind))
         elseif rec.language == 'csharp' then
             for _, g in ipairs(G.ns_files[path] or {}) do add(g) end
         elseif rec.language == 'rust' then
@@ -329,7 +329,7 @@ local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired, accept,
     accept = accept or (kind == 'new' and NEWABLE) or (kind == 'ref' and VALUE) or CALLABLE
     if evidence == '' then evidence = nil end
     local strategy = 'js/ts binding'
-    local exact = js_resolution.resolve(G, f, name, kind, recv, evidence, js_context)
+    local exact, binding_reason = js_resolution.resolve(G, f, name, kind, recv, evidence, js_context)
     if exact == nil and G.files[f].language == 'python' then
         strategy = 'python binding'
         exact = require('codeoutline.python_bindings').resolve(G, f, evidence, js_context)
@@ -353,7 +353,7 @@ local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired, accept,
     if exact ~= nil then
         local result = {}
         for _, id in ipairs(exact) do if accept[G.nodes[id].kind] then result[#result + 1] = id end end
-        return result, #result == 0 and 'binding target unresolved' or strategy
+        return result, #result == 0 and (binding_reason or 'binding target unresolved') or strategy
     end
     local cands = G.by_name[name]
     if G.files[f].language == 'kotlin' and not recv then
@@ -585,6 +585,7 @@ function M.query(symbols, opts)
     js_context.lua = lua_bindings.context(symbols)
     js_context.ordinary = require('codeoutline.ordinary_bindings').context(symbols, js_context)
     Q.stats.ordinary = js_context.ordinary.stats
+    Q.stats.workspace = js_context.workspace_stats
     local report = opts.explain and require('codeoutline.query_report').new() or nil
     Q.report = report
     local indirect = require('codeoutline.indirect').query(symbols, opts.dispatch_rules, report)
@@ -608,6 +609,7 @@ function M.query(symbols, opts)
         Q.stats.resolved_refs = Q.stats.resolved_refs + 1
         local found, reason = resolve_ref(symbols, f, ids[refs.from[i]], refs.name[i], refs.kind[i],
             refs.recv[i] or nil, direct, paired, nil, js_context.ordinary.evidence(f, i), js_context)
+        if js_context.workspace_incomplete then Q.incomplete = true end
         if report and explain and (refs.kind[i] == 'call' or refs.kind[i] == 'member_call') then
             if (not found or #found == 0) and explain == true then
                 report:add({ source = ids[refs.from[i]], line = refs.line[i], call = refs.name[i], reason = reason or 'unresolved reference' })
@@ -698,6 +700,7 @@ function M.query(symbols, opts)
         -- selective name test first. Checkpoints run per file and per chunk.
         local files = symbols.files
         local candidates = js_context.ordinary.candidates(wanted)
+        if js_context.workspace_incomplete then Q.incomplete = true end
         for _, f in ipairs(symbols.file_order) do
             control.check()
             local alias_refs = js_context.ordinary.aliases(f, wanted, candidates)

@@ -96,7 +96,7 @@ function M.context(G, ctx, source, options)
 
     -- Renamed calls can only originate in the target file or an import chain
     -- leading to it. Build this cheap reverse map from existing import records.
-    -- No source is opened while constructing the candidate set.
+    -- No indexed source is opened; workspace lookup may read package manifests.
     local reverse
     function C.candidates(wanted)
         local found, queue = {}, {}
@@ -119,7 +119,7 @@ function M.context(G, ctx, source, options)
                 local rec = G.files[f]
                 control.check()
                 if js(rec) then
-                    for _, imp in ipairs(rec.imports) do add(f, require('codeoutline.js_resolution').module(G, f, imp.path, ctx)) end
+                    for _, imp in ipairs(rec.imports) do add(f, require('codeoutline.js_resolution').module(G, f, imp.path, ctx, imp.kind)) end
                 elseif rec.language == 'python' then
                     local module = require('codeoutline.python_bindings').module
                     for _, imp in ipairs(rec.imports) do

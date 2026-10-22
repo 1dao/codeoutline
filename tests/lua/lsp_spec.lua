@@ -646,6 +646,84 @@ spec.describe('LSP navigation', function()
         spec.equal(#found, 1); spec.equal(found[1].range.start.line, 2)
         navigation.close('js-typed')
     end)
+    spec.it('shares workspace packages across navigation, completion, references, drafts and manifest edits', function()
+        local prefix = 'workspace-lsp/'
+        assert(xutils.mkdir_p(nav_root .. '/' .. prefix .. 'packages/core'))
+        nav_write(prefix .. 'package.json', '{"workspaces":["packages/*"]}')
+        local manifest = prefix .. 'packages/core/package.json'
+        nav_write(manifest, '{"name":"@navigation/core","exports":"./a.ts"}')
+        nav_write(prefix .. 'packages/core/a.ts', 'export function workspaceSave() {}\nexport class WorkspaceStore { workspaceFlush() {} }\n')
+        nav_write(prefix .. 'packages/core/b.ts', '\nexport function workspaceSave() {}\nexport class WorkspaceStore { workspaceFlush() {} }\n')
+        local source = "import { workspaceSave as persist, WorkspaceStore } from '@navigation/core';\n"
+            .. "import * as api from '@navigation/core';\n"
+            .. 'function workspaceRun(s: WorkspaceStore) { persist(); s.workspaceFlush(); api.workspaceSave(); }\n'
+        local client = prefix .. 'client.ts'
+        nav_write(client, source)
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local doc = docs.read(nav_root .. '/' .. client)
+        local function check(target, line, session)
+            local definitions = {}
+            for _, text in ipairs({ 'persist();', 'workspaceFlush();', 'workspaceSave();', '@navigation/core' }) do
+                local found, response = nav({ method = 'lsp_definition', session = session, uri = doc.uri,
+                    position = doc:position(assert(source:find(text, 1, true))) })
+                spec.equal(#found, 1, text); spec.equal(found[1].uri, nav_uri(prefix .. 'packages/core/' .. target), text)
+                spec.equal(response.incomplete, false)
+                definitions[text] = found[1]
+            end
+            spec.equal(definitions['persist();'].range.start.line, line)
+            for _, text in ipairs({ 's.workspaceFlush', 'api.workspaceSave' }) do
+                local result = require('codeoutline.completion').complete({ root = nav_root, uri = doc.uri, session = session,
+                    position = doc:position(assert(source:find(text, 1, true)) + #text:match('^(.-)%.')) })
+                local labels = {}; for _, item in ipairs(result.items) do labels[item.label] = true end
+                spec.truthy(labels[text:match('%.(.+)$')]); spec.equal(result.incomplete or false, false)
+            end
+            local uses = nav({ method = 'lsp_references', session = session, uri = definitions['persist();'].uri,
+                position = definitions['persist();'].range.start, includeDeclaration = false })
+            local calls = 0
+            for _, ref in ipairs(uses) do
+                if ref.uri == doc.uri and ref.range.start.line == 2 then calls = calls + 1 end
+            end
+            spec.equal(calls, 2)
+        end
+        check('a.ts', 0)
+        -- Configuration changes take effect without refreshing indexed sources.
+        nav_write(manifest, '{"name":"@navigation/core","exports":"./b.ts"}')
+        check('b.ts', 1)
+        local uri = nav_uri(prefix .. 'packages/core/b.ts')
+        navigation.sync({ session = 'workspace-draft', open = { [uri] = 1 }, changed = {
+            [uri] = { version = 1, language = 'typescript', source = '\n\nexport function workspaceSave() {}\n'
+                .. 'export class WorkspaceStore { workspaceFlush() {} }\n' } } })
+        check('b.ts', 2, 'workspace-draft')
+        navigation.close('workspace-draft')
+        for _, rec in pairs(service.resident(nav_root).files) do
+            spec.nil_value(rec.workspace); spec.nil_value(rec.ordinary_bindings)
+        end
+    end)
+    spec.it('reports workspace discovery limits in navigation, completion and references', function()
+        local prefix = 'workspace-limits/'
+        assert(xutils.mkdir_p(nav_root .. '/' .. prefix .. 'packages/core'))
+        nav_write(prefix .. 'package.json', '{"workspaces":["packages/*"]}')
+        nav_write(prefix .. 'packages/core/package.json', '{"name":"@limits/core","main":"index.ts"}')
+        nav_write(prefix .. 'packages/core/index.ts', 'export function budgetSave() {}')
+        local source = "import * as api from '@limits/core';\nfunction budgetRun() { api.budgetSave(); }"
+        nav_write(prefix .. 'client.ts', source)
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local doc = docs.read(nav_root .. '/' .. prefix .. 'client.ts')
+        local workspace = require('codeoutline.js_workspace')
+        local limit = workspace.MAX_CONFIGS; workspace.MAX_CONFIGS = 1
+        local ok, err = pcall(function()
+            local found, response = nav({ method = 'lsp_definition', uri = doc.uri,
+                position = doc:position(assert(source:find('@limits/core', 1, true))) })
+            spec.equal(#found, 0); spec.truthy(response.incomplete)
+            local completion = require('codeoutline.completion').complete({ root = nav_root, uri = doc.uri,
+                position = doc:position(assert(source:find('api.budgetSave', 1, true)) + 3) })
+            spec.equal(#completion.items, 0); spec.truthy(completion.incomplete)
+            found, response = nav({ method = 'lsp_references', uri = nav_uri(prefix .. 'packages/core/index.ts'),
+                position = { line = 0, character = 18 }, includeDeclaration = false })
+            spec.equal(#found, 0); spec.truthy(response.incomplete)
+        end)
+        workspace.MAX_CONFIGS = limit; assert(ok, err)
+    end)
     spec.it('connects Lua native module exports to C definitions, hover and completion', function()
         local native = [[static int native_save(lua_State *L) { int id = luaL_checkinteger(L, 1); luaL_checkstring(L, 2); int count = luaL_optinteger(L, 3, 10); return 0; }
 static int hidden(lua_State *L) { return 0; }

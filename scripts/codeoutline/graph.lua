@@ -137,6 +137,10 @@ local function resolve_deps(G, f, js_context, imports_only)
         elseif rec.language == 'csharp' then
             for _, g in ipairs(G.ns_files[path] or {}) do add(g) end
         elseif rec.language == 'rust' then
+            if js_context then
+                local files = require('codeoutline.rust_resolution').imports(G, f, imp, js_context)
+                if files then for _, g in ipairs(files) do add(g) end; goto next_import end
+            end
             if imp.kind == 'mod' then
                 -- mod x;  ->  x.rs / x/mod.rs next to this file (or under its stem dir)
                 local st = stem(rec.path)
@@ -321,6 +325,10 @@ local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired, accept,
     if G.files[f].language == 'go' then
         strategy = 'go package binding'
         exact, binding_reason = require('codeoutline.go_modules').resolve(G, f, name, recv, js_context)
+    end
+    if G.files[f].language == 'rust' and js_context then
+        strategy = 'cargo crate/module binding'
+        exact, binding_reason = require('codeoutline.rust_resolution').resolve(G, f, src_id, name, recv, evidence, js_context)
     end
     if exact == nil and G.files[f].language == 'python' then
         strategy = 'python binding'
@@ -579,6 +587,7 @@ function M.query(symbols, opts)
     Q.stats.ordinary = js_context.ordinary.stats
     Q.stats.workspace = js_context.workspace_stats
     Q.stats.go = js_context.go_stats
+    Q.stats.rust = js_context.rust_stats
     local report = opts.explain and require('codeoutline.query_report').new() or nil
     Q.report = report
     local indirect = require('codeoutline.indirect').query(symbols, opts.dispatch_rules, report)
@@ -602,7 +611,7 @@ function M.query(symbols, opts)
         Q.stats.resolved_refs = Q.stats.resolved_refs + 1
         local found, reason = resolve_ref(symbols, f, ids[refs.from[i]], refs.name[i], refs.kind[i],
             refs.recv[i] or nil, direct, paired, nil, js_context.ordinary.evidence(f, i), js_context)
-        if js_context.workspace_incomplete or js_context.go_incomplete then Q.incomplete = true end
+        if js_context.workspace_incomplete or js_context.go_incomplete or js_context.rust_incomplete then Q.incomplete = true end
         if report and explain and (refs.kind[i] == 'call' or refs.kind[i] == 'member_call') then
             if (not found or #found == 0) and explain == true then
                 report:add({ source = ids[refs.from[i]], line = refs.line[i], call = refs.name[i], reason = reason or 'unresolved reference' })
@@ -697,6 +706,9 @@ function M.query(symbols, opts)
         for _, f in ipairs(symbols.file_order) do
             control.check()
             local alias_refs = js_context.ordinary.aliases(f, wanted, candidates)
+            if files[f].language == 'rust' then
+                for i in pairs(require('codeoutline.rust_resolution').alias_refs(symbols, f, wanted, js_context)) do alias_refs[i] = true end
+            end
             local aliases = {}
             if files[f].language == 'kotlin' then
                 for _, imp in ipairs(files[f].imports) do
@@ -722,6 +734,7 @@ function M.query(symbols, opts)
             end
         end
         -- Interrupted scans never publish partial caller lists.
+        if js_context.rust_incomplete then self.incomplete = true end
         for id, edges in pairs(incoming) do rawset(self.inn, id, edges) end
     end
     setmetatable(Q.inn, { __index = function(cache, id)

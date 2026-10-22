@@ -824,6 +824,7 @@ end
 
 function Completion:entries(target)
     if not target then return {} end
+    if target.rust_module then return require('codeoutline.rust_resolution').members(self.V, target.rust_module, self.V.js_context) end
     if target.cpp_namespace then
         local bindings, result = require('codeoutline.cpp_types'), {}
         local any = setmetatable({}, { __index = function() return true end })
@@ -861,6 +862,15 @@ end
 -- Type of a receiver chain, element by element.
 function Completion:chain(chain, depth)
     depth = depth or 0
+    if self.rust_static and require('codeoutline.rust_packages').owner(self.V, self.f, self.V.js_context) then
+        local names, plain = {}, true
+        for _, element in ipairs(chain) do names[#names + 1] = element.name; if element.call then plain = false end end
+        if plain then
+            local scope = require('codeoutline.rust_resolution').scope(self.V, self.f, self.fn and self.V.id_of[self.f][self.fn])
+            local found = require('codeoutline.rust_resolution').path(self.V, self.f, table.concat(names, '::'), self.V.js_context, scope)
+            if found and found.module then return { rust_module = found.module } end
+        end
+    end
     local target = self:receiver(chain[1], depth)
     for k = 2, #chain do
         if not target or self:expired() then return nil end
@@ -910,7 +920,7 @@ local function receiver_chain(T, op, member)
         local call = false
         if is(T, i, ')') and T.m[i] then call = true; i = T.m[i] - 1 end
         if is(T, i, '>') and T.m[i] then i = T.m[i] - 1 end
-        if not (T.k[i] == 'id' or (T.k[i] == 'kw' and SELF[text_of(T, i)])) then
+        if not (T.k[i] == 'id' or (T.k[i] == 'kw' and (SELF[text_of(T, i)] or text_of(T, i) == 'crate' or text_of(T, i) == 'super'))) then
             if call or #chain == 0 then return nil end
             break
         end
@@ -950,6 +960,7 @@ function M.complete(req)
     local op = t
     if t and (T.k[t] == 'id' or T.k[t] == 'kw') and T.e[t] >= offset then op = t - 1 end
     local is_member = op and op >= 1 and T.k[op] == 'op' and member[text_of(T, op)] and T.e[op] <= offset
+    self.rust_static = self.language == 'rust' and is_member and text_of(T, op) == '::'
     if req.trigger and not is_member then return { items = {} } end
     self.fn, self.owner = self:scope()
     self.aliases = module_aliases(T, self.language)
@@ -1062,7 +1073,7 @@ function M.complete(req)
         end
     end
     return { items = items, incomplete = self.incomplete or V.js_context.include_incomplete
-        or V.js_context.workspace_incomplete or V.js_context.go_incomplete }
+        or V.js_context.workspace_incomplete or V.js_context.go_incomplete or V.js_context.rust_incomplete }
 end
 
 navigation.register('lsp_completion', function(req)

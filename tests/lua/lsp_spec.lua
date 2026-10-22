@@ -646,6 +646,68 @@ spec.describe('LSP navigation', function()
         spec.equal(#found, 1); spec.equal(found[1].range.start.line, 2)
         navigation.close('js-typed')
     end)
+    spec.it('shares Cargo package aliases, module paths, references and completion after manifest and draft changes', function()
+        local prefix = 'cargo-workspace-lsp/'
+        for _, path in ipairs({ 'app/src', 'first', 'second' }) do assert(xutils.mkdir_p(nav_root .. '/' .. prefix .. path)) end
+        nav_write(prefix .. 'Cargo.toml', '[workspace]\nmembers=["app","first"]\n'
+            .. '[workspace.dependencies]\nchosen={path="first",package="library"}\n')
+        nav_write(prefix .. 'app/Cargo.toml', '[package]\nname="app"\n[dependencies]\nchosen.workspace=true\n')
+        for _, folder in ipairs({ 'first', 'second' }) do
+            nav_write(prefix .. folder .. '/Cargo.toml', '[package]\nname="library"\n[lib]\npath="api.rs"\n')
+            nav_write(prefix .. folder .. '/nested.rs', 'pub fn flush() {}')
+        end
+        nav_write(prefix .. 'first/api.rs', 'pub fn cargo_save() {}\npub mod nested;\nfn hidden() {}')
+        nav_write(prefix .. 'second/api.rs', '\npub fn cargo_save() {}\npub mod nested;')
+        local source = 'use chosen::{cargo_save as persist, nested};\n'
+            .. 'fn CargoLspRun() { persist(); chosen::cargo_save(); nested::flush(); }\n'
+        local client = prefix .. 'app/src/main.rs'; nav_write(client, source)
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local doc = docs.read(nav_root .. '/' .. client)
+        local function check(folder, line, session)
+            local found
+            for _, name in ipairs({ 'persist();', 'cargo_save();', 'flush();' }) do
+                local response
+                found, response = nav({ method = 'lsp_definition', session = session, uri = doc.uri,
+                    position = doc:position(assert(source:find(name, 1, true))) })
+                spec.equal(#found, 1, name); spec.equal(response.incomplete, false)
+                spec.equal(found[1].uri, nav_uri(prefix .. folder .. '/' .. (name == 'flush();' and 'nested.rs' or 'api.rs')))
+                if name ~= 'flush();' then spec.equal(found[1].range.start.line, line) end
+            end
+            for _, case in ipairs({ { 'chosen::cargo_save', 7, 'cargo_save' }, { 'nested::flush', 7, 'flush' } }) do
+                local result = require('codeoutline.completion').complete({ root = nav_root, uri = doc.uri, session = session,
+                    position = doc:position(assert(source:find(case[1], 1, true)) + case[2]) })
+                local labels = {}; for _, item in ipairs(result.items) do labels[item.label] = true end
+                spec.truthy(labels[case[3]]); spec.nil_value(labels.hidden); spec.equal(result.incomplete or false, false)
+            end
+            found = nav({ method = 'lsp_references', session = session, uri = nav_uri(prefix .. folder .. '/api.rs'),
+                position = { line = line, character = 8 }, includeDeclaration = false })
+            spec.equal(#found, 2)
+        end
+        check('first', 0)
+        nav_write(prefix .. 'Cargo.toml', '[workspace]\nmembers=["app","second"]\n'
+            .. '[workspace.dependencies]\nchosen={path="second",package="library"}\n')
+        check('second', 1)
+        local target = nav_uri(prefix .. 'second/api.rs')
+        navigation.sync({ session = 'cargo-draft', open = { [target] = 1 }, changed = {
+            [target] = { version = 1, language = 'rust', source = '\n\npub fn cargo_save() {}\npub mod nested;' } } })
+        check('second', 2, 'cargo-draft'); navigation.close('cargo-draft')
+        local cargo = require('codeoutline.rust_packages')
+        local limit = cargo.MAX_CONFIGS; cargo.MAX_CONFIGS = 1
+        local ok, err = pcall(function()
+            local found, response = nav({ method = 'lsp_definition', uri = doc.uri,
+                position = doc:position(assert(source:find('persist();', 1, true))) })
+            spec.equal(#found, 0); spec.truthy(response.incomplete)
+        end)
+        cargo.MAX_CONFIGS = limit; assert(ok, err)
+        local own = 'pub struct CargoBox { width: i32 }\nimpl CargoBox { fn read(&self) { self.width; } }'
+        nav_write(prefix .. 'app/src/lib.rs', own)
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local own_doc = docs.read(nav_root .. '/' .. prefix .. 'app/src/lib.rs')
+        local completion = require('codeoutline.completion').complete({ root = nav_root, uri = own_doc.uri,
+            position = own_doc:position(assert(own:find('self.width', 1, true)) + 4) })
+        local names = {}; for _, item in ipairs(completion.items) do names[item.label] = true end
+        spec.truthy(names.width); spec.nil_value(names.nested)
+    end)
     spec.it('shares Go workspace imports across navigation, completion, references and draft/configuration changes', function()
         local prefix = 'go-workspace-lsp/'
         for _, path in ipairs({ 'app', 'first', 'second', 'unrelated' }) do

@@ -150,6 +150,23 @@ lexical shadowing and full receiver/type inference are not modeled. Configuratio
 standard line/block directives and JSON-compatible quoted paths; absolute local paths
 and other Go string escape forms are outside this supported subset.
 
+Rust Cargo lookup reads local path dependencies and inherited `workspace.dependencies`
+on demand, including renamed packages, hyphenated crate names and custom `[lib]` names/paths.
+Workspace dependency paths are relative to their defining workspace manifest; sibling packages
+are not inferred as dependencies. `crate`/`self`/`super`, declared file/inline modules, grouped
+`use` aliases and bounded named public re-exports share resolution across calls, navigation
+and module completion. Detailed import, path and visibility evidence reuses the bounded query
+source cache and is excluded from serialized indexes. External lookups require public items.
+Manifest edits apply on the next request. Limits include 1,024 manifest probes, 1 MiB per
+manifest, 8 MiB total, 512 dependencies per package, 8,192 nodes per module and 64 alias-source
+files per caller query; exceeded limits report incomplete results. Supported TOML includes
+basic/literal strings, arrays, inline dependency tables, dotted dependency properties and
+dependency subtables. Lookup stays within the indexed root and never invokes Cargo. Registry/
+Git downloads, dev/build/target-specific dependencies, lockfile/feature/target selection,
+patch/replace overrides, glob re-exports,
+`#[path]`/generated modules, custom binary targets, block-local imports and full Rust type,
+privacy or macro analysis are not modeled. Without Cargo metadata, legacy Rust lookup remains.
+
 C#, Java and Kotlin implementation relationships use declared inheritance and matching named
 parameter types. Explore and callers label these edges `implementation`: they describe possible
 implementations, not calls made by the method or a proven runtime receiver. Go to Implementation

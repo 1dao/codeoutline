@@ -1950,6 +1950,147 @@ class Use { void call(I value) { { Object value = unknown; value.run(1); } value
     end)
 end)
 
+spec.describe('query-owned Cargo packages', function()
+    local cargo = require('codeoutline.rust_packages')
+    local function build(files, root)
+        local records = {}
+        for path, source in pairs(files) do records[path] = ci.parse(path, source, { ordinary_bindings = true }) end
+        return graph.build({ files = records, root = root })
+    end
+    spec.it('resolves path dependencies, renamed crates and custom library entry names without sibling guesses', function()
+        local root = tmp_root .. '/cargo_paths'
+        write(root .. '/app/Cargo.toml', '[package]\nname="app"\n[dependencies]\nselected={path="../actual", package="actual-package"}\n'
+            .. 'actual-package={path="../actual"}\nremote="1"\n')
+        write(root .. '/actual/Cargo.toml', '[package]\nname="actual-package"\n[lib]\nname="custom_api"\npath="code/entry.rs"\n')
+        write(root .. '/unrelated/Cargo.toml', '[package]\nname="remote"\n')
+        local G = build({ ['app/src/main.rs'] = 'fn CargoRun() { selected::save(); custom_api::save(); remote::save(); actual_package::save(); }',
+            ['actual/code/entry.rs'] = 'pub fn save() {} fn hidden() {}',
+            ['unrelated/src/lib.rs'] = 'pub fn save() {}' }, root)
+        spec.equal(edges_from(G, 'CargoRun'), 'save@actual/code/entry.rs save@actual/code/entry.rs')
+        local ctx = {}; local crates = cargo.crates(G, G.file_index['app/src/main.rs'], ctx)
+        spec.equal(crates.selected, G.file_index['actual/code/entry.rs']); spec.truthy(crates.custom_api)
+        spec.nil_value(crates.actual_package); spec.nil_value(crates.remote)
+    end)
+    spec.it('inherits workspace dependencies from root paths and reloads changed manifests per query', function()
+        local root = tmp_root .. '/cargo_workspace'
+        write(root .. '/Cargo.toml', '[workspace]\nmembers=[\n"crates/*",\n]\nexclude=["crates/excluded"]\n'
+            .. '[workspace.dependencies]\napi={path="lib",package="lib-package"}\n')
+        write(root .. '/crates/app/Cargo.toml', '[package]\nname="app"\n[dependencies]\napi.workspace=true\n')
+        write(root .. '/crates/excluded/Cargo.toml', '[package]\nname="excluded"\n[dependencies.api]\nworkspace=true\n')
+        write(root .. '/lib/Cargo.toml', '[package]\nname="lib-package"\n')
+        write(root .. '/other/Cargo.toml', '[package]\nname="lib-package"\n')
+        local G = build({ ['crates/app/src/main.rs'] = 'fn WorkspaceRun() { api::save(); }',
+            ['crates/excluded/src/main.rs'] = 'fn ExcludedRun() { api::save(); }',
+            ['lib/src/lib.rs'] = 'pub fn save() {}', ['other/src/lib.rs'] = 'pub fn save() {}' }, root)
+        spec.equal(edges_from(G, 'WorkspaceRun'), 'save@lib/src/lib.rs')
+        spec.equal(edges_from(G, 'ExcludedRun'), '')
+        write(root .. '/Cargo.toml', '[workspace]\nmembers=["crates/*"]\n[workspace.dependencies.api]\npath="other"\npackage="lib-package"\n')
+        spec.equal(edges_from(G, 'WorkspaceRun'), 'save@other/src/lib.rs')
+    end)
+    spec.it('resolves grouped use aliases, declared file modules, inline modules and public re-exports', function()
+        local root = tmp_root .. '/cargo_modules'
+        write(root .. '/app/Cargo.toml', '[package]\nname="app"\n[dependencies]\napi={path="../lib", package="library"}\n')
+        write(root .. '/lib/Cargo.toml', '[package]\nname="library"\n')
+        local G = build({ ['app/src/main.rs'] = 'use api::{save as persist, public::flush};\nfn ModulesRun() { persist(); flush(); api::nested::work(); api::hidden(); api::secret::hidden(); }',
+            ['lib/src/lib.rs'] = 'pub mod public; pub mod nested { pub fn work() {} } mod secret { pub fn hidden() {} }\n'
+                .. 'pub use crate::public::save; fn hidden() {}',
+            ['lib/src/public.rs'] = 'pub fn save() {} pub fn flush() {}',
+            ['unrelated/public.rs'] = 'pub fn save() {} pub fn flush() {}' }, root)
+        spec.equal(edges_from(G, 'ModulesRun'), 'flush@lib/src/public.rs save@lib/src/public.rs work@lib/src/lib.rs')
+        local Q = graph.query(G); local save = G.by_name.save[1]
+        for _, id in ipairs(G.by_name.save) do if G.files[G.node_file[id]].path == 'lib/src/public.rs' then save = id end end
+        spec.equal(#Q.inn[save], graph.EDGE)
+        spec.equal(Q.incomplete, false)
+    end)
+    spec.it('tracks renamed re-exports across packages and resolves declared associated functions', function()
+        local root = tmp_root .. '/cargo_reexport'
+        write(root .. '/app/Cargo.toml', '[package]\nname="app"\n[dependencies]\napi={path="../wrapper"}\n')
+        write(root .. '/wrapper/Cargo.toml', '[package]\nname="api"\n[dependencies]\nbase={path="../base"}\n')
+        write(root .. '/base/Cargo.toml', '[package]\nname="base"\n')
+        local G = build({ ['app/src/main.rs'] = 'use api::persist as dispatch; fn ReexportRun() { dispatch(); api::Store::new(); }',
+            ['wrapper/src/lib.rs'] = 'pub use base::{save as persist, Store};',
+            ['base/src/lib.rs'] = 'pub fn save() {} pub struct Store {} impl Store { pub fn new() {} }' }, root)
+        spec.equal(edges_from(G, 'ReexportRun'), 'new@base/src/lib.rs save@base/src/lib.rs')
+        local Q = graph.query(G)
+        spec.equal(#Q.inn[G.by_name.save[1]], graph.EDGE)
+        spec.equal(Q.incomplete, false)
+    end)
+    spec.it('keeps missing library targets, nested packages and mismatched names unresolved', function()
+        local root = tmp_root .. '/cargo_barriers'
+        write(root .. '/Cargo.toml', '[package]\nname="root"\n[dependencies]\nmissing={path="missing"}\nwrong={path="library"}\n')
+        write(root .. '/missing/Cargo.toml', '[package]\nname="missing"\n[lib]\npath="dist/lib.rs"\n')
+        write(root .. '/library/Cargo.toml', '[package]\nname="different"\n')
+        write(root .. '/nested/Cargo.toml', '[package]\nname="nested"\n')
+        local G = build({ ['src/main.rs'] = 'fn BarriersRun() { missing::save(); wrong::save(); crate::nested::save(); }\nmod nested;',
+            ['missing/src/lib.rs'] = 'pub fn save() {}', ['library/src/lib.rs'] = 'pub fn save() {}',
+            ['src/nested.rs'] = 'pub fn save() {}', ['nested/src/lib.rs'] = 'pub fn save() {}' }, root)
+        spec.equal(edges_from(G, 'BarriersRun'), 'save@src/nested.rs')
+        local ctx = {}; spec.nil_value(cargo.crates(G, G.file_index['src/main.rs'], ctx).missing)
+    end)
+    spec.it('resolves physical and inline parent modules while respecting nested package boundaries', function()
+        local root = tmp_root .. '/cargo_parents'
+        write(root .. '/Cargo.toml', '[package]\nname="parents"\n')
+        write(root .. '/src/private/Cargo.toml', '[package]\nname="private"\n')
+        local G = build({ ['src/lib.rs'] = 'pub mod outer; mod private; pub fn base() {} fn RootRun() { private::secret(); }',
+            ['src/outer.rs'] = 'pub mod inner; pub fn helper() { super::base(); }\n'
+                .. 'pub mod inline { pub fn InlineRun() { super::helper(); } }',
+            ['src/outer/inner.rs'] = 'pub fn InnerRun() { super::helper(); super::super::base(); }',
+            ['src/private/mod.rs'] = 'pub fn secret() {}' }, root)
+        spec.equal(edges_from(G, 'helper'), 'base@src/lib.rs')
+        spec.equal(edges_from(G, 'InlineRun'), 'helper@src/outer.rs')
+        spec.equal(edges_from(G, 'InnerRun'), 'base@src/lib.rs helper@src/outer.rs')
+        spec.equal(edges_from(G, 'RootRun'), '')
+    end)
+    spec.it('rejects duplicate TOML assignments, malformed data and paths outside the indexed project', function()
+        local root = tmp_root .. '/cargo_invalid'
+        local G = build({ ['src/main.rs'] = 'fn InvalidRun() { api::save(); }' }, root)
+        for _, raw in ipairs({ '[package]\nname="root"\nname="duplicate"\n',
+            '[package]\nversion="0.1.0"\n',
+            '[package]\nname="root"\n[dependencies]\napi={path="../../outside"}\n',
+            '[package]\nname="root"\n[dependencies]\napi={path="missing"\n' }) do
+            write(root .. '/Cargo.toml', raw)
+            local Q = graph.query(G, { explain = true })
+            spec.equal(#Q.out[G.by_name.InvalidRun[1]], 0); spec.truthy(Q.incomplete)
+        end
+    end)
+    spec.it('reports configuration limits and propagates cancellation without persistent Rust evidence', function()
+        local root = tmp_root .. '/cargo_limits'
+        write(root .. '/Cargo.toml', '[package]\nname="root"\n[dependencies]\napi={path="library"}\n')
+        write(root .. '/library/Cargo.toml', '[package]\nname="api"\n')
+        local G = build({ ['src/main.rs'] = 'fn LimitedCargoRun() { api::save(); }', ['library/src/lib.rs'] = 'pub fn save() {}' }, root)
+        local limit = cargo.MAX_CONFIGS; cargo.MAX_CONFIGS = 1
+        local ok, err = pcall(function()
+            local Q = graph.query(G, { explain = true })
+            spec.equal(#Q.out[G.by_name.LimitedCargoRun[1]], 0); spec.truthy(Q.incomplete)
+        end)
+        cargo.MAX_CONFIGS = limit; assert(ok, err)
+        local control = require('codeoutline.control'); local cancelled = control.cancelled()
+        control.callback = function() error(cancelled, 0) end
+        ok, err = pcall(edges_from, G, 'LimitedCargoRun')
+        control.callback = nil; spec.equal(ok, false); spec.equal(err, cancelled)
+        local compact = ci.parse('plain.rs', 'use api::save as persist; fn run() { persist(); }', { ranges = false })
+        spec.nil_value(compact.rust_imports); spec.nil_value(compact.rust_public); spec.nil_value(compact.refs.binding)
+    end)
+    spec.it('reports module and alias-source limits without presenting partial results as complete', function()
+        local root = tmp_root .. '/cargo_source_limits'
+        write(root .. '/Cargo.toml', '[package]\nname="app"\n[dependencies]\napi={path="library"}\n')
+        write(root .. '/library/Cargo.toml', '[package]\nname="api"\n')
+        local G = build({ ['src/main.rs'] = 'use api::save as persist; fn AliasLimitRun() { persist(); }',
+            ['library/src/lib.rs'] = 'pub fn save() {}' }, root)
+        local resolver = require('codeoutline.rust_resolution')
+        local node_limit, alias_limit = resolver.MAX_NODES, resolver.MAX_ALIAS_FILES
+        local ok, err = pcall(function()
+            resolver.MAX_NODES = 0
+            local Q = graph.query(G)
+            spec.equal(#Q.out[G.by_name.AliasLimitRun[1]], 0); spec.truthy(Q.incomplete)
+            resolver.MAX_NODES, resolver.MAX_ALIAS_FILES = node_limit, 0
+            Q = graph.query(G)
+            spec.equal(#Q.inn[G.by_name.save[1]], 0); spec.truthy(Q.incomplete)
+        end)
+        resolver.MAX_NODES, resolver.MAX_ALIAS_FILES = node_limit, alias_limit; assert(ok, err)
+    end)
+end)
+
 spec.describe('query-owned Go modules', function()
     local go = require('codeoutline.go_modules')
     local function build(files, root)

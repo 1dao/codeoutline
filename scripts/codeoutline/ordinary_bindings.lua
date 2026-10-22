@@ -56,10 +56,12 @@ function M.context(G, ctx, source, options)
             csharp_usings = parsed.csharp_usings, csharp_statics = parsed.csharp_statics,
             csharp_scopes = parsed.csharp_scopes, csharp_parameters = parsed.csharp_parameters, csharp_access = parsed.csharp_access }
         data.implementation_evidence = parsed.implementation_evidence
+        data.rust_imports, data.rust_public = parsed.rust_imports, parsed.rust_public
         local weight = #raw + #parsed.refs.name * 128 + #(parsed.js_exports or {}) * 256
             + #(parsed.python_imports or {}) * 256 + #(parsed.cpp_aliases or {}) * 256
             + #(parsed.csharp_usings or {}) * 256 + #(parsed.csharp_scopes or {}) * 256
             + #(parsed.csharp_parameters or {}) * 128 + #parsed.nodes * (parsed.implementation_evidence and 256 or 0)
+            + #(parsed.rust_imports or {}) * 256 + #(parsed.rust_public or {}) * 32
         if cache[f] then
             bytes = bytes - cache[f].weight; cache[f] = nil
             for i, old in ipairs(order) do if old == f then table.remove(order, i); break end end
@@ -87,6 +89,9 @@ function M.context(G, ctx, source, options)
         local recv = rec.refs.recv[i]
         if rec.language == 'python' and (recv == 'self' or recv == 'cls') then return value end
         if rec.language == 'cpp' and recv == 'this' then return value end
+        if rec.language == 'rust' and require('codeoutline.rust_packages').owner(G, f, ctx) then
+            return require('codeoutline.rust_packages').guard(ctx, function() return evidence(C.data(f), i) or value end) or value
+        end
         if js(rec) or rec.language == 'python' or rec.language == 'csharp' or rec.language == 'cpp'
             or (rec.language == 'java' or rec.language == 'kotlin') and kind == 'member_call' then
             return evidence(C.data(f), i) or value

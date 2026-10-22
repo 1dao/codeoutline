@@ -1792,6 +1792,164 @@ void cycle() { X::missing(); }
     end)
 end)
 
+spec.describe('query-time implementation relationships', function()
+    local function build(files)
+        local records = {}
+        for path, source in pairs(files) do records[path] = ci.parse(path, source, { ordinary_bindings = true }) end
+        return graph.build({ files = records })
+    end
+    local function links(G, qualified)
+        local result, Q = {}, graph.query(G, { explain = true })
+        for i = 1, #Q.out[G.by_qualified[qualified][1]], graph.EDGE do
+            local edges = Q.out[G.by_qualified[qualified][1]]
+            if edges[i + 2] == 'implementation' then result[#result + 1] = G.nodes[edges[i]].qualified end
+        end
+        table.sort(result); return table.concat(result, ','), Q
+    end
+    spec.it('links C# interface methods to public and explicit implementations by parameter types', function()
+        local G = build({ ['contract.cs'] = 'namespace Api { public interface IStore { void Save(int value); } }',
+            ['store.cs'] = [[using Api;
+class Store : IStore { public void Save(int item) {} public void Save(string text) {} }
+class Explicit : IStore { void IStore.Save(int item) {} }
+class Wrong : IStore { private void Save(int item) {} }
+class Unrelated { public void Save(int item) {} }
+class Use { void Run(IStore value) { value.Save(1); } }
+]] })
+        local found, Q = links(G, 'Api.IStore.Save')
+        spec.equal(found, 'Explicit.Save,Store.Save')
+        spec.equal(G.nodes[Q.out[G.by_qualified['Use.Run'][1]][1]].qualified, 'Api.IStore.Save')
+        spec.equal(#Q.inn[G.by_qualified['Store.Save'][1]], graph.EDGE)
+        spec.equal(Q.inn[G.by_qualified['Store.Save'][1]][3], 'implementation')
+        spec.contains(require('codeoutline.query_report').render(Q.report, G), 'possible implementation')
+    end)
+    spec.it('links C# abstract and virtual methods without linking hidden, static or private members', function()
+        local G = build({ ['types.cs'] = [[
+abstract class Base { public abstract void Run(); public virtual void Work(int x) {} public void Plain() {} }
+class Derived : Base { public override void Run() {} public override void Work(int y) {} public new void Plain() {} }
+class Hidden : Base { public new void Work(int x) {} public static void Run() {} }
+class Closed : Base { public sealed override void Work(int x) {} }
+class Further : Closed { public void Work(int x) {} }
+]] })
+        spec.equal(links(G, 'Base.Run'), 'Derived.Run')
+        spec.equal(links(G, 'Base.Work'), 'Closed.Work,Derived.Work')
+        spec.equal(links(G, 'Base.Plain'), '')
+        spec.equal(links(G, 'Closed.Work'), '')
+    end)
+    spec.it('resolves Java imported receiver types and transitive interface implementations', function()
+        local G = build({ ['api/I.java'] = 'package api; public interface I { void save(int value); }',
+            ['impl/Store.java'] = [[package impl; import api.I;
+abstract class Base implements I { public abstract void save(int value); }
+class Store extends Base { public void save(int item) {} public void save(String item) {} }
+class Private implements I { private void save(int item) {} }
+class Static implements I { public static void save(int item) {} }
+]], ['app/Use.java'] = [[package app; import api.I;
+class Use { void run(I value) { value.save(1); } }
+]], ['other/I.java'] = 'package other; interface I { void save(int value); }' })
+        spec.equal(links(G, 'api.I.save'), 'impl.Store.save')
+        spec.equal(links(G, 'impl.Base.save'), 'impl.Store.save')
+        local Q = graph.query(G)
+        spec.equal(G.nodes[Q.out[G.by_qualified['app.Use.run'][1]][1]].qualified, 'api.I.save')
+    end)
+    spec.it('resolves Kotlin import aliases, receiver types and open overrides', function()
+        local G = build({ ['api/I.kt'] = 'package api\ninterface I { fun save(value: Int) }',
+            ['impl/Store.kt'] = [[package impl
+import api.I as Contract
+abstract class Base : Contract { abstract override fun save(value: Int) }
+class Store : Base() { override fun save(item: Int) {} }
+class Hidden : Base() { fun save(item: Int) {} }
+open class Open { open fun work(value: String) {} fun closed() {} }
+class Override : Open() { override fun work(item: String) {} fun closed() {} }
+]], ['app/Use.kt'] = [[package app
+import api.I as Contract
+fun run(value: Contract) { value.save(1) }
+]] })
+        spec.equal(links(G, 'api.I.save'), 'impl.Store.save')
+        spec.equal(links(G, 'impl.Open.work'), 'impl.Override.work')
+        spec.equal(links(G, 'impl.Open.closed'), '')
+        local Q = graph.query(G)
+        spec.equal(G.nodes[Q.out[G.by_qualified['app.run'][1]][1]].qualified, 'api.I.save')
+    end)
+    spec.it('rejects mismatched overloads, generic contracts, shadowed receivers and cross-language names', function()
+        local G = build({ ['types.java'] = [[
+interface I { void run(int n); }
+class Wrong implements I { public void run(String n) {} }
+interface Generic<T> { void work(); }
+class Concrete implements Generic<String> { public void work() {} }
+class Use { void call(I value) { { Object value = unknown; value.run(1); } value.run(1); } }
+]], ['types.cs'] = 'interface I { void run(int n); } class Store : I { public void run(int n) {} }' })
+        spec.equal(links(G, 'Generic.work'), '')
+        local Q = graph.query(G)
+        local java_i
+        for _, id in ipairs(G.by_qualified['I.run']) do if G.files[G.node_file[id]].language == 'java' then java_i = id end end
+        spec.equal(#Q.out[java_i], 0)
+        spec.equal(#Q.out[G.by_qualified['Use.call'][1]], graph.EDGE)
+    end)
+    spec.it('keeps implementation evidence query-only across reloads, edits and candidate limits', function()
+        local root = tmp_root .. '/implementation_queries'
+        write(root .. '/contract.cs', 'public interface I { void Save(int value); }')
+        write(root .. '/store.cs', 'class Store : I { public void Save(int value) {} }')
+        write(root .. '/other.cs', 'class Other : I { public void Save(int value) {} }')
+        write(root .. '/use.cs', 'class Use { void Run(I value) { value.Save(1); } }')
+        local options = { cache_path = root .. '/cache.idx', lister = 'walk' }
+        local idx, G = svc.get(root, options)
+        idx:save(); svc.forget(root); idx, G = svc.get(root, options)
+        spec.equal(links(G, 'I.Save'), 'Other.Save,Store.Save')
+        local output, info = explore.run(G, idx, 'Use.Run Store.Save', { explain = true })
+        spec.contains(output, 'I.Save -> Store.Save')
+        spec.contains(output, 'possible implementation')
+        spec.equal(info.relationships_incomplete, false)
+        local _, callers = require('codeoutline.callers').run(G, idx, 'Store.Save')
+        local names = {}; for _, caller in ipairs(callers.callers) do names[caller.name] = true end
+        spec.truthy(names['I.Save'] and names['Use.Run'])
+        for _, rec in pairs(idx.files) do spec.nil_value(rec.implementation_evidence); spec.nil_value(rec.refs.binding) end
+        local implementations = require('codeoutline.implementations')
+        local limit = implementations.MAX_TARGETS
+        implementations.MAX_TARGETS = 1
+        local ok, err = pcall(function()
+            local _, limited = links(G, 'I.Save'); spec.truthy(limited.incomplete)
+            local _, result = explore.run(G, idx, 'I.Save'); spec.truthy(result.relationships_incomplete)
+        end)
+        implementations.MAX_TARGETS = limit; assert(ok, err)
+        write(root .. '/store.cs', 'class Store : I { public void Save(string value) {} }')
+        idx, G = svc.get(root, options)
+        spec.equal(links(G, 'I.Save'), 'Other.Save')
+        local _, changed = require('codeoutline.callers').run(G, idx, 'Store.Save')
+        spec.equal(#changed.callers, 0)
+        svc.forget(root)
+    end)
+    spec.it('keeps C# project boundaries and resolves aliased parameter types in their declaring files', function()
+        local root = tmp_root .. '/implementation_projects'
+        write(root .. '/app/app.csproj', '<Project />')
+        write(root .. '/other/other.csproj', '<Project />')
+        write(root .. '/app/contract.cs', 'using Model = Data.Item; namespace Data { public class Item {} }\n'
+            .. 'namespace Api { public interface I { void Save(Model value); } }')
+        write(root .. '/app/store.cs', 'using Api; class Store : I { public void Save(Data.Item value) {} }')
+        write(root .. '/other/contract.cs', 'namespace Api { public interface I { void Save(Data.Item value); } }\n'
+            .. 'namespace Data { public class Item {} }')
+        write(root .. '/other/store.cs', 'using Api; class Other : I { public void Save(Data.Item value) {} }')
+        local _, G = svc.get(root, { cache_path = root .. '/cache.idx', lister = 'walk' })
+        local id = G.by_qualified['Api.I.Save'][1]
+        spec.equal(G.files[G.node_file[id]].path, 'app/contract.cs')
+        local Q = graph.query(G)
+        spec.equal(#Q.out[id], graph.EDGE)
+        spec.equal(G.nodes[Q.out[id][1]].qualified, 'Store.Save')
+        svc.forget(root)
+    end)
+    spec.it('respects Java import precedence, package access and cyclic inheritance barriers', function()
+        local G = build({ ['a/I.java'] = 'package a; public interface I { void run(int value); }',
+            ['b/I.java'] = 'package b; public interface I { void run(int value); }',
+            ['b/Store.java'] = 'package b; import a.*; import a.I; class Store implements I { public void run(int value) {} }',
+            ['a/Base.java'] = 'package a; public class Base { void work() {} }',
+            ['b/Derived.java'] = 'package b; import a.Base; class Derived extends Base { public void work() {} }',
+            ['cycle.java'] = 'class A extends B { void loop() {} } class B extends A { void loop() {} }' })
+        spec.equal(links(G, 'a.I.run'), 'b.Store.run')
+        spec.equal(links(G, 'b.I.run'), '')
+        spec.equal(links(G, 'a.Base.work'), '')
+        local found, Q = links(G, 'A.loop')
+        spec.equal(found, ''); spec.truthy(Q.incomplete)
+    end)
+end)
+
 spec.describe('query-owned ordinary bindings', function()
     spec.it('uses existing hints for lazy JS aliases and excludes unrelated imported bindings', function()
         local root = tmp_root .. '/lazy_js_aliases'

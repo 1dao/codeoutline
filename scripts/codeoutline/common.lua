@@ -153,6 +153,7 @@ function M.finish(r, T)
         require('codeoutline.python_bindings').collect(r, T)
         require('codeoutline.cpp_bindings').collect(r, T)
         if r.language == 'csharp' then require('codeoutline.csharp_bindings').collect(r, T) end
+        require('codeoutline.implementations').collect(r, T)
     end
     if T then require('codeoutline.indirect').collect(r, T) end
     r.collect_dispatch = nil

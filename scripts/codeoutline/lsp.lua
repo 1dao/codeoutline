@@ -81,9 +81,9 @@ end
 
 -- initializationOptions.features may disable any of these, e.g. in assistant mode
 -- next to another language server; disabled features are not advertised.
-M.FEATURES = { 'documentSymbol', 'workspaceSymbol', 'definition', 'hover', 'references', 'callHierarchy', 'completion', 'signatureHelp' }
+M.FEATURES = { 'documentSymbol', 'workspaceSymbol', 'definition', 'implementation', 'hover', 'references', 'callHierarchy', 'completion', 'signatureHelp' }
 local feature_of = { ['textDocument/documentSymbol'] = 'documentSymbol', ['workspace/symbol'] = 'workspaceSymbol',
-    ['textDocument/definition'] = 'definition', ['textDocument/hover'] = 'hover',
+    ['textDocument/definition'] = 'definition', ['textDocument/implementation'] = 'implementation', ['textDocument/hover'] = 'hover',
     ['textDocument/references'] = 'references', ['textDocument/prepareCallHierarchy'] = 'callHierarchy',
     ['callHierarchy/incomingCalls'] = 'callHierarchy', ['callHierarchy/outgoingCalls'] = 'callHierarchy',
     ['textDocument/completion'] = 'completion', ['textDocument/signatureHelp'] = 'signatureHelp' }
@@ -288,7 +288,7 @@ function M.new(config, emit, submit, cancel, stop, await_worker)
         reply(id, { capabilities = { positionEncoding = 'utf-16',
             textDocumentSync = { openClose = true, change = 1, save = { includeText = false } },
             documentSymbolProvider = f.documentSymbol or nil, workspaceSymbolProvider = f.workspaceSymbol or nil,
-            definitionProvider = f.definition or nil, hoverProvider = f.hover or nil,
+            definitionProvider = f.definition or nil, implementationProvider = f.implementation or nil, hoverProvider = f.hover or nil,
             referencesProvider = f.references or nil, callHierarchyProvider = f.callHierarchy or nil,
             completionProvider = f.completion and { triggerCharacters = { '.', ':', '>' }, resolveProvider = false } or nil,
             signatureHelpProvider = f.signatureHelp and { triggerCharacters = { '(', ',' }, retriggerCharacters = { ')' } } or nil,
@@ -477,6 +477,9 @@ function M.new(config, emit, submit, cancel, stop, await_worker)
     handlers['textDocument/definition'] = function(id, params)
         at(id, params, 'lsp_definition', array(), list)
     end
+    handlers['textDocument/implementation'] = function(id, params)
+        at(id, params, 'lsp_implementation', array(), list)
+    end
     handlers['textDocument/hover'] = function(id, params)
         at(id, params, 'lsp_hover', nil, function(value) return value or nil end)
     end
@@ -520,7 +523,7 @@ function M.new(config, emit, submit, cancel, stop, await_worker)
     end
     handlers['callHierarchy/incomingCalls'] = hierarchy('lsp_incoming')
     handlers['callHierarchy/outgoingCalls'] = hierarchy('lsp_outgoing')
-    local navigation = { ['textDocument/definition'] = true, ['textDocument/hover'] = true, ['textDocument/signatureHelp'] = true,
+    local navigation = { ['textDocument/definition'] = true, ['textDocument/implementation'] = true, ['textDocument/hover'] = true, ['textDocument/signatureHelp'] = true,
         ['textDocument/references'] = true, ['textDocument/prepareCallHierarchy'] = true,
         ['callHierarchy/incomingCalls'] = true, ['callHierarchy/outgoingCalls'] = true }
     local function dispatch(msg)

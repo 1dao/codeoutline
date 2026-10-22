@@ -890,6 +890,49 @@ int luaopen_native_test(lua_State *L) { luaL_setfuncs(L, methods, 0); luaL_newli
             session = 'cpp-ambiguity', position = doc:position(assert(source:find('q.save', 1, true)) + 1) })
         spec.equal(#outside.items, 0)
     end)
+    spec.it('finds C#, Java and Kotlin method implementations with imported receivers and draft edits', function()
+        local cases = {
+            { 'Contract.cs', 'namespace ImplementationCs { public interface I { void Save(int value); } }',
+                'Concrete.cs', 'using ImplementationCs; class ImplementationStore : I { public void Save(int item) {} }',
+                'UseImplementation.cs', 'using ImplementationCs; class ImplementationUse { void Run(I value) { value.Save(1); } }', 'Save' },
+            { 'Contract.java', 'package implementationjava; public interface I { void save(int value); }',
+                'Concrete.java', 'package implementationjava; class Store implements I { public void save(int item) {} }',
+                'UseImplementation.java', 'package implementationapp; import implementationjava.I; class Use { void run(I value) { value.save(1); } }', 'save' },
+            { 'Contract.kt', 'package implementationkt\ninterface I { fun save(value: Int) }',
+                'Concrete.kt', 'package implementationkt\nclass Store : I { override fun save(item: Int) {} }',
+                'UseImplementation.kt', 'package implementationapp\nimport implementationkt.I as Contract\nfun run(value: Contract) { value.save(1) }', 'save' },
+        }
+        for _, case in ipairs(cases) do
+            nav_write(case[1], case[2]); nav_write(case[3], case[4]); nav_write(case[5], case[6])
+        end
+        local options = { cache_path = nav_root .. '/cache.idx', lister = 'walk' }
+        service.refresh(nav_root, options)
+        local idx = service.resident(nav_root); idx:save(); service.forget(nav_root); service.refresh(nav_root, options)
+        for _, case in ipairs(cases) do
+            local doc = docs.read(nav_root .. '/' .. case[5])
+            local req = { method = 'lsp_implementation', session = 'implementations', uri = doc.uri,
+                position = doc:position(assert(case[6]:find('value.' .. case[7], 1, true)) + 5) }
+            local result = nav(req)
+            spec.equal(#result, 1, case[1]); spec.equal(result[1].uri, nav_uri(case[3]))
+            req.method = 'lsp_definition'
+            local definition = nav(req)
+            spec.equal(#definition, 1); spec.equal(definition[1].uri, nav_uri(case[1]))
+            req.method = 'lsp_implementation'
+            local contract = docs.read(nav_root .. '/' .. case[1])
+            local from_decl = nav({ method = 'lsp_implementation', session = req.session, uri = contract.uri,
+                position = contract:position(assert(case[2]:find(case[7], 1, true))) })
+            spec.equal(#from_decl, 1)
+        end
+        local uri = nav_uri('Concrete.cs')
+        navigation.sync({ session = 'implementations', open = { [uri] = 1 }, changed = {
+            [uri] = { version = 1, language = 'csharp', source = cases[1][4]:gsub('int item', 'string item') } } })
+        local doc = docs.read(nav_root .. '/Contract.cs')
+        local changed = nav({ method = 'lsp_implementation', session = 'implementations', uri = doc.uri,
+            position = doc:position(assert(cases[1][2]:find('Save', 1, true))) })
+        spec.equal(#changed, 0)
+        navigation.close('implementations')
+        for _, rec in pairs(service.resident(nav_root).files) do spec.nil_value(rec.implementation_evidence) end
+    end)
     spec.it('shares C# aliases, namespaces and static usings across completion and navigation', function()
         local library = 'namespace CSharpFeature {\n'
             .. 'public class StoreA { public void Save() {} public void OnlyA() {} public static void Flush() {} }\n'
@@ -2342,6 +2385,18 @@ local function comp_session(extra)
 end
 
 spec.describe('LSP completion requests', function()
+    spec.it('advertises method implementations and honours its feature switch', function()
+        local session, output = comp_session()
+        spec.truthy(output[1].result.capabilities.implementationProvider)
+        session:accept(xutils.json_pack({ jsonrpc = '2.0', id = 2, method = 'textDocument/implementation', params = {
+            textDocument = { uri = docs.uri(comp_root .. '/box.cpp') }, position = { line = 0, character = 0 } } }))
+        spec.equal(output.request.method, 'lsp_implementation')
+        local disabled, messages = comp_session({ features = { implementation = false } })
+        spec.nil_value(messages[1].result.capabilities.implementationProvider)
+        disabled:accept(xutils.json_pack({ jsonrpc = '2.0', id = 2, method = 'textDocument/implementation', params = {
+            textDocument = { uri = docs.uri(comp_root .. '/box.cpp') }, position = { line = 0, character = 0 } } }))
+        spec.equal(messages[#messages].error.code, -32601)
+    end)
     spec.it('advertises and dispatches signature help with an independent feature switch', function()
         local session, output = comp_session()
         local provider = output[1].result.capabilities.signatureHelpProvider

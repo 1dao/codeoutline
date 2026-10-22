@@ -96,6 +96,8 @@ function M.run(symbols, idx, query, opts)
     if #result.targets > 1 then lines[#lines + 1] = 'Multiple definitions matched; results cover the listed targets.' end
     if result.node_limit_reached then lines[#lines + 1] = 'Node limit reached; targets or callers were omitted.' end
     if result.depth_limit_reached then lines[#lines + 1] = 'Depth limit reached; callers beyond this depth were not checked.' end
+    result.relationships_incomplete = Q.incomplete or false
+    if result.relationships_incomplete then lines[#lines + 1] = 'Relationship candidate limit reached; some potential relationships were omitted.' end
     for _, target in ipairs(result.targets) do
         lines[#lines + 1] = string.format('Target: %s (%s:%d)', target.name, target.file, target.line)
     end
@@ -108,7 +110,7 @@ function M.run(symbols, idx, query, opts)
         lines[#lines + 1] = string.format('Depth %d: %s', entry.depth, table.concat(path, ' -> '))
     end
     if #result.files > 0 then lines[#lines + 1] = 'Affected caller files:\n' .. table.concat(result.files, '\n') end
-    local output, cut = text.limit(table.concat(lines, '\n'), budget, result.node_limit_reached)
+    local output, cut = text.limit(table.concat(lines, '\n'), budget, result.node_limit_reached or result.relationships_incomplete)
     result.truncated, result.query_stats = cut, Q.stats
     return output, result
 end

@@ -458,6 +458,11 @@ function Completion:types(name, f, scope, at)
             at or (f == self.f and self.offset) or 0, self.V.js_context, { scope = scope })
         return ids
     end
+    if self.V.files[f].language == 'java' or self.V.files[f].language == 'kotlin' then
+        local owner = self.fn and self.rec.nodes[self.fn] or self.owner and self.rec.nodes[self.owner]
+        scope = scope or owner and owner.qualified
+        return require('codeoutline.implementations').types(self.V, f, name, self.V.js_context, scope, at)
+    end
     if self.V.files[f].language == 'cpp' then
         if not scope and f == self.f then
             local owner = self.fn and self.rec.nodes[self.fn] or self.owner and self.rec.nodes[self.owner]

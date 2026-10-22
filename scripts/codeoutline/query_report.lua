@@ -2,7 +2,7 @@
 local M = { MAX_PATH_BREAKPOINTS = 4 }
 
 function M.new(limit)
-    local report = { entries = {}, truncated = false, scope = 'indexed references and configured dispatch rules' }
+    local report = { entries = {}, truncated = false, scope = 'indexed references, possible implementations and configured dispatch rules' }
     local seen = {}
     function report:add(entry)
         local key = table.concat({ entry.source or '', entry.target or '', entry.line or '',
@@ -107,7 +107,7 @@ end
 
 function M.render(report, G)
     local lines = { '\n## Relationship evidence / unresolved references',
-        'Scope: indexed references and configured dispatch rules; unresolved does not mean no runtime call.' }
+        'Scope: indexed references, possible implementations and configured dispatch rules; unresolved does not mean no runtime call.' }
     for _, e in ipairs(report.entries) do
         local source = G.nodes[e.source]
         local path = source and G.files[G.node_file[e.source]].path or '?'

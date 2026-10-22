@@ -342,6 +342,10 @@ local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired, accept,
         strategy = 'c# binding'
         exact = require('codeoutline.csharp_bindings').resolve(G, f, src_id, name, kind, recv, evidence, js_context)
     end
+    if exact == nil and (G.files[f].language == 'java' or G.files[f].language == 'kotlin') then
+        strategy = 'declared JVM receiver'
+        exact = require('codeoutline.implementations').resolve(G, f, src_id, name, evidence, js_context)
+    end
     if exact == nil then
         strategy = 'lua binding'
         exact = lua_bindings.resolve(G, f, name, evidence, js_context and js_context.lua, recv)
@@ -585,6 +589,8 @@ function M.query(symbols, opts)
     Q.report = report
     local indirect = require('codeoutline.indirect').query(symbols, opts.dispatch_rules, report)
     local static_dispatch = require('codeoutline.static_dispatch').query(symbols, report)
+    local implementations = require('codeoutline.implementations').context(symbols, js_context, report)
+    Q.stats.implementations = implementations.stats
     local function deps(f)
         local entry = dependencies[f]
         if not entry then
@@ -631,6 +637,12 @@ function M.query(symbols, opts)
             references[f] = grouped
         end
         local edges = {}
+        for _, dst in ipairs(implementations.outgoing(id)) do
+            edges[#edges + 1] = dst
+            edges[#edges + 1] = symbols.nodes[id].line
+            edges[#edges + 1] = 'implementation'
+        end
+        if implementations.incomplete then Q.incomplete = true end
         for _, edge in ipairs(indirect.outgoing(id)) do
             edges[#edges + 1] = edge.target
             edges[#edges + 1] = edge.line
@@ -663,7 +675,13 @@ function M.query(symbols, opts)
         end
         if not found then return end
         local incoming = {}
-        for id in pairs(wanted) do incoming[id] = {} end
+        for id in pairs(wanted) do
+            incoming[id] = {}
+            for _, source in ipairs(implementations.incoming(id)) do
+                push3(incoming, id, source, symbols.nodes[source].line, 'implementation')
+            end
+        end
+        if implementations.incomplete then Q.incomplete = true end
         local indirect_incoming = indirect.incoming(wanted)
         for src, edges in pairs(static_dispatch.incoming(wanted)) do
             for _, edge in ipairs(edges) do push3(incoming, edge.target, src, edge.line, edge.kind) end

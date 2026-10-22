@@ -1010,6 +1010,19 @@ end
 
 local handlers = {}
 
+function handlers.lsp_implementation(req)
+    local V, _, _, targets = at(req)
+    if not V then return {} end
+    local relationships = require('codeoutline.implementations').context(V, V.js_context)
+    local result, seen = {}, {}
+    for _, target in ipairs(targets) do
+        for _, id in ipairs(relationships.outgoing(target)) do
+            if not seen[id] then seen[id] = true; result[#result + 1] = (location(V, id)) end
+        end
+    end
+    return result, relationships.incomplete
+end
+
 function handlers.lsp_definition(req)
     local V, doc, c, targets, f, offset = at(req)
     if not V then return false end

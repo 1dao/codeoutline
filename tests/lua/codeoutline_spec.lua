@@ -3359,6 +3359,138 @@ spec.describe('unified project rules', function()
     end)
 end)
 
+spec.describe('automatic Node EventEmitter delivery', function()
+    local function build(files)
+        local records = {}; for path, source in pairs(files) do records[path] = ci.parse(path, source, { ordinary_bindings = true }) end
+        return graph.build({ files = records })
+    end
+    local function events(G, name)
+        local Q, result = graph.query(G, { explain = true }), {}
+        local edges = Q.out[G.by_qualified[name][1]]
+        for i = 1, #edges, graph.EDGE do if edges[i + 2] == 'automatic:event' then result[#result + 1] = G.nodes[edges[i]].qualified end end
+        table.sort(result); return table.concat(result, ','), Q
+    end
+    spec.it('pairs literal events by local object identity and preserves registration evidence', function()
+        local G = build({ ['events.ts'] = [[import { EventEmitter as E } from 'node:events';
+const first = new E(); const second = new E();
+const ready = () => {}; function other() {} function wrong() {} const alias = other;
+first.on('ready', ready); second.on('ready', wrong); first.once('other', alias);
+function publish() { first.emit('ready'); first.emit('other'); }
+function separate() { second.emit('ready'); }
+]] })
+        local found, Q = events(G, 'publish'); spec.equal(found, 'other,ready')
+        spec.equal(events(G, 'separate'), 'wrong')
+        spec.contains(require('codeoutline.query_report').render(Q.report, G), 'same local Node EventEmitter')
+        local incoming = Q.inn[G.by_qualified.ready[1]]; local seen = false
+        for i = 1, #incoming, graph.EDGE do if incoming[i + 2] == 'automatic:event' then spec.equal(G.nodes[incoming[i]].qualified, 'publish'); seen = true end end
+        spec.truthy(seen)
+    end)
+    spec.it('resolves imported handlers and default or namespace EventEmitter constructors', function()
+        local G = build({ ['handler.js'] = 'export function delivered() {}',
+            ['barrel.js'] = "export { delivered as handler } from './handler';",
+            ['default.js'] = [[import E from 'events'; import { handler as listener } from './barrel';
+const bus = new E(); bus.addListener('go', listener); function runDefault() { bus.emit('go', 1); }
+]], ['namespace.js'] = [[import * as events from 'node:events'; import { delivered } from './handler';
+const bus = new events.EventEmitter(); bus.on('go', delivered); function runNamespace() { bus.emit('go'); }
+]] })
+        spec.equal(events(G, 'runDefault'), 'delivered'); spec.equal(events(G, 'runNamespace'), 'delivered')
+        local Q = graph.query(G); local incoming = Q.inn[G.by_qualified.delivered[1]]; local hits = {}
+        for i = 1, #incoming, graph.EDGE do if incoming[i + 2] == 'automatic:event' then hits[G.nodes[incoming[i]].name] = true end end
+        spec.truthy(hits.runDefault and hits.runNamespace)
+    end)
+    spec.it('blocks receiver shadows and unknown anonymous function scopes', function()
+        local source = [[import { EventEmitter } from 'events'; const bus = new EventEmitter();
+function handler() {} bus.on('go', handler);
+function shadow(bus) { bus.emit('go'); }
+function outer() { { const bus = unknown; bus.emit('go'); } }
+function publish() { bus.emit('go'); }
+]]
+        local G = build({ ['events.js'] = source })
+        spec.equal(events(G, 'shadow'), ''); spec.equal(events(G, 'outer'), ''); spec.equal(events(G, 'publish'), 'handler')
+        G = build({ ['events.js'] = source .. "some((bus) => bus.emit('go'));" })
+        spec.equal(events(G, 'publish'), '')
+    end)
+    spec.it('rejects lookalike emitters, local constructor shadows and dynamic event keys', function()
+        for _, setup in ipairs({ "class EventEmitter {}", "import { EventEmitter } from './custom';",
+            "import { EventEmitter } from 'events'; class EventEmitter {}" }) do
+            local G = build({ ['events.js'] = setup .. "const bus = new EventEmitter(); function handler() {} bus.on('go', handler); function run() { bus.emit('go'); }" })
+            spec.equal(events(G, 'run'), '')
+        end
+        local G = build({ ['events.js'] = [[import { EventEmitter } from 'events'; const bus = new EventEmitter();
+function handler() {} bus.on('go', handler); function run() { bus.emit(key); }
+]] }); spec.equal(events(G, 'run'), '')
+        for _, continuation in ipairs({ '.other', '[0]', '()' }) do
+            G = build({ ['events.js'] = "import E from 'events'; const bus = new E()\n" .. continuation .. ";\n"
+                .. "function handler() {} bus.on('go', handler); function run() { bus.emit('go'); }" })
+            spec.equal(events(G, 'run'), '', continuation)
+        end
+    end)
+    spec.it('poisons receiver reassignment, aliases, escapes, member writes and listener removal', function()
+        for _, mutation in ipairs({ 'bus = other;', 'const copy = bus;', 'unknown(bus);', "bus.off('go', handler);",
+            "bus.removeAllListeners();", "bus.on('other', handler).removeAllListeners();", "unknown(bus.on('other', handler));",
+            "const escaped = bus.on('other', handler); unknown(escaped);", 'bus.emit = other;', '({ bus } = other);' }) do
+            local G = build({ ['events.js'] = "import { EventEmitter } from 'events'; const bus = new EventEmitter();\n"
+                .. "function handler() {} bus.on('go', handler); " .. mutation .. " function run() { bus.emit('go'); }" })
+            spec.equal(events(G, 'run'), '', mutation)
+        end
+    end)
+    spec.it('keeps local registration order and rejects cross-function setup assumptions', function()
+        local G = build({ ['events.js'] = [[import { EventEmitter } from 'events';
+function handler() {}
+function ordered() { const bus = new EventEmitter(); bus.on('go', handler); bus.emit('go'); }
+function before() { const bus = new EventEmitter(); bus.emit('go'); bus.on('go', handler); }
+const shared = new EventEmitter();
+function setup() { shared.on('go', handler); }
+function publish() { shared.emit('go'); }
+]] })
+        spec.equal(events(G, 'ordered'), 'handler'); spec.equal(events(G, 'before'), ''); spec.equal(events(G, 'publish'), '')
+    end)
+    spec.it('blocks exported receivers and class shadows of imported handler names', function()
+        local G = build({ ['handler.js'] = 'export function handler() {}', ['events.js'] = [[import { EventEmitter } from 'events';
+import { handler } from './handler'; const bus = new EventEmitter();
+function run() { class handler {} bus.on('go', handler); bus.emit('go'); }
+]] }); spec.equal(events(G, 'run'), '')
+        G = build({ ['events.js'] = [[import { EventEmitter } from 'events'; export const bus = new EventEmitter();
+function handler() {} bus.on('go', handler); function run() { bus.emit('go'); }
+]] }); spec.equal(events(G, 'run'), '')
+    end)
+    spec.it('reuses query evidence across compact reloads, import aliases, edits and callers', function()
+        local root = tmp_root .. '/automatic_events'
+        local source = "import { EventEmitter } from 'node:events'; import { handled } from './handler';\n"
+            .. "const bus = new EventEmitter(); bus.on('ready', handled); export function eventPublish() { bus.emit('ready'); }"
+        write(root .. '/handler.ts', 'export function handled() {}'); write(root .. '/publisher.ts', source)
+        local options = { cache_path = root .. '/cache.idx', lister = 'walk' }
+        local idx, G = svc.get(root, options); idx:save(); svc.forget(root); idx, G = svc.get(root, options)
+        spec.equal(events(G, 'eventPublish'), 'handled')
+        local output, info = explore.run(G, idx, 'eventPublish handled', { explain = true })
+        spec.truthy(#info.flows > 0); spec.contains(output, 'possible event delivery'); spec.equal(info.relationships_incomplete, false)
+        local _, incoming = require('codeoutline.callers').run(G, idx, 'handled')
+        local found = false; for _, caller in ipairs(incoming.callers) do if caller.name == 'eventPublish' then found = true end end
+        spec.truthy(found)
+        for _, rec in pairs(idx.files) do spec.nil_value(rec.automatic_events); spec.nil_value(rec.ordinary_bindings) end
+        write(root .. '/publisher.ts', source:gsub("bus.emit%('ready'%)", "bus.emit('other')"))
+        idx, G = svc.get(root, options); spec.equal(events(G, 'eventPublish'), '')
+        svc.forget(root)
+    end)
+    spec.it('reports automatic event candidate and target limits', function()
+        local G = build({ ['events.js'] = [[import { EventEmitter } from 'events'; const bus = new EventEmitter();
+function one() {} function two() {} bus.on('go', one); bus.on('go', two); function run() { bus.emit('go'); }
+]] })
+        local module = require('codeoutline.automatic_events'); local previous = module.MAX_TARGETS; module.MAX_TARGETS = 1
+        local ok, err = pcall(function() local _, Q = events(G, 'run'); spec.truthy(Q.incomplete) end)
+        module.MAX_TARGETS = previous; assert(ok, err)
+        previous = module.MAX_FILES; module.MAX_FILES = 0
+        ok, err = pcall(function() local found, Q = events(G, 'run'); spec.equal(found, ''); spec.truthy(Q.incomplete) end)
+        module.MAX_FILES = previous; assert(ok, err)
+        previous = module.MAX_SITES; module.MAX_SITES = 1
+        ok, err = pcall(function()
+            local limited = build({ ['events.js'] = "import E from 'events'; const bus = new E(); function handler() {} bus.on('x', handler); function run() { bus.emit('x'); }" })
+            local found, Q = events(limited, 'run'); spec.equal(found, ''); spec.truthy(Q.incomplete)
+        end)
+        module.MAX_SITES = previous; assert(ok, err)
+    end)
+end)
+
 spec.describe('configured indirect dispatch', function()
     spec.it('does not turn identity module imports into broad dispatch hints', function()
         local rec = ci.parse('hint.lua', 'local skynet = require "skynet"\nfunction run() skynet.start(function() end) end')

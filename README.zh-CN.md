@@ -124,6 +124,12 @@ tsconfig 路径复用现有模块定位；参数及返回类型须显式标注�
 访问器、箭头函数字段、声明合并、嵌套类型、返回类型推断和结构化实现。类的普通重载声明不作为
 抽象契约；这不是 TypeScript 可赋值性检查。证据按查询生成，索引不保存额外实现关系。
 
+JS/TS 还可无需配置地识别有限的 Node EventEmitter 模式：显式导入内置构造器、当前文件的
+未导出 const 实例、字面量事件名和具名处理器。Explore/callers 用 `automatic:event` 标注可能的
+事件投递，按实例隔离；遇到对象转交、重赋值、移除监听器、未知作用域或动态事件名时保守跳过。
+详细证据只在查询时生成，不写入索引。支持范围、数量限制及排除情况见
+[间接调用文档](docs/INDIRECT-CALLS.md#automatic-node-eventemitter-deliveries)。
+
 ## 命令行
 
 ```sh

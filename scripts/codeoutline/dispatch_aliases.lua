@@ -468,7 +468,12 @@ function M.prepare(r, T)
         end
         return expand(target, b.token - 1, depth + 1)
     end
-    return function(v, at) return expand(v, at, 0) end
+    -- Query collectors can identify an exact local object without pretending
+    -- its initializer is a function/literal alias. Do not expose binding tables.
+    return function(v, at) return expand(v, at, 0) end, function(n, at)
+        local b = binding(n, at)
+        if b and not b.invalid and b.token <= at then return b.token, b.scope, b.finish end
+    end
 end
 
 return M

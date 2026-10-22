@@ -175,6 +175,11 @@ evidence is generated per query and excluded from the index. Candidate, result a
 limits report incomplete results. Generic substitution, inherited-only interface implementations,
 and default-interface conflict resolution are not modeled.
 
+JS/TS also infer limited Node EventEmitter deliveries from literal registrations and emissions
+on the same local object. These query-owned `automatic:event` edges feed explore/callers without
+configuration; see [Indirect calls](docs/INDIRECT-CALLS.md#automatic-node-eventemitter-deliveries)
+for import, scope, mutation and candidate limits.
+
 TypeScript interface and explicitly abstract methods use the same bounded query path. Only
 explicit `implements`/`extends` relationships between ordinary top-level named types are linked;
 named/default/namespace imports, re-exports, workspace packages and tsconfig paths reuse module

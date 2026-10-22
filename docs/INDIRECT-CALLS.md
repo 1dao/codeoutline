@@ -89,6 +89,48 @@ Embeddings without a project root can parse with `{ static_dispatch = true }`
 to supply the transient data explicitly. LSP definition navigation is unchanged;
 this addition feeds the shared graph used by exploration and caller queries.
 
+## Automatic Node EventEmitter deliveries
+
+JS/TS exploration and recursive callers recognize this finite pattern without configuration:
+
+```typescript
+import { EventEmitter } from 'node:events';
+const bus = new EventEmitter();
+function handled() {}
+bus.on('ready', handled);
+export function publish() { bus.emit('ready'); }
+```
+
+The `automatic:event` edge from `publish` to `handled` means a possible delivery through
+the same local emitter and literal event name. Evidence includes the registration location.
+Named, default and namespace ES imports from `events` or `node:events` identify the builtin
+constructor. The object must be an unexported, single-name `const` initialized with a zero-argument
+constructor in this file. Registrations accept `on`, `once` and `addListener`, with a named
+function, variable-bound arrow function, lexical function alias or resolvable imported export.
+Imported handlers reuse module/re-export/workspace resolution; emitter objects do not cross files.
+
+Registration and emission must be standalone calls. Emissions require an indexed callable source;
+file-scope emissions are not synthesized as file nodes. Registration must occur at module scope
+or earlier in the same enclosing callable as the emission.
+Separate setup functions are not assumed to have run. Parameter/block shadows, receiver or member
+writes, object aliases/exports/escapes, listener removal, chained calls and dynamic/escaped event
+keys conservatively block that object. Files containing anonymous function/arrow scopes without
+parser nodes are skipped, since their parameters could shadow a receiver. Class/type name
+collisions also block uncertain constructor/handler bindings. Custom emitters, subclasses,
+CommonJS constructors, inline anonymous handlers, symbol events, lifecycle/once-consumption
+analysis and listener-array traversal are outside this pass. Ordinary definition navigation is
+unchanged. Configured event rules remain available for project-specific conventions.
+
+No new persistent candidate index is created: existing import and dispatch-call summaries select
+files, and incoming queries reuse the handler's reverse import closure. Detailed object, scope,
+registration and callback evidence is parsed only on demand through the ordinary source cache
+(16 files/about 8 MiB), with source checksum and node/reference identity validation. Query results
+are bounded to 128 candidate files, 512 recognized sites or deliveries per file, and 64 returned
+deliveries per file scan. Hitting a limit reports incomplete relationships. Source tokens and
+`automatic_events` evidence are excluded from saved/resident records.
+Embeddings without a project root can request transient evidence with
+`parse.parse(path, source, { ordinary_bindings = true })`.
+
 ## Call-path breakpoint reports
 
 Explore also reports **Call-path breakpoints** from unresolved evidence already

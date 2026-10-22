@@ -605,6 +605,8 @@ function M.query(symbols, opts)
     local static_dispatch = require('codeoutline.static_dispatch').query(symbols, report)
     local implementations = require('codeoutline.implementations').context(symbols, js_context, report)
     Q.stats.implementations = implementations.stats
+    local events = require('codeoutline.automatic_events').context(symbols, js_context, report)
+    Q.stats.events = events.stats
     local function deps(f)
         local entry = dependencies[f]
         if not entry then
@@ -668,6 +670,12 @@ function M.query(symbols, opts)
             edges[#edges + 1] = edge.line
             edges[#edges + 1] = edge.kind
         end
+        for _, edge in ipairs(events.outgoing(id)) do
+            edges[#edges + 1] = edge.target
+            edges[#edges + 1] = edge.line
+            edges[#edges + 1] = edge.kind
+        end
+        if events.incomplete then Q.incomplete = true end
         for _, i in ipairs(grouped[id] or {}) do
             control.check()
             for _, dst in ipairs(targets(f, i, true) or {}) do
@@ -698,6 +706,10 @@ function M.query(symbols, opts)
         end
         if implementations.incomplete then Q.incomplete = true end
         local indirect_incoming = indirect.incoming(wanted)
+        for src, edges in pairs(events.incoming(wanted)) do
+            for _, edge in ipairs(edges) do push3(incoming, edge.target, src, edge.line, edge.kind) end
+        end
+        if events.incomplete then Q.incomplete = true end
         for src, edges in pairs(static_dispatch.incoming(wanted)) do
             for _, edge in ipairs(edges) do push3(incoming, edge.target, src, edge.line, edge.kind) end
         end

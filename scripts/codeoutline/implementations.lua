@@ -55,6 +55,7 @@ local function parameters(T, first, last, language)
 end
 
 function M.collect(r, T)
+    if r.language == 'cpp' then return require('codeoutline.cpp_implementations').collect(r, T) end
     if not languages[r.language] then return end
     local evidence = {}
     for index, n in ipairs(r.nodes) do
@@ -227,6 +228,11 @@ end
 
 function M.context(G, ctx, report)
     local C = { incomplete = false, stats = { candidates = 0, links = 0, hierarchy = 0 } }
+    local cpp
+    local function cpp_context()
+        if not cpp then cpp = require('codeoutline.cpp_implementations').context(G, ctx, report, M, C) end
+        return cpp
+    end
     local details, ancestors, outgoing, incoming = {}, {}, {}, {}
     local function info(id)
         if details[id] then return details[id] end
@@ -321,6 +327,7 @@ function M.context(G, ctx, report)
         return a ~= nil and a == b
     end
     function C.outgoing(id)
+        if G.files[G.node_file[id]].language == 'cpp' and G.nodes[id].kind == 'method' then return cpp_context().outgoing(id) end
         if outgoing[id] then return outgoing[id] end
         local result = {}
         if contract(id) then
@@ -342,6 +349,7 @@ function M.context(G, ctx, report)
         outgoing[id] = result; return result
     end
     function C.incoming(id)
+        if G.files[G.node_file[id]].language == 'cpp' and G.nodes[id].kind == 'method' then return cpp_context().incoming(id) end
         if incoming[id] then return incoming[id] end
         local result, cls = {}, owner(G, id)
         if cls and languages[G.files[G.node_file[id]].language] then

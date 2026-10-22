@@ -1950,6 +1950,159 @@ class Use { void call(I value) { { Object value = unknown; value.run(1); } value
     end)
 end)
 
+spec.describe('query-time C++ virtual implementations', function()
+    local function build(files)
+        local records = {}
+        for path, source in pairs(files) do records[path] = ci.parse(path, source, { ordinary_bindings = true }) end
+        return graph.build({ files = records })
+    end
+    local function targets(G, qualified, pick)
+        local id = G.by_qualified[qualified][pick or 1]
+        local Q, result = graph.query(G, { explain = true }), {}
+        local edges = Q.out[id]
+        for i = 1, #edges, graph.EDGE do
+            if edges[i + 2] == 'implementation' then
+                result[#result + 1] = G.nodes[edges[i]].qualified .. '@' .. G.files[G.node_file[edges[i]]].path
+            end
+        end
+        table.sort(result); return table.concat(result, ','), Q
+    end
+    spec.it('links private pure virtual declarations to transitive unmarked overrides and out-of-line definitions', function()
+        local G = build({ ['api.hpp'] = [[namespace Api {
+class Base { virtual void save(int value) const & = 0; public: virtual void plain() {} };
+class Middle : public Base { public: void save(int item) const & = 0; };
+class Store : public Middle { public: void save(int item) const & override; void plain() {} };
+}]], ['implementation.cpp'] = '#include "api.hpp"\nvoid Api::Store::save(int item) const & {}',
+            ['use.cpp'] = '#include "api.hpp"\nvoid Run(Api::Base *value) { value->save(1); }' })
+        spec.equal(targets(G, 'Api::Base::save'), 'Api::Store::save@implementation.cpp')
+        spec.equal(targets(G, 'Api::Middle::save'), 'Api::Store::save@implementation.cpp')
+        spec.equal(targets(G, 'Api::Base::plain'), 'Api::Store::plain@api.hpp')
+        local Q = graph.query(G)
+        local found = {}
+        for _, id in ipairs(G.by_qualified['Api::Store::save']) do
+            for i = 1, #Q.inn[id], graph.EDGE do found[G.nodes[Q.inn[id][i]].qualified] = true end
+        end
+        spec.truthy(found['Api::Base::save'] and found['Api::Middle::save'])
+        spec.equal(G.nodes[Q.out[G.by_name.Run[1]][1]].qualified, 'Api::Base::save')
+    end)
+    spec.it('distinguishes overloads, pointee cv, member cv and ref qualifiers and return types', function()
+        local G = build({ ['types.cpp'] = [[
+struct Item {};
+struct Base { virtual int work(const Item *item, unsigned int count) const & = 0; };
+struct Good : Base { int work(Item const *item, const unsigned int count) const & {} };
+struct WrongPointee : Base { int work(Item *item, unsigned int count) const & {} };
+struct WrongConst : Base { int work(const Item *item, unsigned int count) & {} };
+struct WrongRef : Base { int work(const Item *item, unsigned int count) const && {} };
+struct WrongReturn : Base { long work(const Item *item, unsigned int count) const & {} };
+struct WrongArity : Base { int work(const Item *item) const & {} };
+struct Other { int work(const Item *item, unsigned int count) const & {} };
+]] })
+        spec.equal(targets(G, 'Base::work'), 'Good::work@types.cpp')
+    end)
+    spec.it('respects final methods and classes, ordinary nonvirtual methods and intermediate overrides', function()
+        local G = build({ ['types.cpp'] = [[
+struct Base { virtual void run() {} void plain() {} };
+struct Middle : Base { void run() {} void plain() {} };
+struct Closed : Middle { void run() final {} };
+struct Invalid : Closed { void run() {} };
+struct Leaf final : Base { void run() {} };
+struct InvalidLeaf : Leaf { void run() {} };
+]] })
+        spec.equal(targets(G, 'Base::run'), 'Closed::run@types.cpp,Leaf::run@types.cpp,Middle::run@types.cpp')
+        spec.equal(targets(G, 'Middle::run'), 'Closed::run@types.cpp')
+        spec.equal(targets(G, 'Closed::run'), '')
+        spec.equal(targets(G, 'Base::plain'), '')
+    end)
+    spec.it('reuses namespace aliases, using imports and indirect includes without crossing duplicate type boundaries', function()
+        local G = build({ ['one/api.hpp'] = 'namespace N { struct Item {}; struct Base { virtual void save(const Item&) = 0; }; }',
+            ['one/bridge.hpp'] = '#include "api.hpp"\nnamespace A = N; using N::Item; using Contract = A::Base;',
+            ['one/store.cpp'] = '#include "bridge.hpp"\nstruct Store : Contract { void save(const Item&) {} };',
+            ['two/api.hpp'] = 'namespace N { struct Item {}; struct Base { virtual void save(const Item&) = 0; }; }',
+            ['two/store.cpp'] = '#include "api.hpp"\nstruct Other : N::Base { void save(const N::Item&) {} };' })
+        for _, id in ipairs(G.by_qualified['N::Base::save']) do
+            local expected = G.files[G.node_file[id]].path == 'one/api.hpp' and 'Store::save@one/store.cpp' or 'Other::save@two/store.cpp'
+            local pick = G.by_qualified['N::Base::save'][1] == id and 1 or 2
+            spec.equal(targets(G, 'N::Base::save', pick), expected)
+        end
+    end)
+    spec.it('treats templates, multiple and virtual inheritance, function pointers and decorated aliases as barriers', function()
+        local G = build({ ['barriers.cpp'] = [[
+struct Item {}; using Ptr = Item*;
+struct Base { virtual void run() = 0; virtual void ptr(Item*) = 0; virtual void cb(void (*fn)(int)) = 0; };
+struct Extra {};
+struct Multiple : Base, Extra { void run() {} };
+struct Virtual : virtual Base { void run() {} };
+template<class T> struct Generic : Base { void run() {} };
+struct Alias : Base { void ptr(Ptr) {} };
+struct Callback : Base { void cb(void (*fn)(int)) {} };
+struct Ordinary : Base { template<class T> void run() {} };
+template<class T> struct Outer { struct Nested : Base { void run() {} }; };
+]] })
+        spec.equal(targets(G, 'Base::run'), '')
+        spec.equal(targets(G, 'Base::ptr'), '')
+        spec.equal(targets(G, 'Base::cb'), '')
+    end)
+    spec.it('keeps virtual evidence query-only after reloads and edits and marks candidate limits', function()
+        local root = tmp_root .. '/cpp_implementations'
+        write(root .. '/api.hpp', 'struct Base { virtual void Save(int) = 0; };\nstruct Store : Base { void Save(int); };')
+        write(root .. '/body.cpp', '#include "api.hpp"\nvoid Store::Save(int item) {}')
+        write(root .. '/use.cpp', '#include "api.hpp"\nvoid Run(Base *value) { value->Save(1); }')
+        local options = { cache_path = root .. '/cache.idx', lister = 'walk' }
+        local idx, G = svc.get(root, options)
+        idx:save(); svc.forget(root); idx, G = svc.get(root, options)
+        spec.equal(targets(G, 'Base::Save'), 'Store::Save@body.cpp')
+        local output, result = explore.run(G, idx, 'Run Store::Save', { explain = true })
+        spec.contains(output, 'possible implementation')
+        spec.equal(result.relationships_incomplete, false)
+        local _, callers = require('codeoutline.callers').run(G, idx, 'Store::Save')
+        local names = {}; for _, caller in ipairs(callers.callers) do names[caller.name] = true end
+        spec.truthy(names['Base::Save'] and names.Run)
+        for _, rec in pairs(idx.files) do spec.nil_value(rec.implementation_evidence); spec.nil_value(rec.cpp_aliases) end
+        local impl = require('codeoutline.implementations'); local limit = impl.MAX_CANDIDATES
+        impl.MAX_CANDIDATES = 1
+        local ok, err = pcall(function() local _, Q = targets(G, 'Base::Save'); spec.truthy(Q.incomplete) end)
+        impl.MAX_CANDIDATES = limit; assert(ok, err)
+        write(root .. '/body.cpp', '#include "api.hpp"\nvoid Store::Save(long item) {}')
+        write(root .. '/api.hpp', 'struct Base { virtual void Save(int) = 0; };\nstruct Store : Base { void Save(long); };')
+        idx, G = svc.get(root, options)
+        spec.equal(targets(G, 'Base::Save'), '')
+        svc.forget(root)
+    end)
+    spec.it('reports C++ hierarchy, target and alias budgets and preserves cancellation', function()
+        local G = build({ ['api.hpp'] = 'struct Base { virtual void run() = 0; };',
+            ['impl.cpp'] = '#include "api.hpp"\nstruct A : Base { void run() {} }; struct B : Base { void run() {} };' })
+        local impl, cpp = require('codeoutline.implementations'), require('codeoutline.cpp_implementations')
+        local targets_limit, depth_limit, aliases_limit = impl.MAX_TARGETS, impl.MAX_DEPTH, cpp.MAX_ALIAS_FILES
+        local ok, err = pcall(function()
+            impl.MAX_TARGETS = 1
+            local found, Q = targets(G, 'Base::run'); spec.truthy(found ~= ''); spec.truthy(Q.incomplete)
+            impl.MAX_TARGETS, impl.MAX_DEPTH = targets_limit, 0
+            found, Q = targets(G, 'Base::run'); spec.equal(found, ''); spec.truthy(Q.incomplete)
+            impl.MAX_DEPTH, cpp.MAX_ALIAS_FILES = depth_limit, 0
+            found, Q = targets(G, 'Base::run'); spec.equal(found, ''); spec.truthy(Q.incomplete)
+        end)
+        impl.MAX_TARGETS, impl.MAX_DEPTH, cpp.MAX_ALIAS_FILES = targets_limit, depth_limit, aliases_limit
+        assert(ok, err)
+        local control = require('codeoutline.control'); local previous = control.callback
+        control.callback = function() error(control.cancelled('cancel C++ implementation query')) end
+        ok, err = pcall(function() targets(G, 'Base::run') end)
+        control.callback = previous
+        spec.equal(ok, false); spec.truthy(control.is_interrupted(err))
+    end)
+    spec.it('avoids expanding same-name candidates for a nonvirtual root method', function()
+        local files = { ['base.cpp'] = 'struct Plain { void run() {} };' }
+        for i = 1, 20 do files['other' .. i .. '.cpp'] = 'struct Unrelated' .. i .. ' { void run() {} };' end
+        local G = build(files)
+        local impl = require('codeoutline.implementations'); local limit = impl.MAX_CANDIDATES
+        impl.MAX_CANDIDATES = 1
+        local ok, err = pcall(function()
+            local found, Q = targets(G, 'Plain::run')
+            spec.equal(found, ''); spec.equal(Q.incomplete, false); spec.equal(Q.stats.implementations.candidates, 0)
+        end)
+        impl.MAX_CANDIDATES = limit; assert(ok, err)
+    end)
+end)
+
 spec.describe('query-owned Cargo packages', function()
     local cargo = require('codeoutline.rust_packages')
     local function build(files, root)

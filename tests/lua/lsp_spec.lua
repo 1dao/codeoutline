@@ -1128,6 +1128,41 @@ int luaopen_native_test(lua_State *L) { luaL_setfuncs(L, methods, 0); luaL_newli
         navigation.close('implementations')
         for _, rec in pairs(service.resident(nav_root).files) do spec.nil_value(rec.implementation_evidence) end
     end)
+    spec.it('finds C++ virtual implementations in out-of-line bodies and revalidates draft signatures', function()
+        local header = 'namespace CppImplementation {\n'
+            .. 'struct Base { virtual void save(int) const = 0; };\n'
+            .. 'struct Store : Base { void save(int) const override; };\n}\n'
+        local body = '#include "CppImplementation.hpp"\nvoid CppImplementation::Store::save(int item) const {}\n'
+        local use = '#include "CppImplementation.hpp"\nvoid CppImplementationRun(CppImplementation::Base *value) { value->save(1); }'
+        nav_write('CppImplementation.hpp', header); nav_write('CppImplementationBody.cpp', body)
+        nav_write('CppImplementationUse.cpp', use)
+        local options = { cache_path = nav_root .. '/cache.idx', lister = 'walk' }
+        service.refresh(nav_root, options)
+        local idx = service.resident(nav_root); idx:save(); service.forget(nav_root); service.refresh(nav_root, options)
+        local doc = docs.read(nav_root .. '/CppImplementationUse.cpp')
+        local req = { method = 'lsp_implementation', session = 'cpp-implementations', uri = doc.uri,
+            position = doc:position(assert(use:find('save', 1, true))) }
+        local result = nav(req)
+        spec.equal(#result, 1); spec.equal(result[1].uri, nav_uri('CppImplementationBody.cpp'))
+        req.method = 'lsp_definition'
+        local definition = nav(req)
+        spec.equal(#definition, 1); spec.equal(definition[1].uri, nav_uri('CppImplementation.hpp'))
+        local decl = docs.read(nav_root .. '/CppImplementation.hpp')
+        local from_decl = nav({ method = 'lsp_implementation', session = req.session, uri = decl.uri,
+            position = decl:position(assert(header:find('save', 1, true))) })
+        spec.equal(#from_decl, 1); spec.equal(from_decl[1].uri, result[1].uri)
+        local uri = nav_uri('CppImplementation.hpp')
+        local edited = header:gsub('void save%(int%) const override', 'void save(long) const override')
+        navigation.sync({ session = req.session, open = { [uri] = 1 }, changed = {
+            [uri] = { version = 1, language = 'cpp', source = edited } } })
+        -- The stale body no longer matches the class declaration. It must not
+        -- restore the old override merely because its qualified name agrees.
+        req.method = 'lsp_implementation'
+        local changed = nav(req)
+        spec.equal(#changed, 0)
+        navigation.close(req.session)
+        for _, rec in pairs(service.resident(nav_root).files) do spec.nil_value(rec.implementation_evidence) end
+    end)
     spec.it('shares C# aliases, namespaces and static usings across completion and navigation', function()
         local library = 'namespace CSharpFeature {\n'
             .. 'public class StoreA { public void Save() {} public void OnlyA() {} public static void Flush() {} }\n'

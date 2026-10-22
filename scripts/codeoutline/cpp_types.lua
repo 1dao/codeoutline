@@ -91,6 +91,8 @@ function M.collect(r, T)
                 local open = scopes[i]
                 result[#result + 1] = { name = kind == 'directive' and '*' or T:text(name), kind = kind,
                     target = not templated and M.normalize(text) or false,
+                    decorated = not kind and text and (text:find('[*&]') ~= nil or text:match('%f[%w]const%f[%W]') ~= nil
+                        or text:match('%f[%w]volatile%f[%W]') ~= nil) or nil,
                     scope = scope, local_alias = local_alias, at = T.s[name] - 1,
                     first = open > 0 and T.s[open] - 1 or 0,
                     last = open > 0 and T.e[T.m[open]] or #T.src }
@@ -130,7 +132,7 @@ function M.resolve(G, f, written, opts)
         return dependencies(file)[target]
     end
     local function aliases(file)
-        if not records[file] then records[file] = M.aliases(G, file, ctx) end
+        if not records[file] then records[file] = opts.aliases and opts.aliases(file) or M.aliases(G, file, ctx) end
         return records[file]
     end
     local lists = {}
@@ -152,6 +154,7 @@ function M.resolve(G, f, written, opts)
     local seen = {}
     local resolve
     local function follow(alias, file, depth)
+        if opts.undecorated and alias.decorated then return {}, true end
         if not alias.target then return {} end
         local key = file .. ':' .. alias.at
         if seen[key] or depth >= 8 then return {}, true end

@@ -71,7 +71,7 @@ Without Node, download the native archive for your platform from [GitHub Release
 | Document and workspace symbols | Workspace symbols match substrings, case-insensitively |
 | Definition, hover, signature help | Definition also goes from import lines (`require`, `#include`, module imports) to the files they load |
 | References, call hierarchy | Functions, methods, constructors, and macros; incoming and outgoing calls |
-| Method implementations | C#, Java and Kotlin interface, abstract and overridable methods; `textDocument/implementation` |
+| Method implementations | C#, Java and Kotlin interface/abstract methods and C++ virtual overrides; `textDocument/implementation` |
 | Completion | Locals, the file's definitions and imports, declarations from included C/C++ headers, and members after `.`, `->`, `::`, `?.`, or Lua `:` |
 
 Resolution is name-based, the same as `codeoutline_explore`; it is not a type checker. Rename, diagnostics, and formatting are not provided, so CodeOutline works best beside a language's own server or where none is available. Unsaved edits are included in every request. A `.codeoutline.json` file in the workspace root can map Lua call arguments to registration sites for Go to Definition. Behavior, limits, and options are described in [LSP.md](docs/LSP.md).
@@ -173,8 +173,21 @@ implementations, not calls made by the method or a proven runtime receiver. Go t
 uses the same lookup; Go to Definition continues to return the declaration. Detailed method
 evidence is generated per query and excluded from the index. Candidate, result and hierarchy
 limits report incomplete results. Generic substitution, inherited-only interface implementations,
-and default-interface conflict resolution are not modeled; C++ and TypeScript implementation links
+and default-interface conflict resolution are not modeled; TypeScript implementation links
 are not covered by this pass.
+
+C++ uses the same query path for non-template, single, non-virtual inheritance. It matches
+ordinary named/builtin parameter and return types, pointer/reference and cv decoration, and
+member `const`/`volatile`/reference qualifiers. Overrides can omit `virtual`/`override`; private
+virtual methods participate, while `final` blocks further overrides. Namespace imports, aliases
+and indirect includes use the existing bounded C++ lookup. Matching out-of-line definitions are
+preferred over class declarations; an unmatched body cannot stand in for an edited declaration.
+Pure virtual overrides remain contracts. Multiple/virtual inheritance, templates, covariant
+returns, function-pointer/array parameters and decorated type aliases in signatures are excluded.
+These links describe possible implementations, without proving virtual dispatch at a call site.
+Each query retains at most 128 alias-file arrays and 1 MiB of alias evidence from the shared
+source loader. Reaching either limit reports incomplete relationships and suppresses uncertain
+C++ links; alias data is never persisted.
 
 ## Command line
 

@@ -62,12 +62,19 @@ whose target is missing, unsupported or cyclic blocks outer same-name guesses.
 A known declaration with no resolvable type or member does not fall back to an
 unrelated same-name method. Primitive and `auto` declarations also act as
 barriers to an enclosing receiver binding. This does not infer `auto`, templates,
-using-directives, namespace aliases, inherited type aliases, alias templates,
+inherited type aliases, alias templates,
 dependent types, function-pointer/array aliases, smart pointers, chained field types, or virtual
 runtime dispatch. Include resolution retains the existing graph's limitations.
 Unsupported declaration forms can still use the existing generic resolver.
 Completion retains its pre-existing broader initializer/member-chain suggestions;
 these heuristics are not promoted to proven call relationships.
+
+C++ virtual implementation queries additionally compare declaration signatures and declared
+single inheritance, using the same source cache and include/import lookup. Class declarations
+and matching out-of-line definitions share method evidence. This supports implementation
+navigation and labeled possible-implementation edges in explore/callers; it does not infer the
+runtime receiver or change ordinary definition navigation. See the README for signature and
+inheritance exclusions. No virtual method evidence or implementation edges are serialized.
 
 ## Storage and validation
 

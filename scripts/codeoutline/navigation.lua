@@ -13,7 +13,7 @@ local control = require('codeoutline.control')
 local lsp = require('codeoutline.lsp')
 local parse = require('codeoutline.parse')
 -- Reference scans stop at a result count or time budget and report truncation.
-local M = { MAX_RESULTS = 1000, MAX_HOVER = 3, SCAN_SECONDS = 3, POSITION_SECONDS = 2, MAX_INCLUDES = 2000,
+local M = { MAX_RESULTS = 1000, MAX_HOVER = 3, SCAN_SECONDS = 3, POSITION_SECONDS = 2,
     MAX_FILE_BYTES = 1048576, CACHE_FILES = 64 }
 
 local sessions = {}
@@ -153,20 +153,7 @@ end
 local function deps(V, f)
     local entry = V.dep_cache[f]
     if not entry then
-        local direct, paired = graph.dependencies(V, f, V.js_context)
-        if C_FAMILY[V.files[f].language] then
-            local queue = {}
-            for g in pairs(direct) do queue[#queue + 1] = g end
-            local i = 1
-            while i <= #queue and #queue < M.MAX_INCLUDES do
-                local more, sources = graph.dependencies(V, queue[i])
-                for h in pairs(sources) do paired[h] = true end
-                for h in pairs(more) do
-                    if not direct[h] and h ~= f then direct[h] = true; queue[#queue + 1] = h end
-                end
-                i = i + 1
-            end
-        end
+        local direct, paired = graph.visible_dependencies(V, f, V.js_context)
         entry = { direct, paired }
         V.dep_cache[f] = entry
     end
@@ -305,6 +292,8 @@ local function cursor(doc, offset)
         while (T:text(first - 1) == '.' or T:text(first - 1) == '::') and T.k[first - 2] == 'id' do first = first - 2 end
         local name = require('codeoutline.csharp_bindings').name(T.src:sub(T.s[first], T.e[t]))
         evidence = name and 'cs:name:' .. name .. '\0' .. (T.s[first] - 1)
+    elseif rec.language == 'cpp' and (not recv or T:text(t - 1) == '::') then
+        evidence = require('codeoutline.cpp_types').evidence(T, t)
     end
     return { from = from, name = T:text(t), kind = kind, recv = recv, first = T.s[t] - 1, last = T.e[t], evidence = evidence }
 end
@@ -1054,7 +1043,7 @@ function handlers.lsp_definition(req)
     end
     local result = {}
     for _, id in ipairs(targets) do result[#result + 1] = (location(V, id)) end
-    return result
+    return result, V.js_context.include_incomplete
 end
 
 -- Follow unmatched delimiters up to the cursor. Commas in nested calls,

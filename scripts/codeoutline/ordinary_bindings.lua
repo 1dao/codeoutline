@@ -77,15 +77,16 @@ function M.context(G, ctx, source, options)
         local rec = G.files[f]
         local value = evidence(rec, i)
         local kind = rec.refs.kind[i]
-        if kind ~= 'call' and kind ~= 'member_call' and not (rec.language == 'csharp' and kind == 'new') then return value end
+        if kind ~= 'call' and kind ~= 'member_call' and not (rec.language == 'csharp' and kind == 'new')
+            and not (rec.language == 'cpp' and kind == 'ref') then return value end
         -- JS already keeps receiver barriers. Only a bare blocked call can be
         -- a newly supported lexical alias; typed/member calls need no reparse.
         if js(rec) and (kind ~= 'call' or value ~= '?') then return value end
         if js(rec) and not next(alias_hints(f)) then return value end
         local recv = rec.refs.recv[i]
         if rec.language == 'python' and (recv == 'self' or recv == 'cls') then return value end
-        if rec.language == 'cpp' and (not recv or recv == 'this') then return value end
-        if js(rec) or rec.language == 'python' or rec.language == 'csharp' or rec.language == 'cpp' and kind == 'member_call' then
+        if rec.language == 'cpp' and recv == 'this' then return value end
+        if js(rec) or rec.language == 'python' or rec.language == 'csharp' or rec.language == 'cpp' then
             return evidence(C.data(f), i) or value
         end
         return value

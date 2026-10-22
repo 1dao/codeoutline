@@ -13,7 +13,13 @@ function M.collect(r, T)
     require('codeoutline.cpp_types').collect(r, T)
     local wanted = {}
     for _, ref in ipairs(r.refs) do
-        if ref.kind == 'member_call' and ref.recv and ref.recv ~= 'this' then wanted[ref.recv] = true end
+        if ref.kind == 'call' or ref.kind == 'ref' or ref.kind == 'member_call' and T:text(ref.tok - 1) == '::' then
+            if T:text(ref.tok) == ref.name then
+                ref.binding = require('codeoutline.cpp_types').evidence(T, ref.tok)
+                r.has_bindings = true
+                if ref.kind == 'call' or ref.kind == 'ref' then wanted[ref.name] = true end
+            end
+        elseif ref.kind == 'member_call' and ref.recv and ref.recv ~= 'this' then wanted[ref.recv] = true end
     end
     if not next(wanted) then return end
     r.has_bindings = true
@@ -55,14 +61,15 @@ function M.collect(r, T)
         end
     end
     for _, ref in ipairs(r.refs) do
-        if ref.kind == 'member_call' and ref.recv then
+        local bare = ref.kind == 'call' or ref.kind == 'ref'
+        if bare or ref.kind == 'member_call' and ref.recv and T:text(ref.tok - 1) ~= '::' then
             local best
-            for _, b in ipairs(bindings[ref.recv] or {}) do
+            for _, b in ipairs(bindings[bare and ref.name or ref.recv] or {}) do
                 if b.a <= ref.tok and ref.tok <= b.b and b.token < ref.tok
                     and (not best or b.a > best.a or b.a == best.a and b.token > best.token) then best = b end
             end
             if best then
-                ref.binding = 'cpp:type:' .. best.type .. '\0' .. (T.s[best.token] - 1)
+                ref.binding = bare and 'cpp:?' or 'cpp:type:' .. best.type .. '\0' .. (T.s[best.token] - 1)
                 -- A chain's tail is not the simple local sharing that name.
                 if T:text(ref.tok - 3) == '.' or T:text(ref.tok - 3) == '->' then ref.binding = 'cpp:?' end
             end
@@ -70,8 +77,16 @@ function M.collect(r, T)
     end
 end
 
-function M.resolve(G, f, src, name, evidence, deps, ctx)
+function M.resolve(G, f, src, name, evidence, deps, ctx, accept)
     if G.files[f].language ~= 'cpp' or not evidence or evidence:sub(1, 4) ~= 'cpp:' then return nil end
+    local written, position = evidence:match('^cpp:name:(.-)%z(%d+)$')
+    if written then
+        local scope = src and G.nodes[src].qualified
+        if src and (G.nodes[src].kind == 'function' or G.nodes[src].kind == 'method') then scope = scope:match('^(.*)::[^:]+$') end
+        local ids = require('codeoutline.cpp_types').resolve(G, f, written,
+            { scope = scope, at = tonumber(position), deps = deps, context = ctx, accept = accept, definitions = true })
+        return ids
+    end
     local ty = evidence:match('^cpp:type:(.+)$')
     if not ty then return {} end
     local written, at = ty:match('^(.-)%z(%d+)$')

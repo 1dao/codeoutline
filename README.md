@@ -109,6 +109,13 @@ package imports (including aliases), and ordinary, generic and trailing-lambda c
 Resolution is heuristic: compiler-generated members, implicit lambda receivers, string-template
 expressions, Java interop and coroutine/framework dispatch are not modeled.
 
+C++ lookup covers named type aliases, namespace aliases, `using ns::Type`, `using ns::function`,
+and bounded `using namespace` chains across included headers. Calls, navigation and completion
+share this lookup; local imports respect their declaration position and block scope, and
+ambiguous imported names remain unresolved. Import evidence is generated on demand rather
+than stored in the index. This is heuristic lookup: preprocessing/include order, compiler
+include-search configuration, dependent templates, ADL and full overload resolution are not modeled.
+
 ## Command line
 
 ```sh

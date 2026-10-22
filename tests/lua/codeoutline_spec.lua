@@ -1642,6 +1642,156 @@ void function_pointer(Callback a) { a->save(); }
     end)
 end)
 
+spec.describe('C++ namespace and using lookup', function()
+    local function build(files)
+        local records = {}
+        for path, source in pairs(files) do records[path] = ci.parse(path, source, { ordinary_bindings = true }) end
+        return graph.build({ files = records })
+    end
+    local function targets(G, name)
+        local out, edges = {}, graph.query(G).out[G.by_name[name][1]]
+        for i = 1, #edges, graph.EDGE do out[#out + 1] = G.nodes[edges[i]].qualified end
+        table.sort(out); return table.concat(out, ',')
+    end
+    spec.it('shares namespace aliases and using declarations between types and functions', function()
+        local G = build({ ['library.hpp'] = [[
+namespace library { class Store { public: void save() {} }; void run() {} }
+]], ['app.cpp'] = [[
+#include "library.hpp"
+namespace api = library;
+namespace chained = api;
+using api::Store;
+using chained::run;
+void imported(Store* p) { p->save(); run(); api::run(); chained::run(); }
+void qualified(chained::Store* p) { p->save(); }
+]] })
+        spec.equal(targets(G, 'imported'), 'library::Store::save,library::run,library::run,library::run')
+        spec.equal(targets(G, 'qualified'), 'library::Store::save')
+        spec.equal(#graph.query(G).inn[G.by_qualified['library::run'][1]], 3 * graph.EDGE)
+    end)
+    spec.it('respects local import ranges and the receiver declaration position', function()
+        local G = build({ ['app.cpp'] = [[
+namespace A { class Store { public: void save() {} }; void run() {} }
+namespace B { class Store { public: void save() {} }; void run() {} }
+using A::Store;
+void scoped() { Store a; { using B::Store; Store b; b.save(); a.save(); } Store c; c.save(); }
+void local_call() { { using B::run; run(); } }
+void outside() { run(); }
+void before() { run(); using A::run; run(); }
+void local_directive() { using namespace B; Store p; p.save(); run(); }
+void hidden() { using A::run; { auto run = unknown; run(); } run(); }
+]] })
+        spec.equal(targets(G, 'scoped'), 'A::Store::save,A::Store::save,B::Store::save')
+        spec.equal(targets(G, 'local_call'), 'B::run')
+        spec.equal(targets(G, 'outside'), '')
+        spec.equal(targets(G, 'before'), 'A::run')
+        spec.equal(targets(G, 'hidden'), 'A::run')
+        -- A::Store and the directive's B::Store are ambiguous; run is unique.
+        spec.equal(targets(G, 'local_directive'), 'B::run')
+    end)
+    spec.it('follows indirect headers and prefers the actual relative include', function()
+        local G = build({ ['lib/types.hpp'] = 'namespace A { class Store { public: void save() {} }; void run(); }',
+            ['lib/types.cpp'] = '#include "types.hpp"\nvoid A::run() {}',
+            ['lib/imports.h'] = '#include "types.hpp"\nnamespace api = A;\nusing api::Store;\nusing api::run;',
+            ['app.cpp'] = '#include "lib/imports.h"\nvoid entry(Store* p) { p->save(); run(); }',
+            ['other/types.hpp'] = 'namespace A { class Store { public: void wrong() {} }; void run() {} }' })
+        spec.equal(G.files[G.file_index['lib/imports.h']].language, 'cpp')
+        spec.equal(targets(G, 'entry'), 'A::Store::save,A::run')
+        local Q = graph.query(G)
+        local edges = Q.out[G.by_name.entry[1]]
+        for i = 1, #edges, graph.EDGE do
+            spec.truthy(G.files[G.node_file[edges[i]]].path ~= 'other/types.hpp')
+        end
+        local found = false
+        for i = 1, #edges, graph.EDGE do if G.files[G.node_file[edges[i]]].path == 'lib/types.cpp' then found = true end end
+        spec.truthy(found, 'prefer the paired implementation after the visible declaration')
+    end)
+    spec.it('blocks ambiguous imports, missing namespace targets and alias cycles', function()
+        local G = build({ ['app.cpp'] = [[
+namespace A { class Store { public: void save() {} }; void run() {} }
+namespace B { class Store { public: void save() {} }; void run() {} }
+void ambiguous() { using namespace A; using namespace B; Store p; p.save(); run(); }
+void missing() { namespace invalid = Missing; invalid::Store p; p.save(); invalid::run(); }
+namespace loop = loop;
+void cyclic() { loop::run(); }
+]] })
+        for _, name in ipairs({ 'ambiguous', 'missing', 'cyclic' }) do spec.equal(targets(G, name), '', name) end
+    end)
+    spec.it('follows namespace using chains and terminates circular directives', function()
+        local G = build({ ['app.cpp'] = [[
+namespace A { class Store { public: void save() {} }; void run() {} }
+namespace B { using namespace A; }
+namespace C { using namespace B; }
+namespace X { }
+namespace Y { using namespace X; }
+namespace X { using namespace Y; }
+using namespace C;
+void chained(Store* p) { p->save(); run(); C::run(); }
+void cycle() { X::missing(); }
+]] })
+        spec.equal(targets(G, 'chained'), 'A::Store::save,A::run,A::run')
+        spec.equal(targets(G, 'cycle'), '')
+    end)
+    spec.it('bounds cyclic include traversal and reports truncated call relationships', function()
+        local G = build({ ['a.cpp'] = '#include "a.hpp"\nvoid entry() { run(); }',
+            ['a.hpp'] = '#include "b.hpp"\n', ['b.hpp'] = '#include "c.hpp"\n',
+            ['c.hpp'] = '#include "a.hpp"\nvoid run() {}' })
+        spec.equal(targets(G, 'entry'), 'run')
+        local limit = graph.MAX_INCLUDES
+        graph.MAX_INCLUDES = 2
+        local ok, err = pcall(function()
+            local Q = graph.query(G)
+            spec.equal(#Q.out[G.by_name.entry[1]], 0)
+            spec.truthy(Q.incomplete)
+        end)
+        graph.MAX_INCLUDES = limit
+        assert(ok, err)
+    end)
+    spec.it('reloads query-only namespace imports and refreshes callers after header edits', function()
+        local root = tmp_root .. '/cpp_namespace_queries'
+        local header = 'namespace A { class Store { public: void save() {} }; void run() {} }\n'
+            .. 'namespace B { class Store { public: void save() {} }; void run() {} }\nnamespace api = A;\n'
+        write(root .. '/types.hpp', header)
+        write(root .. '/imports.hpp', '#include "types.hpp"\nusing api::Store;\nusing api::run;')
+        write(root .. '/app.cpp', '#include "imports.hpp"\nvoid namespace_entry(Store* p) { p->save(); run(); }')
+        local options = { cache_path = root .. '/cache.idx', lister = 'walk' }
+        local idx, G = svc.get(root, options)
+        idx:save(); svc.forget(root); idx, G = svc.get(root, options)
+        local function check(ns)
+            local text = explore.run(G, idx, 'namespace_entry ' .. ns .. '::run')
+            spec.contains(text, 'namespace_entry -> ' .. ns .. '::run')
+            local _, info = require('codeoutline.callers').run(G, idx, ns .. '::run')
+            spec.equal(#info.callers, 1)
+            spec.equal(targets(G, 'namespace_entry'), ns .. '::Store::save,' .. ns .. '::run')
+            for _, rec in pairs(idx.files) do spec.nil_value(rec.cpp_aliases); spec.nil_value(rec.refs.binding) end
+        end
+        check('A')
+        write(root .. '/types.hpp', header:gsub('api = A', 'api = B'))
+        idx, G = svc.get(root, options); check('B')
+        local _, info = require('codeoutline.callers').run(G, idx, 'A::run')
+        spec.equal(#info.callers, 0); svc.forget(root)
+    end)
+    spec.it('skips include sources that cannot introduce unindexed imports', function()
+        local root, includes = tmp_root .. '/cpp_import_hints', {}
+        for i = 1, 24 do
+            local file = 'noise' .. i .. '.hpp'
+            write(root .. '/' .. file, 'namespace Noise' .. i .. ' { class Store { public: void save() {} }; }')
+            includes[#includes + 1] = '#include "' .. file .. '"'
+        end
+        write(root .. '/types.hpp', 'namespace Selected { class Store { public: void save() {} }; }')
+        write(root .. '/imports.hpp', '#include "types.hpp"\nnamespace api = Selected;\nusing api::Store;')
+        write(root .. '/app.cpp', table.concat(includes, '\n') .. '\n#include "imports.hpp"\nvoid entry(Store* p) { p->save(); }')
+        local idx, G = svc.get(root, { cache_path = root .. '/cache.idx', lister = 'walk' })
+        for i = 1, 24 do write(root .. '/noise' .. i .. '.hpp', 'changed but irrelevant to this lookup') end
+        local Q = graph.query(G)
+        spec.equal(G.nodes[Q.out[G.by_name.entry[1]][1]].qualified, 'Selected::Store::save')
+        spec.equal(Q.stats.ordinary.parses, 2)
+        spec.truthy(idx.files['imports.hpp'].cpp_imports)
+        spec.nil_value(idx.files['noise1.hpp'].cpp_imports)
+        svc.forget(root)
+    end)
+end)
+
 spec.describe('query-owned ordinary bindings', function()
     spec.it('uses existing hints for lazy JS aliases and excludes unrelated imported bindings', function()
         local root = tmp_root .. '/lazy_js_aliases'

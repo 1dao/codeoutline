@@ -207,12 +207,13 @@ local function cpp_decl(T, r, i, j, parent)
     if first == 'using' then
         if T.k[i + 1] == 'id' and is(T, i + 2, '=') then
             common.add_node(r, T, { kind = 'typedef', name = T:text(i + 1), ni = i + 1, parent = parent, ti = i, tj = j, sig = common.sig(T, i, j) })
-        end
+        else r.cpp_imports = true end
         return
     end
     if first == 'friend' or first == 'static_assert' or first == 'namespace' then return end
     if first == 'enum' then return end                    -- enum class X : int;
     if T.k[i] == 'kw' and CLASSLIKE[first] and j - i <= 3 then
+        r.cpp_imports = true
         return                                             -- class X;  (struct X *p; still falls through)
     end
     local is_extern = first == 'extern' and T.k[i + 1] ~= 'str'
@@ -390,6 +391,7 @@ cpp_range = function(T, r, a, b, parent)
                 cpp_range(T, r, j + 1, close - 1, node)
                 i = close + 1
             else
+                if is(T, j, '=') then r.cpp_imports = true end
                 while j <= b and not is(T, j, ';') do j = j + 1 end   -- namespace alias
                 i = j + 1
             end
@@ -533,8 +535,9 @@ end
 -- A .h file is C++ when it uses C++-only syntax; otherwise the C parser
 -- keeps handling it (C code may use `new`/`class` as plain identifiers).
 function M.looks_cpp(src)
-    return src:find('%f[%w_]namespace%s+[%w_]*%s*{') or src:find('%f[%w_]class%s+[%w_]+%s*[:{]')
+    return src:find('%f[%w_]namespace%s+[%w_:]*%s*{') or src:find('%f[%w_]class%s+[%w_]+%s*[:{]')
         or src:find('%f[%w_]template%s*<') or src:find('%f[%w_]public%s*:') or src:find('%f[%w_]std::')
+        or src:find('%f[%w_]namespace%s+[%w_]+%s*=') or src:find('%f[%w_]using%s+[%w_:]+')
 end
 
 return M

@@ -807,6 +807,89 @@ int luaopen_native_test(lua_State *L) { luaL_setfuncs(L, methods, 0); luaL_newli
             end
         end
     end)
+    spec.it('shares C++ namespace imports across completion, definitions and references with header overlays', function()
+        local header = 'namespace NamespaceTest {\n'
+            .. 'namespace A { class Store { public: void save() {} void only_a() {} }; void run() {} }\n'
+            .. 'namespace B { class Store { public: void save() {} void only_b() {} }; void run() {} }\n'
+            .. '}\nnamespace api = NamespaceTest::A;\n'
+        local source = '#include "NamespaceImports.h"\n'
+            .. 'void namespace_run(Store* p) { p->save(); run(); api::run(); }\n'
+        nav_write('NamespaceTypes.hpp', header)
+        nav_write('NamespaceImports.h', '#include "NamespaceTypes.hpp"\nusing api::Store;\nusing api::run;\n')
+        nav_write('NamespaceClient.cpp', source)
+        nav_write('NamespaceUnrelated.hpp', 'namespace NamespaceTest { namespace A { class Store { public: void unrelated() {} }; } }')
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local doc = docs.read(nav_root .. '/NamespaceClient.cpp')
+        local function check(line, included, excluded)
+            local req = { uri = doc.uri, root = nav_root, session = 'cpp-namespace',
+                position = doc:position(assert(source:find('p->save', 1, true)) + 2) }
+            local labels = {}
+            for _, item in ipairs(require('codeoutline.completion').complete(req).items) do labels[item.label] = true end
+            spec.truthy(labels[included]); spec.nil_value(labels[excluded]); spec.nil_value(labels.unrelated)
+            req.method = 'lsp_definition'
+            for _, name in ipairs({ 'save', 'run', 'api::run', 'Store' }) do
+                local first = name == 'run' and assert(source:find(' run();', 1, true)) + 1 or assert(source:find(name, 1, true))
+                if name == 'api::run' then first = first + 5 end
+                req.position = doc:position(first)
+                local found = nav(req)
+                spec.equal(#found, 1, name); spec.equal(found[1].uri, nav_uri('NamespaceTypes.hpp'))
+                spec.equal(found[1].range.start.line, line, name)
+                if name == 'run' then
+                    local refs = nav({ method = 'lsp_references', session = req.session, uri = found[1].uri,
+                        position = found[1].range.start, includeDeclaration = false })
+                    local hits = 0
+                    for _, ref in ipairs(refs) do if ref.uri == doc.uri then hits = hits + 1 end end
+                    spec.equal(hits, 2)
+                end
+            end
+        end
+        check(1, 'only_a', 'only_b')
+        local uri = nav_uri('NamespaceTypes.hpp')
+        navigation.sync({ session = 'cpp-namespace', open = { [uri] = 1 }, changed = {
+            [uri] = { version = 1, language = 'cpp', source = header:gsub('api = NamespaceTest::A', 'api = NamespaceTest::B') } } })
+        check(2, 'only_b', 'only_a')
+        navigation.close('cpp-namespace')
+    end)
+    spec.it('completes C++ namespace aliases and imported names without unrelated namespace members', function()
+        nav_write('NamespaceCompletion.hpp', 'namespace CompletionImpl { class Store { public: void save() {} }; void run() {} }\n'
+            .. 'namespace CompletionLib { using namespace CompletionImpl; }')
+        nav_write('NamespaceCompletionOther.hpp', 'namespace CompletionLib { void hidden() {} }')
+        local source = '#include "NamespaceCompletion.hpp"\nnamespace short_api = CompletionLib;\n'
+            .. 'using namespace short_api;\nvoid completion_entry() { short_api::run(); Store p; p.save(); }\n'
+        nav_write('NamespaceCompletion.cpp', source)
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local doc = docs.read(nav_root .. '/NamespaceCompletion.cpp')
+        for _, case in ipairs({ { 'short_api::run', 10, 'Store', 'run' }, { 'Store p', 0, 'Store', 'run' }, { 'p.save', 1, 'save' } }) do
+            local req = { uri = doc.uri, root = nav_root, session = 'cpp-namespace-completion',
+                position = doc:position(assert(source:find(case[1], 1, true)) + case[2]) }
+            local labels = {}
+            for _, item in ipairs(require('codeoutline.completion').complete(req).items) do labels[item.label] = true end
+            spec.truthy(labels[case[3]], case[1]); if case[4] then spec.truthy(labels[case[4]], case[1]) end
+            spec.nil_value(labels.hidden)
+        end
+    end)
+    spec.it('blocks C++ ambiguous types and expired local using declarations in LSP queries', function()
+        local source = 'namespace ImportA { class Item { public: void save() {} }; void work() {} }\n'
+            .. 'namespace ImportB { class Item { public: void save() {} }; void work() {} }\n'
+            .. 'void ambiguity() { using namespace ImportA; using namespace ImportB; Item p; p.save(); work(); }\n'
+            .. 'void local_import() { { using ImportA::work; using ImportA::Item; work(); } work(); Item q; q.save(); }\n'
+        nav_write('NamespaceAmbiguity.cpp', source)
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local doc = docs.read(nav_root .. '/NamespaceAmbiguity.cpp')
+        for _, name in ipairs({ 'p.save', 'work(); }\n', '} work();' }) do
+            local first = assert(source:find(name, 1, true)) + (name == 'p.save' and 1 or name == '} work();' and 2 or 0)
+            local found = nav({ method = 'lsp_definition', uri = doc.uri, root = nav_root, session = 'cpp-ambiguity',
+                position = doc:position(first) })
+            spec.equal(#found, 0)
+        end
+        local labels = {}
+        for _, item in ipairs(require('codeoutline.completion').complete({ uri = doc.uri, root = nav_root,
+            session = 'cpp-ambiguity', position = doc:position(assert(source:find('p.save', 1, true)) + 1) }).items) do labels[item.label] = true end
+        spec.nil_value(labels.save)
+        local outside = require('codeoutline.completion').complete({ uri = doc.uri, root = nav_root,
+            session = 'cpp-ambiguity', position = doc:position(assert(source:find('q.save', 1, true)) + 1) })
+        spec.equal(#outside.items, 0)
+    end)
     spec.it('shares C# aliases, namespaces and static usings across completion and navigation', function()
         local library = 'namespace CSharpFeature {\n'
             .. 'public class StoreA { public void Save() {} public void OnlyA() {} public static void Flush() {} }\n'

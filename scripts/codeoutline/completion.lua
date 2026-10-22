@@ -464,9 +464,9 @@ function Completion:types(name, f, scope, at)
             scope = owner and (CALLABLE[owner.kind] and owner.qualified:match('^(.*)::[^:]+$') or owner.qualified)
         end
         if at == nil and f == self.f then at = self.offset end
-        local ids, known = require('codeoutline.cpp_types').resolve(self.V, f, name,
-            { scope = scope, at = at or nil, deps = direct, context = self.V.js_context, accept = TYPES })
-        if known then return ids end
+        local ids = require('codeoutline.cpp_types').resolve(self.V, f, name,
+            { scope = scope, at = at or nil, context = self.V.js_context, accept = TYPES, forward = true })
+        return ids
     end
     local found = graph.resolve(self.V, f, nil, name, 'call', nil, direct, paired, accept) or {}
     if #found == 0 then
@@ -523,7 +523,11 @@ function Completion:members(ids, depth, seen)
             if c.parent == n then add(c.name, c.kind, c, f) end
         end
         -- Out-of-line members anywhere: `Box::area`, Go methods, Lua `M.f` / `M:f`.
-        for _, entry in ipairs(self:owned(node.qualified, graph.family(language))) do out[#out + 1] = entry end
+        for _, entry in ipairs(self:owned(node.qualified, graph.family(language))) do
+            local parent = entry.node.parent and V.files[entry.file].nodes[entry.node.parent]
+            if language ~= 'cpp' or not parent or not TYPES[parent.kind]
+                or entry.file == f and entry.node.parent == n then out[#out + 1] = entry end
+        end
         -- Attributes assigned in methods (Python, JS) or on Lua tables.
         if T and (language == 'python' or language == 'javascript' or language == 'typescript' or language == 'arkts' or language == 'lua') then
             local first, last = 1, T.n
@@ -799,6 +803,12 @@ function Completion:receiver(item, depth)
         if namespace then return { csharp_namespace = namespace } end
         if known then return #ids > 0 and { types = ids, static = not item.call } or nil end
     end
+    if self.language == 'cpp' then
+        local ids = self:types(name)
+        if #ids == 0 then return nil end
+        if self.V.nodes[ids[1]].kind == 'namespace' then return { cpp_namespace = self.V.nodes[ids[1]].qualified } end
+        return { types = ids, static = true }
+    end
     local ids = self:types(name)
     if #ids > 0 then return { types = ids, static = true } end
     -- Dynamic languages: a global table with members defined elsewhere, or a
@@ -809,6 +819,17 @@ end
 
 function Completion:entries(target)
     if not target then return {} end
+    if target.cpp_namespace then
+        local bindings, result = require('codeoutline.cpp_types'), {}
+        local any = setmetatable({}, { __index = function() return true end })
+        for _, entry in ipairs(bindings.namespace_members(self.V, self.f, target.cpp_namespace, self.V.js_context, self.offset)) do
+            if self:expired() then break end
+            local ids = bindings.resolve(self.V, self.f, '::' .. target.cpp_namespace .. '::' .. entry.name,
+                { context = self.V.js_context, at = self.offset, accept = any })
+            if #ids > 0 then result[#result + 1] = entry end
+        end
+        return result
+    end
     if target.csharp_namespace ~= nil then
         return require('codeoutline.csharp_bindings').namespace_members(self.V, self.f, target.csharp_namespace, self.V.js_context)
     end
@@ -838,11 +859,14 @@ function Completion:chain(chain, depth)
     local target = self:receiver(chain[1], depth)
     for k = 2, #chain do
         if not target or self:expired() then return nil end
-        local element, next_ids, next_files, next_module, next_namespace, next_static = chain[k], {}, nil, nil, nil, nil
+        local element, next_ids, next_files, next_module, next_namespace, next_static, next_cpp = chain[k], {}, nil, nil, nil, nil, nil
         for _, entry in ipairs(self:entries(target)) do
             if entry.name == element.name then
                 local node = entry.node
-                if self.language == 'csharp' and node.kind == 'namespace' then next_namespace = node.qualified
+                if self.language == 'cpp' and node.kind == 'namespace' then next_cpp = node.qualified
+                elseif self.language == 'cpp' and TYPES[node.kind] then
+                    for _, id in ipairs(self:types('::' .. node.qualified)) do next_ids[#next_ids + 1] = id end
+                elseif self.language == 'csharp' and node.kind == 'namespace' then next_namespace = node.qualified
                 elseif self.language == 'csharp' and TYPES[node.kind] then
                     next_static = not element.call
                     local ids = require('codeoutline.csharp_bindings').types(self.V, self.f, 'global::' .. node.qualified, self.offset, self.V.js_context)
@@ -868,7 +892,7 @@ function Completion:chain(chain, depth)
                 end
             end
         end
-        target = next_namespace and { csharp_namespace = next_namespace } or #next_ids > 0 and { types = next_ids, static = next_static }
+        target = next_cpp and { cpp_namespace = next_cpp } or next_namespace and { csharp_namespace = next_namespace } or #next_ids > 0 and { types = next_ids, static = next_static }
             or (next_module and { modules = next_files, module_name = next_module } or nil)
     end
     return target
@@ -940,6 +964,13 @@ function M.complete(req)
                 detail = entry.type and (entry.type .. ' ' .. entry.name) or nil }
         end
         for alias in pairs(self.aliases) do entries[#entries + 1] = { name = alias, kind = 'namespace', detail = 'module' } end
+        if self.language == 'cpp' then
+            local owner = self.fn and self.rec.nodes[self.fn] or self.owner and self.rec.nodes[self.owner]
+            local scope = owner and (CALLABLE[owner.kind] and owner.qualified:match('^(.*)::[^:]+$') or owner.qualified)
+            for _, entry in ipairs(require('codeoutline.cpp_types').imported_members(V, f, scope, offset, V.js_context)) do
+                entries[#entries + 1] = entry
+            end
+        end
         if self.language == 'csharp' then
             local bindings = require('codeoutline.csharp_bindings')
             for _, entry in ipairs(bindings.usings(V, f, self.offset, V.js_context)) do
@@ -1024,7 +1055,7 @@ function M.complete(req)
             items[#items + 1] = item_for(entry, self.language, V, not self:expired())
         end
     end
-    return { items = items, incomplete = self.incomplete }
+    return { items = items, incomplete = self.incomplete or V.js_context.include_incomplete }
 end
 
 navigation.register('lsp_completion', function(req)

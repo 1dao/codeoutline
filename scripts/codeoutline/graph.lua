@@ -34,6 +34,7 @@ local M = {}
 M.EDGE = 3
 M.MAX_TIES = 3
 M.MAX_CANDIDATES = 200
+M.MAX_INCLUDES = 2000
 
 -- Node kinds a call / `new` / bare reference may bind to.
 local CALLABLE = {
@@ -77,16 +78,17 @@ local function resolve_deps(G, f, js_context)
         local path = imp.path
         if C_FAMILY[rec.language] then
             path = path:gsub('\\', '/')
-            if path:find('^%.%.?/') then
-                -- "../dir/x.h": relative to the including file first
-                local parts = {}
-                for segment in ((here ~= '' and here .. '/' or '') .. path):gmatch('[^/]+') do
-                    if segment == '..' then parts[#parts] = nil
-                    elseif segment ~= '.' then parts[#parts + 1] = segment end
-                end
-                add(G.file_index[table.concat(parts, '/')])
+            local parts = {}
+            for segment in ((here ~= '' and here .. '/' or '') .. path):gmatch('[^/]+') do
+                if segment == '..' then parts[#parts] = nil
+                elseif segment ~= '.' then parts[#parts + 1] = segment end
             end
-            -- "dir/x.h": files whose path ends with it, preferring the closest
+            local relative = G.file_index[table.concat(parts, '/')]
+            if relative and not imp.system then
+                add(relative)
+                goto next_import
+            end
+            -- Fall back to suffix candidates when the local quoted path is absent.
             for _, g in ipairs(G.by_base[basename(path)] or {}) do
                 local p = G.files[g].path
                 if p == path or p:sub(-(#path + 1)) == '/' .. path then add(g) end
@@ -187,6 +189,7 @@ local function resolve_deps(G, f, js_context)
                 for _, id in ipairs(G.by_qualified[path] or {}) do add(G.node_file[id]) end
             end
         end
+        ::next_import::
     end
     -- Java: the whole package is visible without imports; Go: the whole
     -- directory is one package; C#: the file's own namespaces.
@@ -215,6 +218,43 @@ local function resolve_deps(G, f, js_context)
         end
     end
     return deps, paired
+end
+
+-- One bounded include closure for graph queries, navigation and type lookup.
+-- Paired implementations may supply definitions, never declarations/imports.
+function M.visible_dependencies(G, f, ctx)
+    local cache = ctx and ctx.include_dependencies
+    if not cache and ctx then cache = {}; ctx.include_dependencies = cache end
+    local old = cache and cache[f]
+    if old then return old[1], old[2], old[3] end
+    local direct, paired = resolve_deps(G, f, ctx)
+    local incomplete = false
+    if C_FAMILY[G.files[f].language] then
+        local visible, queue = {}, {}
+        local function add(files)
+            local ordered = {}
+            for g in pairs(files) do ordered[#ordered + 1] = g end
+            table.sort(ordered, function(a, b) return G.files[a].path < G.files[b].path end)
+            for _, g in ipairs(ordered) do
+                if g ~= f and not visible[g] then
+                    if #queue >= M.MAX_INCLUDES then incomplete = true
+                    else visible[g] = true; queue[#queue + 1] = g end
+                end
+            end
+        end
+        add(direct)
+        local i = 1
+        while i <= #queue do
+            control.check()
+            local more, sources = resolve_deps(G, queue[i], ctx)
+            for g in pairs(sources) do if g ~= f then paired[g] = true end end
+            add(more); i = i + 1
+        end
+        direct = visible
+    end
+    if cache then cache[f] = { direct, paired, incomplete } end
+    if incomplete and ctx then ctx.include_incomplete = true end
+    return direct, paired, incomplete
 end
 
 -- Innermost class-like container of a node (for self./this. calls).
@@ -295,8 +335,8 @@ local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired, accept,
         exact = require('codeoutline.python_bindings').resolve(G, f, evidence, js_context)
     end
     if exact == nil and G.files[f].language == 'cpp' then
-        strategy = 'c++ declared receiver'
-        exact = require('codeoutline.cpp_bindings').resolve(G, f, src_id, name, evidence, deps, js_context)
+        strategy = evidence and evidence:match('^cpp:name:') and 'c++ namespace/import' or 'c++ declared receiver'
+        exact = require('codeoutline.cpp_bindings').resolve(G, f, src_id, name, evidence, deps, js_context, accept)
     end
     if exact == nil and G.files[f].language == 'csharp' then
         strategy = 'c# binding'
@@ -548,7 +588,8 @@ function M.query(symbols, opts)
     local function deps(f)
         local entry = dependencies[f]
         if not entry then
-            local direct, paired = resolve_deps(symbols, f, js_context)
+            local direct, paired, incomplete = M.visible_dependencies(symbols, f, js_context)
+            if incomplete then Q.incomplete = true end
             entry = { direct, paired }; dependencies[f] = entry
         end
         return entry[1], entry[2]

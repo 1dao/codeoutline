@@ -1950,6 +1950,147 @@ class Use { void call(I value) { { Object value = unknown; value.run(1); } value
     end)
 end)
 
+spec.describe('query-owned Go modules', function()
+    local go = require('codeoutline.go_modules')
+    local function build(files, root)
+        local records = {}
+        for path, source in pairs(files) do records[path] = ci.parse(path, source) end
+        return graph.build({ files = records, root = root })
+    end
+    local function files(G, path, name, ctx)
+        local found, reason = go.files(G, G.file_index[path], name, ctx)
+        local result = {}; for _, f in ipairs(found) do result[#result + 1] = G.files[f].path end
+        table.sort(result); return table.concat(result, ','), reason
+    end
+    spec.it('uses declared module paths and package names for imports, aliases and same-package calls', function()
+        local root = tmp_root .. '/go_module'
+        write(root .. '/go.mod', 'module example.test/product/v2\n\ngo 1.23\n')
+        local G = build({
+            ['cmd/main.go'] = 'package main\nimport (\n selected "example.test/product/v2/util"\n "example.test/product/v2/other"\n)\n'
+                .. 'func RunGo() { selected.Save(); actual.Save(); Peer() }',
+            ['cmd/peer.go'] = 'package main\nfunc Peer() {}',
+            ['cmd/external_test.go'] = 'package main_test\nfunc Peer() {}',
+            ['cmd/internal_test.go'] = 'package main\nfunc TestOnly() {}',
+            ['util/api.go'] = 'package utility\nfunc Save() {}\nfunc hidden() {}',
+            ['util/second.go'] = 'package utility\nfunc Second() {}',
+            ['util/api_test.go'] = 'package utility_test\nfunc Save() {}',
+            ['util/notgo.ts'] = 'export function Save() {}',
+            ['other/api.go'] = 'package actual\nfunc Save() {}',
+            ['unrelated/util/api.go'] = 'package utility\nfunc Save() {}',
+        }, root)
+        spec.equal(files(G, 'cmd/main.go', 'example.test/product/v2/util'), 'util/api.go,util/second.go')
+        local Q = graph.query(G)
+        spec.equal(#Q.out[G.by_name.RunGo[1]], 3 * graph.EDGE)
+        spec.equal(edges_from(G, 'RunGo'), 'Peer@cmd/peer.go Save@other/api.go Save@util/api.go')
+        local aliases = go.aliases(G, G.file_index['cmd/main.go'], {})
+        spec.truthy(aliases.actual and aliases.selected); spec.nil_value(aliases.other)
+        spec.equal(files(G, 'cmd/main.go', 'unrelated.test/util'), '')
+        spec.equal(Q.stats.go.reads, 1); spec.equal(Q.incomplete, false)
+        spec.equal(#go.resolve(G, G.file_index['cmd/main.go'], 'TestOnly', nil), 0)
+        spec.equal(#go.resolve(G, G.file_index['cmd/main.go'], 'hidden', 'selected'), 0)
+    end)
+    spec.it('honours go.work use lists, module root packages and nested workspace ownership', function()
+        local root = tmp_root .. '/go_work'
+        write(root .. '/go.work', 'go 1.23\nuse (\n ./app // client\n "./unusual directory"\n)\n')
+        write(root .. '/app/go.mod', 'module example.test/app\n')
+        write(root .. '/unusual directory/go.mod', 'module example.test/library/v2\n')
+        write(root .. '/ignored/go.mod', 'module example.test/ignored\n')
+        write(root .. '/nested/go.work', 'use ./client\n')
+        write(root .. '/nested/client/go.mod', 'module example.test/nested\n')
+        local G = build({ ['app/main.go'] = 'package main', ['unusual directory/api.go'] = 'package lib\nfunc Save() {}',
+            ['ignored/api.go'] = 'package ignored', ['nested/client/api.go'] = 'package main' }, root)
+        spec.equal(files(G, 'app/main.go', 'example.test/library/v2'), 'unusual directory/api.go')
+        spec.equal(files(G, 'ignored/api.go', 'example.test/library/v2'), '')
+        spec.equal(files(G, 'nested/client/api.go', 'example.test/library/v2'), '')
+        spec.equal(files(G, 'app/main.go', 'example.test/ignored'), '')
+    end)
+    spec.it('resolves local replacements, preserves version constraints and reloads work overrides per query', function()
+        local root = tmp_root .. '/go_replace'
+        write(root .. '/app/go.mod', 'module example.test/app\nrequire (\n example.test/lib v1.2.0\n)\n'
+            .. 'replace (\n example.test/lib v1.2.0 => ../first\n example.test/unused => ../first\n)\n')
+        write(root .. '/first/go.mod', 'module example.test/lib\n')
+        write(root .. '/second/go.mod', 'module example.test/lib\n')
+        local G = build({ ['app/main.go'] = 'package main', ['first/pkg/api.go'] = 'package lib',
+            ['second/pkg/api.go'] = 'package lib' }, root)
+        spec.equal(files(G, 'app/main.go', 'example.test/lib/pkg'), 'first/pkg/api.go')
+        spec.equal(files(G, 'app/main.go', 'example.test/unused/pkg'), '')
+        write(root .. '/go.work', 'use ./app\nreplace example.test/lib => ./second\n')
+        spec.equal(files(G, 'app/main.go', 'example.test/lib/pkg'), 'second/pkg/api.go')
+        write(root .. '/go.work', 'use ./app\nreplace example.test/lib => example.test/fork v1.0.0\n')
+        spec.equal(files(G, 'app/main.go', 'example.test/lib/pkg'), '')
+        os.remove(root .. '/go.work')
+        write(root .. '/app/go.mod', 'module example.test/app\nrequire example.test/lib v1.3.0\n'
+            .. 'replace example.test/lib v1.2.0 => ../first\n')
+        spec.equal(files(G, 'app/main.go', 'example.test/lib/pkg'), '')
+    end)
+    spec.it('blocks nested module leakage, ambiguous replacements and undeclared packages', function()
+        local root = tmp_root .. '/go_boundaries'
+        write(root .. '/go.work', 'use (\n app\n other\n)\n')
+        write(root .. '/app/go.mod', 'module example.test/app\nrequire example.test/lib v1.0.0\nreplace example.test/lib => ../first\n')
+        write(root .. '/other/go.mod', 'module example.test/other\nreplace example.test/lib => ../second\n')
+        write(root .. '/app/nested/go.mod', 'module example.test/private\n')
+        write(root .. '/first/go.mod', 'module example.test/lib\n')
+        write(root .. '/second/go.mod', 'module example.test/lib\n')
+        local G = build({ ['app/main.go'] = 'package main', ['other/api.go'] = 'package main',
+            ['app/nested/api.go'] = 'package nested', ['first/api.go'] = 'package lib', ['second/api.go'] = 'package lib' }, root)
+        spec.equal(files(G, 'app/main.go', 'example.test/app/nested'), '')
+        local found, reason = files(G, 'app/main.go', 'example.test/lib')
+        spec.equal(found, ''); spec.contains(reason, 'conflicting')
+        write(root .. '/go.work', 'use (\n app\n other\n)\nreplace example.test/lib => ./second\n')
+        spec.equal(files(G, 'app/main.go', 'example.test/lib'), 'second/api.go')
+        write(root .. '/other/go.mod', 'module example.test/app\n')
+        local ctx = {}
+        found, reason = files(G, 'app/main.go', 'example.test/app', ctx)
+        spec.equal(found, ''); spec.contains(reason, 'ambiguous'); spec.truthy(ctx.go_incomplete)
+    end)
+    spec.it('keeps legacy suffix matching unique and restricted to Go package files', function()
+        local G = build({ ['app.go'] = 'package main', ['a/util/api.go'] = 'package util',
+            ['b/util/api.go'] = 'package util', ['a/util/other.ts'] = 'export function Save() {}' })
+        spec.equal(files(G, 'app.go', 'example.test/a/util'), 'a/util/api.go')
+        local found, reason = files(G, 'app.go', 'unmatched.test/util')
+        spec.equal(found, ''); spec.contains(reason, 'ambiguous')
+    end)
+    spec.it('bounds configuration work, rejects escapes and preserves cancellation identity', function()
+        local root = tmp_root .. '/go_limits'
+        write(root .. '/go.mod', 'module example.test/app\n')
+        local G = build({ ['main.go'] = 'package main\nimport selected "example.test/app/pkg"\nfunc GoRun() { selected.Save() }',
+            ['pkg/api.go'] = 'package pkg\nfunc Save() {}' }, root)
+        local limit = go.MAX_CONFIGS; go.MAX_CONFIGS = 1
+        local ok, err = pcall(function()
+            local Q = graph.query(G, { explain = true })
+            spec.equal(#Q.out[G.by_name.GoRun[1]], 0); spec.truthy(Q.incomplete)
+            spec.contains(require('codeoutline.query_report').render(Q.report, G), 'Go configuration probe limit')
+        end)
+        go.MAX_CONFIGS = limit; assert(ok, err)
+        write(root .. '/go.work', 'use ../outside\n')
+        local ctx = {}; local found, reason = files(G, 'main.go', 'example.test/app/pkg', ctx)
+        spec.equal(found, ''); spec.contains(reason, 'escapes'); spec.truthy(ctx.go_incomplete)
+        os.remove(root .. '/go.work')
+        local control = require('codeoutline.control'); local cancelled = control.cancelled()
+        control.callback = function() error(cancelled, 0) end
+        ok, err = pcall(files, G, 'main.go', 'example.test/app/pkg')
+        control.callback = nil; spec.equal(ok, false); spec.equal(err, cancelled)
+    end)
+    spec.it('reports file and node limits without returning partial package targets', function()
+        local root = tmp_root .. '/go_package_limits'
+        write(root .. '/go.mod', 'module example.test/app\n')
+        local G = build({ ['main.go'] = 'package main\nimport api "example.test/app/pkg"\nfunc LimitedRun() { api.Save() }',
+            ['pkg/a.go'] = 'package api\nfunc First() {}\nfunc Save() {}',
+            ['pkg/b.go'] = 'package api\nfunc Another() {}' }, root)
+        local file_limit, node_limit = go.MAX_FILES, go.MAX_NODES
+        local ok, err = pcall(function()
+            go.MAX_FILES = 1
+            local ctx = {}; local found, reason = files(G, 'main.go', 'example.test/app/pkg', ctx)
+            spec.equal(found, ''); spec.truthy(ctx.go_incomplete); spec.contains(reason, 'file limit')
+            go.MAX_FILES, go.MAX_NODES = file_limit, 1
+            local Q = graph.query(G, { explain = true })
+            spec.equal(#Q.out[G.by_name.LimitedRun[1]], 0); spec.truthy(Q.incomplete)
+            spec.contains(require('codeoutline.query_report').render(Q.report, G), 'node limit')
+        end)
+        go.MAX_FILES, go.MAX_NODES = file_limit, node_limit; assert(ok, err)
+    end)
+end)
+
 spec.describe('query-owned JS workspace packages', function()
     local function build(files, root)
         local records = {}

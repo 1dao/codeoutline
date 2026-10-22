@@ -44,7 +44,8 @@ end
 
 function M.context(G)
     local ctx = { modules = {}, exports = {}, module_reasons = {},
-        workspace_stats = { reads = 0, bytes = 0, directories = 0, packages = 0 } }
+        workspace_stats = { reads = 0, bytes = 0, directories = 0, packages = 0 },
+        go_stats = { reads = 0, bytes = 0, modules = 0 } }
     if G.root then
         for _, name in ipairs({ 'tsconfig.json', 'jsconfig.json', 'tsconfig.base.json' }) do
             local opts = config(G.root .. '/' .. name, {}, 0)

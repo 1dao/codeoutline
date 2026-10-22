@@ -515,17 +515,17 @@ local function scan(V, targets, name)
             end
         end
     end
-    return hits, V.js_context.include_incomplete or V.js_context.workspace_incomplete or false
+    return hits, V.js_context.include_incomplete or V.js_context.workspace_incomplete or V.js_context.go_incomplete or false
 end
 
 -- Files one import record resolves to, through the graph's dependency
 -- rules: a temporary record holding only that import.
 function M.import_files(V, f, imp)
     local rec = V.files[f]
-    local fake = { path = rec.language == 'go' and '\0/import.go' or rec.path, language = rec.language,
+    local fake = { path = rec.path, language = rec.language,
         nodes = {}, imports = { imp } }
     rawset(V.files, -1, fake)
-    local ok, direct = pcall(graph.dependencies, V, -1, V.js_context)
+    local ok, direct = pcall(graph.dependencies, V, -1, V.js_context, true)
     rawset(V.files, -1, nil)
     if not ok and control.is_interrupted(direct) then error(direct, 0) end
     local files = {}
@@ -1046,7 +1046,7 @@ function handlers.lsp_definition(req)
         -- An import line: `require "a.b"`, `dofile("x.lua")`, `#include <x.h>`, `from . import m`.
         local files = import_targets(V, f, line, req.includePaths)
         if #files > 0 or #targets == 0 then
-            return files, V.js_context.include_incomplete or V.js_context.workspace_incomplete
+            return files, V.js_context.include_incomplete or V.js_context.workspace_incomplete or V.js_context.go_incomplete
         end
     end
     if c.decl and is_decl(V.nodes[targets[1]]) then
@@ -1059,7 +1059,7 @@ function handlers.lsp_definition(req)
     end
     local result = {}
     for _, id in ipairs(targets) do result[#result + 1] = (location(V, id)) end
-    return result, V.js_context.include_incomplete or V.js_context.workspace_incomplete
+    return result, V.js_context.include_incomplete or V.js_context.workspace_incomplete or V.js_context.go_incomplete
 end
 
 -- Follow unmatched delimiters up to the cursor. Commas in nested calls,
@@ -1247,13 +1247,13 @@ function handlers.lsp_outgoing(req)
             end
         end
     end
-    return result, V.js_context.include_incomplete or V.js_context.workspace_incomplete
+    return result, V.js_context.include_incomplete or V.js_context.workspace_incomplete or V.js_context.go_incomplete
 end
 
 function handlers.lsp_references(req)
     local V, _, c, targets = at(req)
     if not V then return {} end
-    if #targets == 0 then return {}, V.js_context.workspace_incomplete end
+    if #targets == 0 then return {}, V.js_context.workspace_incomplete or V.js_context.go_incomplete end
     local set = {}
     for _, id in ipairs(targets) do
         if not REFERENCE[V.nodes[id].kind] then

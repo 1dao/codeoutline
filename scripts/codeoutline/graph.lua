@@ -69,7 +69,7 @@ local function push3(t, k, a, b, c)
 end
 
 -- Files a file depends on, resolved from its #include / import records.
-local function resolve_deps(G, f, js_context)
+local function resolve_deps(G, f, js_context, imports_only)
     local rec = G.files[f]
     local deps = {}
     local function add(g) if g and g ~= f then deps[g] = true end end
@@ -131,21 +131,7 @@ local function resolve_deps(G, f, js_context)
             -- dofile/loadfile take a path.
             for _, g in ipairs(lua_bindings.modules(G, imp, js_context and js_context.lua)) do add(g) end
         elseif rec.language == 'go' then
-            -- import "github.com/org/repo/pkg/sub": the package is the directory
-            -- whose path ends with the longest matching suffix of the import
-            local segs = {}
-            for s in path:gmatch('[^/]+') do segs[#segs + 1] = s end
-            for k = 1, #segs do
-                local suffix = table.concat(segs, '/', k)
-                local hit = false
-                for _, d in ipairs(G.dir_by_base[segs[#segs]] or {}) do
-                    if d == suffix or d:sub(-(#suffix + 1)) == '/' .. suffix then
-                        for _, g in ipairs(G.dir_files[d]) do add(g) end
-                        hit = true
-                    end
-                end
-                if hit then break end
-            end
+            for _, g in ipairs(require('codeoutline.go_modules').files(G, f, path, js_context)) do add(g) end
         elseif rec.language == 'javascript' or rec.language == 'typescript' or rec.language == 'arkts' then
             add(js_resolution.module(G, f, path, js_context, imp.kind))
         elseif rec.language == 'csharp' then
@@ -196,7 +182,9 @@ local function resolve_deps(G, f, js_context)
     if (rec.language == 'java' or rec.language == 'kotlin') and rec.package then
         for _, g in ipairs(G.pkg_files[rec.package] or {}) do add(g) end
     elseif rec.language == 'go' then
-        for _, g in ipairs(G.dir_files[here] or {}) do add(g) end
+        if not imports_only then
+            for _, g in ipairs(require('codeoutline.go_modules').peers(G, f, js_context)) do add(g) end
+        end
     elseif rec.language == 'csharp' then
         for _, node in ipairs(rec.nodes) do
             if node.kind == 'namespace' then
@@ -330,6 +318,10 @@ local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired, accept,
     if evidence == '' then evidence = nil end
     local strategy = 'js/ts binding'
     local exact, binding_reason = js_resolution.resolve(G, f, name, kind, recv, evidence, js_context)
+    if G.files[f].language == 'go' then
+        strategy = 'go package binding'
+        exact, binding_reason = require('codeoutline.go_modules').resolve(G, f, name, recv, js_context)
+    end
     if exact == nil and G.files[f].language == 'python' then
         strategy = 'python binding'
         exact = require('codeoutline.python_bindings').resolve(G, f, evidence, js_context)
@@ -586,6 +578,7 @@ function M.query(symbols, opts)
     js_context.ordinary = require('codeoutline.ordinary_bindings').context(symbols, js_context)
     Q.stats.ordinary = js_context.ordinary.stats
     Q.stats.workspace = js_context.workspace_stats
+    Q.stats.go = js_context.go_stats
     local report = opts.explain and require('codeoutline.query_report').new() or nil
     Q.report = report
     local indirect = require('codeoutline.indirect').query(symbols, opts.dispatch_rules, report)
@@ -609,7 +602,7 @@ function M.query(symbols, opts)
         Q.stats.resolved_refs = Q.stats.resolved_refs + 1
         local found, reason = resolve_ref(symbols, f, ids[refs.from[i]], refs.name[i], refs.kind[i],
             refs.recv[i] or nil, direct, paired, nil, js_context.ordinary.evidence(f, i), js_context)
-        if js_context.workspace_incomplete then Q.incomplete = true end
+        if js_context.workspace_incomplete or js_context.go_incomplete then Q.incomplete = true end
         if report and explain and (refs.kind[i] == 'call' or refs.kind[i] == 'member_call') then
             if (not found or #found == 0) and explain == true then
                 report:add({ source = ids[refs.from[i]], line = refs.line[i], call = refs.name[i], reason = reason or 'unresolved reference' })
@@ -700,7 +693,7 @@ function M.query(symbols, opts)
         -- selective name test first. Checkpoints run per file and per chunk.
         local files = symbols.files
         local candidates = js_context.ordinary.candidates(wanted)
-        if js_context.workspace_incomplete then Q.incomplete = true end
+        if js_context.workspace_incomplete or js_context.go_incomplete then Q.incomplete = true end
         for _, f in ipairs(symbols.file_order) do
             control.check()
             local alias_refs = js_context.ordinary.aliases(f, wanted, candidates)

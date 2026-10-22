@@ -646,6 +646,61 @@ spec.describe('LSP navigation', function()
         spec.equal(#found, 1); spec.equal(found[1].range.start.line, 2)
         navigation.close('js-typed')
     end)
+    spec.it('shares Go workspace imports across navigation, completion, references and draft/configuration changes', function()
+        local prefix = 'go-workspace-lsp/'
+        for _, path in ipairs({ 'app', 'first', 'second', 'unrelated' }) do
+            assert(xutils.mkdir_p(nav_root .. '/' .. prefix .. path))
+        end
+        nav_write(prefix .. 'go.work', 'use (\n ./app\n ./first\n)\n')
+        nav_write(prefix .. 'app/go.mod', 'module example.test/client\n')
+        nav_write(prefix .. 'first/go.mod', 'module example.test/api/v2\n')
+        nav_write(prefix .. 'second/go.mod', 'module example.test/api/v2\n')
+        nav_write(prefix .. 'first/api.go', 'package actual\nfunc GoWorkspaceSave() {}\nfunc FirstOnly() {}\nfunc hidden() {}')
+        nav_write(prefix .. 'second/api.go', 'package actual\n\nfunc GoWorkspaceSave() {}\nfunc SecondOnly() {}')
+        nav_write(prefix .. 'unrelated/api.go', 'package actual\nfunc GoWorkspaceSave() {}\nfunc Unrelated() {}')
+        nav_write(prefix .. 'app/peer.go', 'package main\nfunc PeerOnly() {}')
+        local source = 'package main\nimport "example.test/api/v2"\n'
+            .. 'func GoWorkspaceRun() { actual.GoWorkspaceSave() }\n'
+        local client = prefix .. 'app/main.go'
+        nav_write(client, source)
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local doc = docs.read(nav_root .. '/' .. client)
+        local function check(folder, line, label, session)
+            local found, response = nav({ method = 'lsp_definition', session = session, uri = doc.uri,
+                position = doc:position(assert(source:find('GoWorkspaceSave()', 1, true))) })
+            spec.equal(#found, 1); spec.equal(found[1].uri, nav_uri(prefix .. folder .. '/api.go'))
+            spec.equal(found[1].range.start.line, line); spec.equal(response.incomplete, false)
+            local completion = require('codeoutline.completion').complete({ root = nav_root, session = session, uri = doc.uri,
+                position = doc:position(assert(source:find('actual.GoWorkspaceSave', 1, true)) + 6) })
+            local labels = {}; for _, item in ipairs(completion.items) do labels[item.label] = true end
+            spec.truthy(labels.GoWorkspaceSave and labels[label]); spec.nil_value(labels.PeerOnly)
+            spec.nil_value(labels.Unrelated); spec.nil_value(labels.hidden); spec.equal(completion.incomplete or false, false)
+            local uses = nav({ method = 'lsp_references', session = session, uri = found[1].uri,
+                position = found[1].range.start, includeDeclaration = false })
+            spec.equal(#uses, 1); spec.equal(uses[1].uri, doc.uri)
+            found = nav({ method = 'lsp_definition', session = session, uri = doc.uri,
+                position = { line = 1, character = 12 } })
+            spec.equal(#found, 1); spec.equal(found[1].uri, nav_uri(prefix .. folder .. '/api.go'))
+        end
+        check('first', 1, 'FirstOnly')
+        nav_write(prefix .. 'go.work', 'use (\n ./app\n ./second\n)\n')
+        check('second', 2, 'SecondOnly')
+        local target = nav_uri(prefix .. 'second/api.go')
+        navigation.sync({ session = 'go-workspace-draft', open = { [target] = 1 }, changed = {
+            [target] = { version = 1, language = 'go', source = 'package actual\n\n\nfunc GoWorkspaceSave() {}\nfunc DraftOnly() {}' } } })
+        check('second', 3, 'DraftOnly', 'go-workspace-draft')
+        navigation.close('go-workspace-draft')
+        local go = require('codeoutline.go_modules')
+        local limit = go.MAX_CONFIGS; go.MAX_CONFIGS = 1
+        local ok, err = pcall(function()
+            local found, response = nav({ method = 'lsp_definition', uri = doc.uri, position = { line = 1, character = 12 } })
+            spec.equal(#found, 0); spec.truthy(response.incomplete)
+            local completion = require('codeoutline.completion').complete({ root = nav_root, uri = doc.uri,
+                position = doc:position(assert(source:find('actual.GoWorkspaceSave', 1, true)) + 6) })
+            spec.equal(#completion.items, 0); spec.truthy(completion.incomplete)
+        end)
+        go.MAX_CONFIGS = limit; assert(ok, err)
+    end)
     spec.it('shares workspace packages across navigation, completion, references, drafts and manifest edits', function()
         local prefix = 'workspace-lsp/'
         assert(xutils.mkdir_p(nav_root .. '/' .. prefix .. 'packages/core'))

@@ -953,6 +953,7 @@ function M.complete(req)
     if req.trigger and not is_member then return { items = {} } end
     self.fn, self.owner = self:scope()
     self.aliases = module_aliases(T, self.language)
+    if self.language == 'go' then self.aliases = require('codeoutline.go_modules').aliases(V, f, V.js_context) end
     local entries = {}
     if is_member then
         local chain = receiver_chain(T, op, member)
@@ -1060,7 +1061,8 @@ function M.complete(req)
             items[#items + 1] = item_for(entry, self.language, V, not self:expired())
         end
     end
-    return { items = items, incomplete = self.incomplete or V.js_context.include_incomplete or V.js_context.workspace_incomplete }
+    return { items = items, incomplete = self.incomplete or V.js_context.include_incomplete
+        or V.js_context.workspace_incomplete or V.js_context.go_incomplete }
 end
 
 navigation.register('lsp_completion', function(req)

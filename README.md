@@ -131,6 +131,25 @@ configuration per query (1 MiB per file); exceeded limits report incomplete resu
 navigation, not full Node/TypeScript module resolution: dependency installation, lockfiles, package
 `imports`, custom conditions, arbitrary YAML, and CommonJS export analysis are not provided.
 
+Go imports use the nearest in-project `go.mod` and `go.work`: declared module paths,
+workspace `use` lists, and relative local `replace` targets locate indexed packages.
+Workspace replacements override module replacements; version-specific replacements
+require an agreed direct requirement across workspace modules. Module boundaries,
+duplicate names and conflicting replacements prevent speculative matches. Package calls,
+navigation and completion share explicit aliases and declared package names (including
+imports ending in `/v2`). Imported packages exclude test files and non-Go files;
+unqualified function lookup stays within the current package. With no module metadata,
+directory-suffix lookup remains available only when it finds a unique package.
+Configuration is query-owned and reloaded on the next request. Limits are 1,024 config
+probes, 1 MiB per config, 8 MiB total, 256 workspace modules, 512 files, 8,192 scanned
+nodes and 64 matching declarations per package lookup (4,096 legacy directory candidates);
+exceeded limits report incomplete results. Lookup stays inside
+the indexed project and does not invoke Go or download dependencies. The full module
+version graph, host `GOWORK`/`GOPATH`, vendor/module caches, build tags, dot imports,
+lexical shadowing and full receiver/type inference are not modeled. Configuration accepts
+standard line/block directives and JSON-compatible quoted paths; absolute local paths
+and other Go string escape forms are outside this supported subset.
+
 C#, Java and Kotlin implementation relationships use declared inheritance and matching named
 parameter types. Explore and callers label these edges `implementation`: they describe possible
 implementations, not calls made by the method or a proven runtime receiver. Go to Implementation

@@ -25,12 +25,13 @@ M.EXTENSIONS = {
     go = 'go',
     js = 'javascript', jsx = 'javascript', mjs = 'javascript', cjs = 'javascript',
     ts = 'typescript', tsx = 'typescript', mts = 'typescript', cts = 'typescript',
+    ets = 'arkts',
     cs = 'csharp',
     rs = 'rust',
 }
 
 -- Languages sharing one parser module; the language name is passed along.
-local MODULE = { javascript = 'js', typescript = 'js' }
+local MODULE = { javascript = 'js', typescript = 'js', arkts = 'js' }
 
 function M.language(path)
     local ext = path:match('%.([%w]+)$')

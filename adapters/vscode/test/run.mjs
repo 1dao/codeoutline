@@ -23,6 +23,8 @@ try {
     await writeFile(join(first, 'receive.lua'), "xthread.register('done', function() end)\n");
     await writeFile(join(first, 'KService.kt'), 'package demo\nfun kotlinWork(value: Int): Int = value\n');
     await writeFile(join(first, 'KClient.kt'), 'package demo\nfun kotlinRun() = kotlinWork(1)\n');
+    await writeFile(join(first, 'ArkHelper.ets'), 'export function arkSave() {}\n');
+    await writeFile(join(first, 'ArkPage.ets'), "import { arkSave } from './ArkHelper';\n@Component\nstruct ArkPage {\n  @State count: number = 0;\n  click() { arkSave(); }\n  build() { Column() { Button('go').onClick(() => { this.click(); }) } }\n}\n");
     await writeFile(join(second, 'other.lua'), 'function other_root() end\n');
     await writeFile(join(first, '.codeoutline.json'), JSON.stringify({ definitionRules: [
         { call: 'xthread.post', argument: 2, target: 'xthread.register', targetArgument: 1 }
@@ -31,7 +33,7 @@ try {
     await writeFile(workspace, JSON.stringify({ folders: [{ path: first }, { path: second }], settings: {
         'codeoutline.serverPath': join(repo, 'bin', process.platform === 'win32' ? 'xnet.exe' : 'xnet'),
         'codeoutline.serverArguments': [join(repo, 'scripts/codeoutline/command.lua'), 'LOG_STDERR=1', 'LOG_FILE=0', 'lsp', '--stdio'],
-        'codeoutline.mode': 'navigation', 'codeoutline.languages': ['lua', 'kotlin']
+        'codeoutline.mode': 'navigation', 'codeoutline.languages': ['lua', 'kotlin', 'arkts']
     } }));
     const executable = process.env.CODEOUTLINE_EDITOR_PATH || await downloadAndUnzipVSCode();
     const env = { ...process.env, CODEOUTLINE_AUTO_UPDATE: '0' };

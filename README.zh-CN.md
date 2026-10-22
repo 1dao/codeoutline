@@ -95,7 +95,12 @@ Linux 上解码 GBK 源码需要系统 iconv 的 GBK 模块；EL8/EL9 最小安�
 
 ## 支持的语言
 
-C、C++、C#、Go、Java、JavaScript / TypeScript（含 JSX/TSX）、Kotlin（`.kt` / `.kts`）、Lua、Python、Rust。
+C、C++、C#、Go、Java、JavaScript / TypeScript（含 JSX/TSX）、ArkTS（`.ets`）、Kotlin（`.kt` / `.kts`）、Lua、Python、Rust。
+
+ArkTS 复用 JS/TS 解析器，将组件 `struct` 按类索引，支持带装饰器的字段、方法、
+本地模块导入和 ArkUI 调用；声明式 UI 块不会被当作方法声明。
+这是启发式索引，不执行 ArkTS 类型检查；尚不解析 SDK `@kit.*`/`@ohos.*`、资源引用，
+也不模拟生成的 UI 生命周期或状态行为。Zed 需要另外安装 ArkTS 语言扩展。
 
 Kotlin 支持声明、主构造器属性、扩展函数、表达式函数体、包导入与别名，以及普通、泛型和尾随 lambda 调用。
 关系解析仍是启发式的；不建模编译器生成成员、lambda 隐式接收者、字符串模板内的表达式、Java 互操作或协程/框架分派。

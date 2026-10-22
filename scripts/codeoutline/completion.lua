@@ -37,8 +37,8 @@ end
 local WRAPPERS = {}
 for word in ([[Option Box Rc Arc RefCell Cell Mutex RwLock Weak unique_ptr shared_ptr weak_ptr Ptr Ref
     Optional Nullable Promise Future Lazy]]):gmatch('%S+') do WRAPPERS[word] = true end
-local TYPE_AFTER = { go = true, rust = true, typescript = true, javascript = true, python = true, kotlin = true }
-local DYNAMIC = { lua = true, python = true, javascript = true, typescript = true }
+local TYPE_AFTER = { go = true, rust = true, typescript = true, arkts = true, javascript = true, python = true, kotlin = true }
+local DYNAMIC = { lua = true, python = true, javascript = true, typescript = true, arkts = true }
 
 local function text_of(T, i) return T.s[i] and T:text(i) or '' end
 local function is(T, i, s) return T.k[i] == 'op' and text_of(T, i) == s end
@@ -113,7 +113,7 @@ local function declared(node, language)
             rest = rest:sub(#params + 1):gsub('^%s+', '')
             if rest:sub(1, 1) == '(' then rest = rest:match('^%((.-)[,%)]') or '' end
             return normalize(rest)
-        elseif language == 'typescript' or language == 'javascript' or language == 'kotlin' then
+        elseif language == 'typescript' or language == 'arkts' or language == 'javascript' or language == 'kotlin' then
             local after = sig:match('%)%s*:%s*([^{=]+)$')
             return after and normalize(after)
         elseif language == 'lua' then
@@ -307,7 +307,7 @@ local function declarations(T, a, b, language, skip, out)
                     local k = i + 1
                     while T.k[k] == 'id' do add(k); if is(T, k + 1, ',') then k = k + 2 else break end end
                 elseif kw(T, i, 'as') and T.k[i + 1] == 'id' then add(i + 1) end
-            elseif language == 'javascript' or language == 'typescript' or language == 'kotlin' then
+            elseif language == 'javascript' or language == 'typescript' or language == 'arkts' or language == 'kotlin' then
                 if (kw(T, i, 'let') or kw(T, i, 'const') or kw(T, i, 'var') or kw(T, i, 'val')) and T.k[i + 1] == 'id' then
                     local k, type = i + 2, nil
                     if is(T, k, ':') then
@@ -399,7 +399,7 @@ local function module_aliases(T, language)
                 end
                 j = j + 1
             end
-        elseif (language == 'javascript' or language == 'typescript') then
+        elseif (language == 'javascript' or language == 'typescript' or language == 'arkts') then
             if kw(T, i, 'import') and is(T, i + 1, '*') and T.k[i + 3] == 'id' and T.k[i + 5] == 'str' then
                 out[text_of(T, i + 3)] = { kind = 'import', path = text_of(T, i + 5):sub(2, -2) }
             elseif kw(T, i, 'import') and T.k[i + 1] == 'id' and T.k[i + 3] == 'str' then
@@ -525,7 +525,7 @@ function Completion:members(ids, depth, seen)
         -- Out-of-line members anywhere: `Box::area`, Go methods, Lua `M.f` / `M:f`.
         for _, entry in ipairs(self:owned(node.qualified, graph.family(language))) do out[#out + 1] = entry end
         -- Attributes assigned in methods (Python, JS) or on Lua tables.
-        if T and (language == 'python' or language == 'javascript' or language == 'typescript' or language == 'lua') then
+        if T and (language == 'python' or language == 'javascript' or language == 'typescript' or language == 'arkts' or language == 'lua') then
             local first, last = 1, T.n
             if target.start_byte and language ~= 'lua' then
                 first, last = nil, nil

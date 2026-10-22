@@ -47,7 +47,7 @@ local VALUE = { ['function'] = true, method = true }
 local C_FAMILY = { c = true, cpp = true }
 local HEADER_EXT = { h = true, hpp = true, hh = true, hxx = true }
 local SOURCE_EXT = { c = true, cc = true, cpp = true, cxx = true }
-local FAMILY = { c = 'c', cpp = 'c', javascript = 'js', typescript = 'js' }
+local FAMILY = { c = 'c', cpp = 'c', javascript = 'js', typescript = 'js', arkts = 'js' }
 local function family(lang) return FAMILY[lang] or lang end
 
 local function dirname(p) return p:match('^(.*)/[^/]*$') or '' end
@@ -144,7 +144,7 @@ local function resolve_deps(G, f, js_context)
                 end
                 if hit then break end
             end
-        elseif rec.language == 'javascript' or rec.language == 'typescript' then
+        elseif rec.language == 'javascript' or rec.language == 'typescript' or rec.language == 'arkts' then
             add(js_resolution.module(G, f, path, js_context))
         elseif rec.language == 'csharp' then
             for _, g in ipairs(G.ns_files[path] or {}) do add(g) end

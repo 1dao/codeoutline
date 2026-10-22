@@ -160,7 +160,7 @@ function M.query(G, rules, report)
         if arg and not literal and arg.import then
             local imp = arg.import
             local rec = G.files[f]
-            if rec.language == 'javascript' or rec.language == 'typescript' then
+            if rec.language == 'javascript' or rec.language == 'typescript' or rec.language == 'arkts' then
                 local js = require('codeoutline.js_resolution')
                 dependencies.js = dependencies.js or js.context(G)
                 return js.imported(G, f, imp.path, arg.member, dependencies.js) or {}

@@ -96,7 +96,13 @@ On Linux, decoding GBK sources needs the GBK module of the system iconv. Minimal
 
 ## Supported languages
 
-C, C++, C#, Go, Java, JavaScript / TypeScript (including JSX/TSX), Kotlin (`.kt` / `.kts`), Lua, Python, and Rust.
+C, C++, C#, Go, Java, JavaScript / TypeScript (including JSX/TSX), ArkTS (`.ets`), Kotlin (`.kt` / `.kts`), Lua, Python, and Rust.
+
+ArkTS reuses the JS/TS parser: component `struct` declarations are indexed as classes,
+with decorated fields, methods, local module imports and ArkUI calls. Declarative UI
+blocks remain calls rather than method declarations. This is heuristic indexing, not
+ArkTS type checking; SDK `@kit.*`/`@ohos.*` resolution, resource references and generated
+UI lifecycle/state behavior are not modeled. Zed requires a separate ArkTS language extension.
 
 Kotlin includes declarations, constructor properties, extension functions, expression bodies,
 package imports (including aliases), and ordinary, generic and trailing-lambda calls.

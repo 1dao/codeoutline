@@ -1,4 +1,4 @@
--- lang/js.lua — index-level JavaScript / TypeScript parser: functions,
+-- lang/js.lua — index-level JavaScript / TypeScript / ArkTS parser: functions,
 -- arrow functions bound to names, classes (+ members: methods, accessors,
 -- fields, constructors), TS interfaces, type aliases, enums, namespaces,
 -- `a.b = function` assignments, module-level constants, ES imports /
@@ -159,8 +159,43 @@ end
 
 local parse_class_body
 
+-- Decorator names are bounded: adjacent identifiers belong to the member.
+local function skip_decorator(T, i, defs)
+    local x = i + 1
+    if T.k[x] ~= 'id' then return x end
+    defs[x] = true
+    x = x + 1
+    while is(T, x, '.') and T.k[x + 1] == 'id' do
+        defs[x + 1] = true
+        x = x + 2
+    end
+    if is(T, x, '(') and T.m[x] then x = T.m[x] + 1 end
+    return x
+end
+
+-- One linear pass distinguishes object methods from ArkUI child blocks.
+-- Keep only candidate tokens, transiently; backward scans at every comma
+-- would make long argument lists and array literals quadratic.
+local function arkts_context(T, defs)
+    local members, stack, objects = {}, {}, {}
+    for i = 1, T.n do
+        if is(T, i, '@') then skip_decorator(T, i, defs) end
+        if is(T, i, '{') then
+            local prev = T:text(i - 1)
+            stack[#stack + 1] = i
+            objects[i] = prev == '=' or prev == '(' or prev == '[' or prev == ',' or prev == ':' or prev == 'return'
+        elseif is(T, i, '}') then
+            stack[#stack] = nil
+        elseif T.k[i] == 'id' and (is(T, i + 1, '(') or is(T, i + 1, '<'))
+            and objects[stack[#stack]] then
+            members[i] = true
+        end
+    end
+    return members
+end
+
 -- Scan [a, b] for definitions; `parent` is the enclosing node (if any).
-local function scan(T, r, a, b, parent, defs, stem)
+local function scan(T, r, a, b, parent, defs, members)
     local i = a
     while i <= b do
         local k, t = T.k[i], T:text(i)
@@ -180,14 +215,15 @@ local function scan(T, r, a, b, parent, defs, stem)
                     defs[name_tok] = true
                     local node = common.add_node(r, T, { kind = 'function', name = T:text(name_tok), ni = name_tok, parent = parent,
                         ti = start, tj = close, sig = common.sig(T, start, body and body - 1 or T.m[p], 200) })
-                    if body then scan(T, r, body + 1, close - 1, node, defs, stem) end
+                    if body then scan(T, r, body + 1, close - 1, node, defs, members) end
                     i = close + 1
                     handled = true
                 end
             end
         elseif (k == 'kw' and t == 'class' and (T.k[i + 1] == 'id' or kw(T, i + 1, 'extends') or is(T, i + 1, '{'))
             and not is(T, i - 1, '.') and not is(T, i - 1, '<'))       -- not JSX `class="..."`
-            or ((t == 'interface') and k == 'id' and T.k[i + 1] == 'id') then
+            or ((t == 'interface' or (r.language == 'arkts' and t == 'struct'))
+                and k == 'id' and T.k[i + 1] == 'id' and not is(T, i - 1, '.')) then
             local name_tok = T.k[i + 1] == 'id' and i + 1 or nil
             if name_tok and T:text(name_tok) == 'extends' then name_tok = nil end
             local x = i + 1
@@ -211,7 +247,8 @@ local function scan(T, r, a, b, parent, defs, stem)
                         mode[#mode + 1] = nm
                     end
                 end
-                local kind = t == 'class' and 'class' or 'interface'
+                -- Components share class member/receiver/call resolution.
+                local kind = t == 'interface' and 'interface' or 'class'
                 local node = common.add_node(r, T, {
                     kind = kind, name = name_tok and T:text(name_tok) or (is(T, i - 1, '=') and T:text(i - 2)) or 'default',
                     ni = name_tok or i,
@@ -219,7 +256,7 @@ local function scan(T, r, a, b, parent, defs, stem)
                     extends = #extends > 0 and extends or nil, implements = #implements > 0 and implements or nil,
                 })
                 if name_tok then defs[name_tok] = true end
-                parse_class_body(T, r, x, T.m[x], node, defs, stem)
+                parse_class_body(T, r, x, T.m[x], node, defs, members)
                 i = T.m[x] + 1
                 handled = true
             end
@@ -254,7 +291,7 @@ local function scan(T, r, a, b, parent, defs, stem)
             if is(T, x, '{') and T.m[x] then
                 local nm = common.sig(T, i + 1, x - 1):gsub('%s', ''):gsub('^["\']', ''):gsub('["\']$', '')
                 local node = common.add_node(r, T, { kind = 'namespace', name = nm, ni = i + 1, nj = x - 1, parent = parent, ti = i, tj = T.m[x] })
-                scan(T, r, x + 1, T.m[x] - 1, node, defs, stem)
+                scan(T, r, x + 1, T.m[x] - 1, node, defs, members)
                 i = T.m[x] + 1
                 handled = true
             end
@@ -275,7 +312,7 @@ local function scan(T, r, a, b, parent, defs, stem)
                     defs[name_tok] = true
                     local node = common.add_node(r, T, { kind = 'function', name = T:text(name_tok), ni = name_tok, parent = parent,
                         ti = start, tj = fe, sig = common.sig(T, start, math.max(fb - 1, name_tok), 200) })
-                    if fb and is(T, fb, '{') then scan(T, r, fb + 1, fe - 1, node, defs, stem) end
+                    if fb and is(T, fb, '{') then scan(T, r, fb + 1, fe - 1, node, defs, members) end
                     i = fe + 1
                     handled = true
                 elseif not parent then
@@ -293,13 +330,14 @@ local function scan(T, r, a, b, parent, defs, stem)
             defs[i] = true
             local node = common.add_node(r, T, { kind = 'function', name = t, parent = parent,
                 ti = i, tj = fe, sig = common.sig(T, i, math.max(fb - 1, i), 200) })
-            if is(T, fb, '{') then scan(T, r, fb + 1, fe - 1, node, defs, stem) end
+            if is(T, fb, '{') then scan(T, r, fb + 1, fe - 1, node, defs, members) end
             i = fe + 1
             handled = true
         elseif k == 'id' and not defs[i] and (is(T, i + 1, '(') or is(T, i + 1, '<'))
             and (is(T, i - 1, '{') or is(T, i - 1, ',')
                 or ((word(T, i - 1, 'async') or word(T, i - 1, 'get') or word(T, i - 1, 'set') or is(T, i - 1, '*'))
                     and (is(T, i - 2, '{') or is(T, i - 2, ','))))
+            and (not members or members[i])
             and (function()
                 local p = skip_angle(T, i + 1, b)
                 if not (is(T, p, '(') and T.m[p]) then return false end
@@ -313,7 +351,7 @@ local function scan(T, r, a, b, parent, defs, stem)
             defs[i] = true
             local node = common.add_node(r, T, { kind = 'method', name = t, parent = parent,
                 ti = i, tj = close, sig = common.sig(T, i, body - 1, 200) })
-            scan(T, r, body + 1, close - 1, node, defs, stem)
+            scan(T, r, body + 1, close - 1, node, defs, members)
             i = close + 1
             handled = true
         elseif k == 'id' and is(T, i + 1, '=') and is(T, i - 1, '.') and not defs[i] then
@@ -329,7 +367,7 @@ local function scan(T, r, a, b, parent, defs, stem)
                 local node = common.add_node(r, T, { kind = 'function', name = T:text(i), ni = i, parent = parent,
                     ti = y, tj = fe, sig = common.sig(T, y, math.max(fb - 1, i), 200) })
                 r.nodes[node].qualified = table.concat(parts, '.')
-                if fb and is(T, fb, '{') then scan(T, r, fb + 1, fe - 1, node, defs, stem) end
+                if fb and is(T, fb, '{') then scan(T, r, fb + 1, fe - 1, node, defs, members) end
                 i = fe + 1
                 handled = true
             end
@@ -359,16 +397,14 @@ local function scan(T, r, a, b, parent, defs, stem)
 end
 
 -- Members of a class / interface body between '{' o and '}' c.
-parse_class_body = function(T, r, o, c, parent, defs, stem)
+parse_class_body = function(T, r, o, c, parent, defs, members)
     local x = o + 1
     while x < c do
         if is(T, x, ';') or is(T, x, ',') then
             x = x + 1
         elseif is(T, x, '@') then
             -- decorator: @name, @a.b, @name(...)
-            x = x + 1
-            while T.k[x] == 'id' or is(T, x, '.') do x = x + 1 end
-            if is(T, x, '(') and T.m[x] then x = T.m[x] + 1 end
+            x = skip_decorator(T, x, defs)
         else
             local start = x
             -- a modifier word is only a modifier when another member name follows
@@ -413,7 +449,7 @@ parse_class_body = function(T, r, o, c, parent, defs, stem)
                         local node = common.add_node(r, T, { kind = kind, name = name, ni = name_tok, parent = parent,
                             ti = start, tj = close, sig = common.sig(T, start, body and body - 1 or T.m[y], 200),
                             abstract = (not body) or nil })
-                        if body then scan(T, r, body + 1, close - 1, node, defs, stem) end
+                        if body then scan(T, r, body + 1, close - 1, node, defs, members) end
                     end
                     x = close + 1
                 else
@@ -434,12 +470,12 @@ parse_class_body = function(T, r, o, c, parent, defs, stem)
                         if fs then
                             local node = common.add_node(r, T, { kind = 'method', name = name, ni = name_tok, parent = parent,
                                 ti = start, tj = fe, sig = common.sig(T, start, math.max(fb - 1, name_tok), 200) })
-                            if is(T, fb, '{') then scan(T, r, fb + 1, fe - 1, node, defs, stem) end
+                            if is(T, fb, '{') then scan(T, r, fb + 1, fe - 1, node, defs, members) end
                             stop = math.max(stop, fe)
                         else
                             common.add_node(r, T, { kind = 'field', name = name, ni = name_tok, parent = parent,
                                 ti = start, tj = stop, sig = common.sig(T, start, stop, 120) })
-                            if eq then scan(T, r, eq + 1, stop, parent, defs, stem) end
+                            if eq then scan(T, r, eq + 1, stop, parent, defs, members) end
                         end
                     end
                     x = stop + 1
@@ -453,8 +489,8 @@ function M.parse(path, src, language, opts)
     local T = M.lang:tokenize(src)
     local r = common.new(path, language or 'javascript', opts)
     local defs = {}
-    local stem = path:match('([^/\\]+)%.[^./\\]+$') or path
-    scan(T, r, 1, T.n, nil, defs, stem)
+    local members = r.language == 'arkts' and arkts_context(T, defs) or nil
+    scan(T, r, 1, T.n, nil, defs, members)
     common.add_calls(r, T, 1, T.n)
     local kept = {}
     for _, ref in ipairs(r.refs) do

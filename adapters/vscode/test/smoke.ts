@@ -50,6 +50,20 @@ export async function run(): Promise<void> {
         'vscode.executeCompletionItemProvider', completionUri, new vscode.Position(1, 4), '.');
     assert.ok(completions.items.some(item => item.label === 'width'), 'member completion is registered');
     const kotlinUri = vscode.Uri.joinPath(folder, 'KClient.kt');
+    const arkUri = vscode.Uri.joinPath(folder, 'ArkPage.ets');
+    const arkDoc = await vscode.workspace.openTextDocument(arkUri);
+    assert.equal(arkDoc.languageId, 'arkts', 'ets files activate the ArkTS selector');
+    await vscode.window.showTextDocument(arkDoc);
+    const arkDefinitions = await eventually(() => vscode.commands.executeCommand<vscode.Location[]>(
+        'vscode.executeDefinitionProvider', arkUri, new vscode.Position(4, 13)),
+        value => value?.some(loc => loc.uri.path.endsWith('/ArkHelper.ets')));
+    assert.equal(arkDefinitions.length, 1);
+    const arkSymbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
+        'vscode.executeDocumentSymbolProvider', arkUri);
+    const component = arkSymbols.find(symbol => symbol.name === 'ArkPage');
+    assert.ok(component?.children.some(symbol => symbol.name === 'count'));
+    assert.ok(component?.children.some(symbol => symbol.name === 'build'));
+    assert.ok(!component?.children.some(symbol => symbol.name === 'Column'));
     const kotlinDoc = await vscode.workspace.openTextDocument(kotlinUri);
     assert.equal(kotlinDoc.languageId, 'kotlin', 'kt files activate the Kotlin selector without another extension');
     await vscode.window.showTextDocument(kotlinDoc);

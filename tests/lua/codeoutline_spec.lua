@@ -547,6 +547,42 @@ spec.describe('go', function()
     end)
 end)
 
+spec.describe('ArkTS components', function()
+    spec.it('keeps decorated members and UI calls without inventing UI methods', function()
+        local source = table.concat({
+            '@Entry', '@Component', 'struct Index {',
+            "  @State message: string = 'hello';",
+            '  @StorageLink("count") count: number = 0;',
+            '  @Builder', '  content() { Column() { Text(this.message) } }',
+            '  increment() { this.count++; }',
+            '  build() {',
+            '    Column({ space: 16 }) {',
+            '      Row() { Button("add").onClick(() => { this.increment(); }) }',
+            '      this.content()', '    }', '  }', '}',
+            'const options = { fetch(req) { return load(req); } };',
+        }, '\n')
+        local r = ci.parse('Index.ets', source)
+        spec.equal(r.language, 'arkts')
+        spec.equal(ci.language('INDEX.ETS'), 'arkts')
+        local n = names(r)
+        for _, expected in ipairs({ 'class Index@3', 'field Index.message@4', 'field Index.count@5',
+            'method Index.content@7', 'method Index.increment@8', 'method Index.build@9', 'method fetch@16' }) do
+            spec.contains(n, expected)
+        end
+        for _, node in ipairs(r.nodes) do
+            spec.truthy(node.name ~= 'Column' and node.name ~= 'Row' and node.name ~= 'State')
+            spec.equal(source:sub(node.name_start + 1, node.name_end), node.name)
+        end
+        local calls = refs(r)
+        for _, expected in ipairs({ 'content->Column', 'content->Text', 'build->Column',
+            'build->Row', 'build->increment', 'build->content' }) do spec.contains(calls, expected) end
+        spec.truthy(not calls:find('->StorageLink', 1, true))
+        local ts = ci.parse('plain.ts', 'const struct = 1; class Box { @State value: number = 0; }')
+        spec.contains(names(ts), 'field Box.value@1')
+        spec.truthy(not names(ts):find('class struct', 1, true))
+    end)
+end)
+
 spec.describe('javascript / typescript', function()
     spec.it('extracts functions, classes, members, TS types, and skips JSX class=', function()
         local r = ci.parse('m.tsx', table.concat({
@@ -1712,6 +1748,17 @@ spec.describe('JS module and receiver resolution', function()
         for path, source in pairs(files) do records[path] = ci.parse(path, source, { ordinary_bindings = true }) end
         return graph.build({ root = root, files = records })
     end
+    spec.it('resolves ArkTS component imports, directory barrels and TS helpers', function()
+        local G = build({
+            ['Widget.ets'] = '@Component\nexport struct Widget { build() {} }',
+            ['parts/index.ets'] = "export { Widget as Card } from '../Widget';",
+            ['helper.ts'] = 'export function save() {}',
+            ['Page.ets'] = "import { Card } from './parts'; import { save as persist } from './helper';\n"
+                .. '@Component\nstruct Page {\n  click() { persist(); }\n  build() { Column() { Card() } this.click(); }\n}',
+        })
+        spec.equal(edges_from(G, 'click'), 'save@helper.ts')
+        spec.equal(edges_from(G, 'build'), 'Widget@Widget.ets click@Page.ets')
+    end)
     spec.it('follows lexical function aliases and imported alias exports in both directions', function()
         local G = build({
             ['lib.ts'] = 'export function save() {}\nexport const persist = save;',

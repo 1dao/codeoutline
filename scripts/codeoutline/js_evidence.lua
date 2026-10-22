@@ -16,7 +16,7 @@ local function type_name(T, i)
 end
 
 function M.collect(r, T)
-    if r.language ~= 'javascript' and r.language ~= 'typescript' then return end
+    if r.language ~= 'javascript' and r.language ~= 'typescript' and r.language ~= 'arkts' then return end
     r.js_imports, r.js_exports = {}, {}
     local skip = {}
     local function export(name, local_name, path)

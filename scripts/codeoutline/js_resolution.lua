@@ -1,7 +1,7 @@
 -- JS/TS module and receiver evidence; deliberately not a type checker.
 local M = {}
 local control = require('codeoutline.control')
-local function js(rec) return rec and (rec.language == 'javascript' or rec.language == 'typescript') end
+local function js(rec) return rec and (rec.language == 'javascript' or rec.language == 'typescript' or rec.language == 'arkts') end
 local function dir(p) return p:match('^(.*)/[^/]*$') or '' end
 local function norm(p)
     local parts = {}
@@ -96,6 +96,10 @@ function M.module(G, f, spec, ctx)
     end
     for _, base in ipairs(bases) do
         local candidates = { base }
+        if G.files[f].language == 'arkts' then
+            candidates[#candidates + 1] = base .. '.ets'
+            candidates[#candidates + 1] = base .. '/index.ets'
+        end
         if base:match('%.js$') then candidates[#candidates + 1] = base:gsub('%.js$', '.ts'); candidates[#candidates + 1] = base:gsub('%.js$', '.tsx') end
         for _, ext in ipairs(extensions) do candidates[#candidates + 1] = base .. ext end
         for _, candidate in ipairs(candidates) do

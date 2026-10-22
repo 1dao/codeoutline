@@ -1,7 +1,7 @@
 -- Ordinary binding evidence belongs to one query, never to the resident index.
 local M = {}
 local control = require('codeoutline.control')
-local function js(rec) return rec.language == 'javascript' or rec.language == 'typescript' end
+local function js(rec) return rec.language == 'javascript' or rec.language == 'typescript' or rec.language == 'arkts' end
 local function evidence(rec, i)
     local refs = rec.refs
     return refs.binding and refs.binding[i] or refs.lua_binding and refs.lua_binding[i]

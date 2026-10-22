@@ -8,4 +8,4 @@ repository = "https://github.com/1dao/codeoutline"
 
 [language_servers.codeoutline]
 name = "CodeOutline"
-languages = ["C", "C++", "C#", "Go", "Java", "JavaScript", "Kotlin", "Lua", "Python", "Rust", "TSX", "TypeScript"]
+languages = ["ArkTS", "C", "C++", "C#", "Go", "Java", "JavaScript", "Kotlin", "Lua", "Python", "Rust", "TSX", "TypeScript"]

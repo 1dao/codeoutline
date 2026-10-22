@@ -3,7 +3,7 @@
 local M = {}
 local control = require('codeoutline.control')
 local member = { ['.'] = true, [':'] = true, ['::'] = true, ['->'] = true }
-local supported = { lua = true, javascript = true, typescript = true, python = true, c = true, cpp = true }
+local supported = { lua = true, javascript = true, typescript = true, arkts = true, python = true, c = true, cpp = true }
 local callable = { ['function'] = true, method = true, constructor = true }
 local statements = { ['local'] = true, ['function'] = true, ['end'] = true, ['return'] = true,
     ['if'] = true, ['else'] = true, ['elseif'] = true, ['until'] = true, ['for'] = true,
@@ -90,7 +90,7 @@ end
 -- decide whether an import can actually be used at a query site.
 local function imports(r, T)
     local result = {}
-    if r.language ~= 'lua' and r.language ~= 'javascript' and r.language ~= 'typescript'
+    if r.language ~= 'lua' and r.language ~= 'javascript' and r.language ~= 'typescript' and r.language ~= 'arkts'
         and r.language ~= 'python' then return result end
     local function add(local_name, path, imported, token)
         result[#result + 1] = { name = local_name, path = path, imported = imported, token = token }
@@ -105,7 +105,7 @@ local function imports(r, T)
             local path = quoted(T, i + 4, 'lua') or quoted(T, i + 5, 'lua')
             add(T:text(i + 1), path, '*', i + 1)
             result[#result].loader = T:text(i + 3)
-        elseif (r.language == 'javascript' or r.language == 'typescript') and s == 'import'
+        elseif (r.language == 'javascript' or r.language == 'typescript' or r.language == 'arkts') and s == 'import'
             and T:text(i + 1) ~= '(' then
             local j, entries = i + 1, {}
             if T.k[j] == 'id' then entries[#entries + 1] = { T:text(j), 'default', j }; j = j + 1 end
@@ -219,7 +219,7 @@ end
 function M.prepare(r, T)
     if not supported[r.language] then return function(v) return v end end
     local lua, python = r.language == 'lua', r.language == 'python'
-    local js = r.language == 'javascript' or r.language == 'typescript'
+    local js = r.language == 'javascript' or r.language == 'typescript' or r.language == 'arkts'
     local scopes, ends, stack = {}, { [0] = T.n }, {}
     local opens = { ['function'] = true, ['if'] = true, ['do'] = true, ['repeat'] = true }
     for i = 1, T.n do

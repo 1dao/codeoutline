@@ -26,6 +26,7 @@ spec.describe('symbol byte ranges', function()
         { 'sample.lua', 'function Box:sample(sample) return sample end', 'sample' },
         { 'sample.go', 'package main\nfunc sample(sample int) int { return sample }', 'sample' },
         { 'sample.ts', 'export function sample(sample: number) { return sample; }', 'sample' },
+        { 'sample.ets', '@Component\nstruct Box { @State sample: number = 0; build() { Text(this.sample) } }', 'sample' },
         { 'sample.cs', 'class Box { int sample(int sample) { return sample; } }', 'sample' },
         { 'sample.rs', 'fn sample(sample: i32) -> i32 { sample }', 'sample' },
     }
@@ -560,6 +561,31 @@ end
 
 spec.describe('LSP navigation', function()
     service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+    spec.it('ArkTS imports and this calls resolve with exact ranges and draft overlays', function()
+        nav_write('ArkHelper.ets', 'export function arkSave(value: number) {}\n')
+        local source = "import { arkSave } from './ArkHelper';\n@Component\nstruct ArkPage {\n"
+            .. '  @State count: number = 0;\n  click() { arkSave(this.count); }\n'
+            .. '  build() { Column() { Button("go").onClick(() => { this.click(); }) } }\n}'
+        nav_write('ArkPage.ets', source)
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local uri = nav_uri('ArkPage.ets')
+        local doc = docs.new(uri, source, 1, 'arkts')
+        local at = source:find('this.click', 1, true) + #'this.' - 1
+        local found = nav({ method = 'lsp_definition', uri = uri, position = doc:position(at) })
+        spec.equal(#found, 1); spec.equal(range_text('ArkPage.ets', found[1].range), 'click')
+        found = nav({ method = 'lsp_definition', uri = uri, position = { line = 4, character = 13 } })
+        spec.equal(#found, 1); spec.equal(found[1].uri, nav_uri('ArkHelper.ets'))
+        spec.equal(range_text('ArkHelper.ets', found[1].range), 'arkSave')
+        local edited = source:gsub('click', 'tap')
+        local edited_doc = docs.new(uri, edited, 2, 'arkts')
+        navigation.sync({ session = 'arkts-draft', open = { [uri] = 1 }, changed = {
+            [uri] = { version = 2, language = 'arkts', source = edited } } })
+        local draft = nav({ method = 'lsp_definition', session = 'arkts-draft', uri = uri,
+            position = edited_doc:position(edited:find('this.tap', 1, true) + #'this.' - 1) })
+        spec.equal(#draft, 1); spec.equal(draft[1].range.start.line, 4)
+        navigation.close('arkts-draft')
+        spec.equal(docs.new('untitled:ArkTS', '@Component struct View { build() {} }', 1, 'arkts'):parse().nodes[1].name, 'View')
+    end)
     spec.it('Kotlin definitions, aliased references, signatures and draft overlays', function()
         nav_write('Service.kt', 'package sample\nfun execute(value: Int, label: String): Int = value\n')
         nav_write('Client.kt', 'package client\nimport sample.execute as dispatch\nfun run() = dispatch(1, "x")\n')

@@ -122,7 +122,7 @@ function Doc:offset(position)
     return p
 end
 
-local extensions = { javascript = 'js', typescript = 'ts', python = 'py', csharp = 'cs', rust = 'rs', cpp = 'cpp', kotlin = 'kt' }
+local extensions = { javascript = 'js', typescript = 'ts', arkts = 'ets', ets = 'ets', python = 'py', csharp = 'cs', rust = 'rs', cpp = 'cpp', kotlin = 'kt' }
 local function parser_name(doc)
     local name = doc.path or ('document.' .. (extensions[doc.language] or doc.language or 'txt'))
     if not parse.language(name) and doc.language then name = 'document.' .. (extensions[doc.language] or doc.language) end

@@ -50,6 +50,11 @@
   "contributes": {
     "languages": [
       {
+        "id": "arkts",
+        "aliases": ["ArkTS", "arkts"],
+        "extensions": [".ets"]
+      },
+      {
         "id": "kotlin",
         "aliases": ["Kotlin", "kotlin"],
         "extensions": [".kt", ".kts"]
@@ -106,6 +111,8 @@
           "items": {
             "type": "string",
             "enum": [
+              "arkts",
+              "ets",
               "c",
               "cpp",
               "csharp",
@@ -122,6 +129,8 @@
             ]
           },
           "default": [
+            "arkts",
+            "ets",
             "c",
             "cpp",
             "csharp",

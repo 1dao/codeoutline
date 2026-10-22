@@ -63,6 +63,7 @@ function M.collect(r, T)
     local executable
     for _, node in ipairs(r.nodes) do if callable[node.kind] then executable = true; break end end
     if not executable then return end
+    local loops = lua and r.ordinary_bindings and require('codeoutline.lua_callback_loops').tokens_candidate(T)
     -- Reject cheap negatives before collecting compact query hints.
     for i = 1, T.n do
         if i % 4096 == 0 then control.check() end
@@ -76,8 +77,11 @@ function M.collect(r, T)
             r.static_dispatch_candidate = true; break
         end
     end
-    if not r.static_dispatch_candidate then return end
-    if not has_dispatch(T, lua) then r.static_dispatch_candidate = nil; return end
+    if not r.static_dispatch_candidate and not loops then return end
+    if r.static_dispatch_candidate and not has_dispatch(T, lua) then
+        r.static_dispatch_candidate = nil
+        if not loops then return end
+    end
     local scopes, ends, stack, owners = {}, { [0] = T.n }, {}, {}
     local opens = { ['function'] = true, ['if'] = true, ['do'] = true, ['repeat'] = true }
     for i = 1, T.n do
@@ -94,6 +98,11 @@ function M.collect(r, T)
     -- Only executable owners: an initializer belongs to no caller function.
     local ordered = {}
     for id, n in ipairs(r.nodes) do if callable[n.kind] then ordered[#ordered + 1] = id end end
+    local functions_by_token
+    if loops then
+        functions_by_token = {}
+        for _, id in ipairs(ordered) do functions_by_token[r.nodes[id].ti] = id end
+    end
     table.sort(ordered, function(a, b) return r.nodes[a].ti < r.nodes[b].ti end)
     local cursor = 1; stack = {}
     for i = 1, T.n do
@@ -135,6 +144,10 @@ function M.collect(r, T)
             end
             if depth > 0 and b.invalid then return nil end
             if not b.function_name then return nil end
+            if functions_by_token then
+                local id = functions_by_token[b.token]
+                return id and r.nodes[id].name == name and id or nil
+            end
             for id, n in ipairs(r.nodes) do
                 if callable[n.kind] and n.name == name and n.ti == b.token then return id end
             end
@@ -413,6 +426,10 @@ function M.collect(r, T)
         end
         ::continue::
     end
+    if loops then require('codeoutline.lua_callback_loops').collect(r, T, {
+        binding = binding, parts = parts, scopes = scopes, ends = ends,
+        owners = owners, function_target = function_target, assignment_end = assignment_end,
+    }) end
     -- Flatten shared temporary tables; no tokens/source survive query parsing.
     for _, site in ipairs(data.sites) do
         local entries = site.name and site.slots[site.name]

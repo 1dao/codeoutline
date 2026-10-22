@@ -33,7 +33,7 @@ end
 M.VERSION = (function()
     local parts = {}
     for _, m in ipairs({ 'xscan', 'text', 'common', 'indirect', 'dispatch_aliases', 'static_dispatch', 'js_evidence', 'python_bindings', 'cpp_bindings', 'cpp_types', 'csharp_bindings', 'lua_bindings', 'foreign', 'foreign_lua', 'parse', 'lang.c', 'lang.cpp', 'lang.lua', 'lang.python',
-        'implementations', 'cpp_implementations', 'ts_implementations', 'automatic_events', 'lang.java', 'lang.kotlin', 'lang.go', 'lang.js', 'lang.csharp', 'lang.rust' }) do
+        'implementations', 'cpp_implementations', 'ts_implementations', 'automatic_events', 'lua_callback_loops', 'lang.java', 'lang.kotlin', 'lang.go', 'lang.js', 'lang.csharp', 'lang.rust' }) do
         local file = package.searchpath and package.searchpath('codeoutline.' .. m, package.path)
         local h = file and io.open(file, 'rb')
         if h then parts[#parts + 1] = h:read('a'); h:close() end

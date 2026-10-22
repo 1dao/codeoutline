@@ -4104,6 +4104,150 @@ void run(void) {
     end)
 end)
 
+spec.describe('query-time Lua callback collection traversal', function()
+    local function build(source)
+        return graph.build({ files = { ['callbacks.lua'] = ci.parse('callbacks.lua', source, { ordinary_bindings = true }) } })
+    end
+    local function callbacks(G, name)
+        local Q, found = graph.query(G, { explain = true }), {}
+        for i = 1, #Q.out[G.by_name[name][1]], graph.EDGE do
+            local edges = Q.out[G.by_name[name][1]]
+            if edges[i + 2] == 'automatic:callback-loop' then found[#found + 1] = G.nodes[edges[i]].name end
+        end
+        table.sort(found); return table.concat(found, ','), Q
+    end
+    spec.it('connects array initializers through builtin pairs and ipairs in both directions', function()
+        for _, iterator in ipairs({ 'pairs', 'ipairs' }) do
+            local G = build('local function save() end\nlocal function load() end\nlocal callbacks = { save, load }\n'
+                .. 'function run() for _, cb in ' .. iterator .. '(callbacks) do cb() end end')
+            local found, Q = callbacks(G, 'run'); spec.equal(found, 'load,save')
+            spec.equal(G.nodes[Q.inn[G.by_name.save[1]][1]].name, 'run')
+            spec.contains(require('codeoutline.query_report').render(Q.report, G), 'possible callback traversal')
+        end
+    end)
+    spec.it('shares collection aliases and known local callback aliases with table.insert registrations', function()
+        local G = build([[
+local function first() end
+local function second() end
+local handler = second
+local callbacks = { first }
+local active = callbacks
+table.insert(active, handler)
+function run() for _, cb in ipairs(active) do cb() end end
+]])
+        spec.equal(callbacks(G, 'run'), 'first,second')
+    end)
+    spec.it('keeps local collections separate and respects registration order', function()
+        local G = build([[
+local function save() end
+local function other() end
+local callbacks = { save }
+local unrelated = { other }
+function run() for _, cb in pairs(callbacks) do cb() end end
+function ordered()
+    local callbacks = {}
+    table.insert(callbacks, save)
+    for _, cb in ipairs(callbacks) do cb() end
+end
+function before()
+    local callbacks = {}
+    for _, cb in ipairs(callbacks) do cb() end
+    table.insert(callbacks, other)
+end
+]])
+        spec.equal(callbacks(G, 'run'), 'save'); spec.equal(callbacks(G, 'ordered'), 'save'); spec.equal(callbacks(G, 'before'), '')
+    end)
+    spec.it('blocks collection replacement, escapes, mutations and unknown registrations', function()
+        for _, mutation in ipairs({ 'callbacks = {}', 'callbacks[1] = unknown', 'callbacks[key] = save',
+            'table.remove(callbacks)', 'unknown(callbacks)', 'setmetatable(callbacks, {})',
+            'function export() return callbacks end', 'table.insert(callbacks, unknown)',
+            'function setup() table.insert(callbacks, save) end', 'local active = callbacks\nactive = {}',
+            'local active = callbacks\nactive[key] = save' }) do
+            local G = build('local function save() end\nlocal callbacks = { save }\n' .. mutation
+                .. '\nfunction run() for _, cb in ipairs(callbacks) do cb() end end')
+            spec.equal(callbacks(G, 'run'), '', mutation)
+        end
+    end)
+    spec.it('blocks iterator/library shadows, environment writes and callback reassignment', function()
+        for _, body in ipairs({ 'local ipairs = custom', 'ipairs = custom', 'function ipairs() end',
+            '_G.ipairs = custom', "rawset(_G, 'ipairs', custom)", 'local _ENV = custom' }) do
+            local G = build('local function save() end\nlocal callbacks = { save }\n' .. body
+                .. '\nfunction run() for _, cb in ipairs(callbacks) do cb() end end')
+            spec.equal(callbacks(G, 'run'), '', body)
+        end
+        for _, body in ipairs({ 'local table = custom', 'table.insert = custom', 'local lib = table\nlib.insert = custom',
+            "rawset(table, 'insert', custom)" }) do
+            local G = build('local function save() end\nlocal callbacks = {}\n' .. body
+                .. '\ntable.insert(callbacks, save)\nfunction run() for _, cb in ipairs(callbacks) do cb() end end')
+            spec.equal(callbacks(G, 'run'), '', body)
+        end
+        local G = build('local function save() end\nlocal callbacks = { save }\nfunction cb() end\n'
+            .. 'function run() for _, cb in ipairs(callbacks) do cb = unknown; cb() end end')
+        local found, Q = callbacks(G, 'run'); spec.equal(found, ''); spec.equal(#Q.out[G.by_name.run[1]], 0)
+    end)
+    spec.it('does not turn loop value variables into unrelated global calls or infer nested scopes', function()
+        local G = build([[
+function cb() end
+local function save() end
+local callbacks = { save }
+function unknown(items) for _, cb in ipairs(items) do cb() end end
+function conditional() for _, cb in ipairs(callbacks) do if true then cb() end end end
+function nested() for _, cb in ipairs(callbacks) do local function later() cb() end end end
+function deferred()
+    unknown(function()
+        local callbacks = { save }
+        for _, cb in ipairs(callbacks) do cb() end
+    end)
+end
+]])
+        for _, name in ipairs({ 'unknown', 'conditional', 'later' }) do
+            local _, Q = callbacks(G, name); spec.equal(#Q.out[G.by_name[name][1]], 0, name)
+        end
+        spec.equal(callbacks(G, 'deferred'), '')
+    end)
+    spec.it('rejects nonlocal, keyed, sparse, computed and mixed collection entries', function()
+        for _, initial in ipairs({ '{ global }', '{ [1] = save }', '{ save, nil }', '{ go = save }',
+            '{ save, factory() }', '{ function() end }' }) do
+            local G = build('local function save() end\nfunction global() end\nlocal callbacks = ' .. initial
+                .. '\nfunction run() for _, cb in ipairs(callbacks) do cb() end end')
+            spec.equal(callbacks(G, 'run'), '', initial)
+        end
+    end)
+    spec.it('keeps callback evidence query-only through cache reload, callers and source edits', function()
+        local root = tmp_root .. '/callback_collection'
+        local source = 'local function collected_handler() end\nlocal callbacks = {}\ntable.insert(callbacks, collected_handler)\n'
+            .. 'function collection_run() for _, cb in ipairs(callbacks) do cb() end end'
+        write(root .. '/callbacks.lua', source)
+        local options = { cache_path = root .. '/cache.idx', lister = 'walk' }
+        local idx, G = svc.get(root, options); idx:save(); svc.forget(root); idx, G = svc.get(root, options)
+        spec.equal(callbacks(G, 'collection_run'), 'collected_handler')
+        local output, info = explore.run(G, idx, 'collection_run collected_handler', { explain = true })
+        spec.truthy(#info.flows > 0); spec.contains(output, 'possible callback traversal'); spec.equal(info.relationships_incomplete, false)
+        local _, incoming = require('codeoutline.callers').run(G, idx, 'collected_handler')
+        spec.equal(#incoming.callers, 1); spec.equal(incoming.callers[1].name, 'collection_run')
+        for _, rec in pairs(idx.files) do spec.nil_value(rec.lua_callback_loops); spec.nil_value(rec.ordinary_bindings) end
+        write(root .. '/callbacks.lua', source:gsub('table.insert%(callbacks, collected_handler%)', 'unknown(callbacks)'))
+        idx, G = svc.get(root, options); spec.equal(callbacks(G, 'collection_run'), '')
+        svc.forget(root)
+    end)
+    spec.it('reports collection and query limits explicitly', function()
+        local module = require('codeoutline.lua_callback_loops'); local previous = module.MAX_TARGETS
+        module.MAX_TARGETS = 1
+        local ok, err = pcall(function()
+            local G = build('local function first() end\nlocal function second() end\nlocal callbacks = { first, second }\n'
+                .. 'function run() for _, cb in ipairs(callbacks) do cb() end end')
+            local found, Q = callbacks(G, 'run'); spec.equal(found, ''); spec.truthy(Q.incomplete)
+        end)
+        module.MAX_TARGETS = previous; assert(ok, err)
+        previous = module.MAX_FILES; module.MAX_FILES = 0
+        ok, err = pcall(function()
+            local G = build('local function save() end\nlocal callbacks = { save }\nfunction run() for _, cb in ipairs(callbacks) do cb() end end')
+            local found, Q = callbacks(G, 'run'); spec.equal(found, ''); spec.truthy(Q.incomplete)
+        end)
+        module.MAX_FILES = previous; assert(ok, err)
+    end)
+end)
+
 spec.describe('static registry dispatch', function()
     spec.it('skips detailed collection without matching declarations and calls', function()
         for _, input in ipairs({

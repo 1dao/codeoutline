@@ -2,7 +2,7 @@
 local M = { MAX_PATH_BREAKPOINTS = 4 }
 
 function M.new(limit)
-    local report = { entries = {}, truncated = false, scope = 'indexed references, possible implementations/events and configured dispatch rules' }
+    local report = { entries = {}, truncated = false, scope = 'indexed references, possible implementations, automatic callbacks and configured dispatch rules' }
     local seen = {}
     function report:add(entry)
         local key = table.concat({ entry.source or '', entry.target or '', entry.line or '',

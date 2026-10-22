@@ -131,6 +131,50 @@ deliveries per file scan. Hitting a limit reports incomplete relationships. Sour
 Embeddings without a project root can request transient evidence with
 `parse.parse(path, source, { ordinary_bindings = true })`.
 
+## Automatic Lua callback collection traversal
+
+Explore and recursive callers recognize a closed same-file local array of local functions:
+
+```lua
+local function save() end
+local function load() end
+local callbacks = { save }
+local active = callbacks
+table.insert(active, load)
+function run()
+    for _, callback in ipairs(active) do callback() end
+end
+```
+
+This produces possible `automatic:callback-loop` edges from `run` to `save` and `load`,
+with registration locations. `pairs` and `ipairs` must be unshadowed builtins, and the loop
+must bind two identifiers and iterate a bare collection identifier. Callback invocation must
+be a direct call of the value variable in the loop's immediate body. The collector reuses
+the static registry's scope, local function identity, alias and invalidation analysis.
+Function/collection aliases follow at most eight links. Literal arrays and two-argument
+`table.insert` calls in the collection's declaration block supply registrations; only
+registrations textually before the loop contribute targets.
+
+The collection must remain closed: replacement, alias writes, field/index mutation, removal,
+metatables, returned/exported/passed collections and unknown entries block inference. Iterator
+or table-library shadows/writes/escapes, environment access and overwritten loop value bindings also
+block inference. Files with unknown/global collections still retain a query-time barrier
+against treating a loop value call as an unrelated global function of the same name.
+Nested conditional scopes and unindexed anonymous function owners are not inferred as callback
+deliveries; calls deferred into nested functions are not attributed to the outer function. Global/imported
+handlers or collections, keyed/sparse/mixed arrays, numeric-index loops, append syntax using
+`#callbacks`, parameter-driven registration functions and inline anonymous functions are
+outside this pass. Ordinary definition navigation is unchanged.
+
+Detailed callback evidence is generated only for explicit ordinary-binding queries. Existing
+dispatch-call summaries identify candidate files; incoming queries open only the local
+handler's own file. Only collections referenced by supported loops are inspected. Source
+validation and the ordinary 16-file/about-8-MiB FIFO cache are shared with other query bindings;
+no callback-loop hints, bindings or edges are added to the resident/disk index. Limits of 128
+candidate files, 128 loop headers per file, 64 registrations per collection and 512 call sites
+or weighted deliveries per file report incomplete results. Embeddings without a project root
+can supply transient evidence with `{ ordinary_bindings = true }` when parsing.
+
 ## Call-path breakpoint reports
 
 Explore also reports **Call-path breakpoints** from unresolved evidence already

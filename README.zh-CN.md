@@ -130,6 +130,12 @@ JS/TS 还可无需配置地识别有限的 Node EventEmitter 模式：显式导�
 详细证据只在查询时生成，不写入索引。支持范围、数量限制及排除情况见
 [间接调用文档](docs/INDIRECT-CALLS.md#automatic-node-eventemitter-deliveries)。
 
+Lua 还可自动关联本文件 local 回调数组：由具名局部函数、字面量数组或 `table.insert` 注册，
+再在内置 `pairs` / `ipairs` 循环中直接调用值变量。Explore/callers 用
+`automatic:callback-loop` 标注可能调用，复用静态注册表的作用域和别名解析；遇到集合转交、
+修改、未知来源或作用域不确定时保守跳过。详细证据按查询生成，不新增持久化索引字段。
+支持范围和限制见[间接调用文档](docs/INDIRECT-CALLS.md#automatic-lua-callback-collection-traversal)。
+
 ## 命令行
 
 ```sh

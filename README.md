@@ -175,6 +175,12 @@ evidence is generated per query and excluded from the index. Candidate, result a
 limits report incomplete results. Generic substitution, inherited-only interface implementations,
 and default-interface conflict resolution are not modeled.
 
+Lua also follows local callback arrays populated by named local functions and `table.insert`,
+then directly invoked through the value variable of a builtin `pairs`/`ipairs` loop. These
+query-owned `automatic:callback-loop` edges reuse static registry bindings and preserve
+collection identity. See [Indirect calls](docs/INDIRECT-CALLS.md#automatic-lua-callback-collection-traversal)
+for mutation, scope and size limits.
+
 JS/TS also infer limited Node EventEmitter deliveries from literal registrations and emissions
 on the same local object. These query-owned `automatic:event` edges feed explore/callers without
 configuration; see [Indirect calls](docs/INDIRECT-CALLS.md#automatic-node-eventemitter-deliveries)

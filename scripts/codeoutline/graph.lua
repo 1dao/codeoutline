@@ -607,6 +607,8 @@ function M.query(symbols, opts)
     Q.stats.implementations = implementations.stats
     local events = require('codeoutline.automatic_events').context(symbols, js_context, report)
     Q.stats.events = events.stats
+    local callback_loops = require('codeoutline.lua_callback_loops').context(symbols, js_context, report)
+    Q.stats.callback_loops = callback_loops.stats
     local function deps(f)
         local entry = dependencies[f]
         if not entry then
@@ -617,7 +619,11 @@ function M.query(symbols, opts)
         return entry[1], entry[2]
     end
     local function targets(f, i, explain)
-        if static_dispatch.handles(f, i) then return {} end
+        if static_dispatch.handles(f, i) or symbols.files[f].language == 'lua'
+            and symbols.files[f].refs.kind[i] == 'call' and callback_loops.handles(f, i) then
+            if callback_loops.incomplete then Q.incomplete = true end
+            return {}
+        end
         local rec, ids = symbols.files[f], symbols.id_of[f]
         local refs = rec.refs
         local direct, paired = deps(f)
@@ -676,6 +682,12 @@ function M.query(symbols, opts)
             edges[#edges + 1] = edge.kind
         end
         if events.incomplete then Q.incomplete = true end
+        for _, edge in ipairs(callback_loops.outgoing(id)) do
+            edges[#edges + 1] = edge.target
+            edges[#edges + 1] = edge.line
+            edges[#edges + 1] = edge.kind
+        end
+        if callback_loops.incomplete then Q.incomplete = true end
         for _, i in ipairs(grouped[id] or {}) do
             control.check()
             for _, dst in ipairs(targets(f, i, true) or {}) do
@@ -706,6 +718,10 @@ function M.query(symbols, opts)
         end
         if implementations.incomplete then Q.incomplete = true end
         local indirect_incoming = indirect.incoming(wanted)
+        for src, edges in pairs(callback_loops.incoming(wanted)) do
+            for _, edge in ipairs(edges) do push3(incoming, edge.target, src, edge.line, edge.kind) end
+        end
+        if callback_loops.incomplete then Q.incomplete = true end
         for src, edges in pairs(events.incoming(wanted)) do
             for _, edge in ipairs(edges) do push3(incoming, edge.target, src, edge.line, edge.kind) end
         end

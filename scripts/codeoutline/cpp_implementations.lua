@@ -37,6 +37,7 @@ function M.collect(r, T)
         if id % 128 == 0 then control.check() end
         if classes[n.kind] or n.kind == 'method' then
             local d = { at = T.s[n.ti] - 1 }
+            if classes[n.kind] then d.hierarchy_bases = require('codeoutline.type_bases').collect(T, n, r.language) end
             local ni, opening
             for i = n.ti, n.tj do
                 local s = T:text(i)

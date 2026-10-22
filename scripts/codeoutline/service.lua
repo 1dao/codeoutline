@@ -174,6 +174,10 @@ function M.callers(root, query, opts)
     return run_query(require('codeoutline.callers'), root, query, opts)
 end
 
+function M.type_hierarchy(root, query, opts)
+    return run_query(require('codeoutline.type_hierarchy'), root, query, opts)
+end
+
 function M.status(root, opts)
     local idx, G, stats = M.get(root, opts)
     local languages = {}

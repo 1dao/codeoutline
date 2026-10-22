@@ -29,6 +29,10 @@ test('unified Lua CLI: commands, JSON output, failures and MCP startup', async (
         assert.match(success('callers', '--query=hello_world', '--depth=2'), /Depth 1: invoke/);
         assert.notEqual(run('callers', '--query=hello_world', '--depth=0').status, 0);
         assert.notEqual(run('callers', '--query=hello_world', '--max-nodes=bad').status, 0);
+        await writeFile(join(project, 'types.ts'), 'interface Root {} class Child implements Root {}\n');
+        assert.match(success('type-hierarchy', '--query=Root', '--direction=descendants'), /Descendant depth 1: Child/);
+        assert.notEqual(run('type-hierarchy', '--query=Root', '--direction=invalid').status, 0);
+        assert.notEqual(run('type-hierarchy', '--query=Root', '--depth=33').status, 0);
         for (const args of [ ['wat'], ['status', '--port', '12'], ['explore'],
             ['explore', '--query'], ['explore', '--query=x', '--budget=nan'],
             ['serve'], ['serve', '--stdio', '--http'], ['serve', '--stdio=1'],

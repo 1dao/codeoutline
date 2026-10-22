@@ -3747,6 +3747,224 @@ end)
 xutils.rmtree(tmp_root)
 os.remove(cache)
 
+spec.describe('query-time declared type hierarchy', function()
+    local hierarchy = require('codeoutline.type_hierarchy')
+    local function build(sources)
+        local files = {}
+        for path, source in pairs(sources) do files[path] = ci.parse(path, source, { ordinary_bindings = true }) end
+        return graph.build({ files = files })
+    end
+    local function listed(entries)
+        local out = {}; for _, entry in ipairs(entries) do out[#out + 1] = entry.name .. ':' .. entry.depth end
+        table.sort(out); return table.concat(out, ',')
+    end
+    spec.it('returns direct and transitive C# bases and implementations with declaration evidence', function()
+        local G = build({ ['types.cs'] = [[namespace Demo {
+interface IRoot {} interface ILeft : IRoot {} interface IRight : IRoot {}
+abstract class Base : ILeft, IRight {} class Store : Base {} class Other {}
+}]] })
+        local output, info = hierarchy.run(G, nil, 'Demo.Base')
+        spec.equal(listed(info.ancestors), 'Demo.ILeft:1,Demo.IRight:1,Demo.IRoot:2')
+        spec.equal(listed(info.descendants), 'Demo.Store:1')
+        spec.equal(#info.edges, 5); spec.equal(info.cycle_detected, false)
+        spec.equal(info.relationships_incomplete, false)
+        spec.contains(output, 'declared implements ILeft at types.cs:3')
+        spec.equal(info.ancestors[1].via.kind, 'implements')
+        spec.equal(info.ancestors[1].path[1].name, 'Demo.Base')
+        spec.nil_value(G.type_hierarchy); spec.nil_value(G.out)
+    end)
+    spec.it('resolves Java packages and Kotlin import aliases without same-name cross-links', function()
+        local G = build({ ['api/Root.java'] = 'package api; public interface Root {}',
+            ['impl/Base.java'] = 'package impl; import api.Root; public class Base implements Root {}',
+            ['impl/Store.java'] = 'package impl; public class Store extends Base {}',
+            ['other/Root.java'] = 'package other; public interface Root {}',
+            ['root.kt'] = 'package kapi\ninterface KRoot {}',
+            ['base.kt'] = 'package kimpl\nimport kapi.KRoot as Contract\nopen class KBase : Contract {}',
+            ['store.kt'] = 'package kimpl\nclass KStore : KBase() {}' })
+        local _, info = hierarchy.run(G, nil, 'api.Root')
+        spec.equal(listed(info.descendants), 'impl.Base:1,impl.Store:2')
+        _, info = hierarchy.run(G, nil, 'kapi.KRoot')
+        spec.equal(listed(info.descendants), 'kimpl.KBase:1,kimpl.KStore:2')
+        spec.equal(info.relationships_incomplete, false)
+        _, info = hierarchy.run(G, nil, 'Root')
+        spec.equal(#info.targets, 2)
+    end)
+    spec.it('follows TS import aliases, barrels and explicit multiple interface bases', function()
+        local G = build({ ['root.ts'] = 'export interface Root {} export interface Extra {}',
+            ['barrel.ts'] = "export { Root as Contract, Extra } from './root';",
+            ['store.ts'] = "import type { Contract as R, Extra } from './barrel';\ninterface Mid extends R, Extra {}\nclass Store implements Mid {}",
+            ['other.ts'] = 'interface Root {} class Other implements Root {}' })
+        local _, info = hierarchy.run(G, nil, 'Store')
+        spec.equal(listed(info.ancestors), 'Extra:2,Mid:1,Root:2')
+        spec.equal(info.relationships_incomplete, false)
+        _, info = hierarchy.run(G, nil, 'Mid', { direction = 'descendants' })
+        spec.equal(listed(info.descendants), 'Store:1'); spec.equal(#info.ancestors, 0)
+        for _, entry in ipairs(info.descendants) do spec.equal(entry.file, 'store.ts') end
+    end)
+    spec.it('supports C++ includes, namespace and type aliases, multiple and virtual inheritance', function()
+        local G = build({ ['api.hpp'] = 'namespace api { struct Root {}; struct Extra {}; }',
+            ['aliases.hpp'] = '#include "api.hpp"\nnamespace ns = api; using Contract = ns::Root;',
+            ['types.cpp'] = '#include "aliases.hpp"\nstruct Mid : virtual public Contract, private api::Extra {};\nstruct Store : Mid {};',
+            ['other.cpp'] = 'namespace api { struct Root {}; } struct Other : api::Root {};' })
+        local _, info = hierarchy.run(G, nil, 'Store')
+        spec.equal(listed(info.ancestors), 'Mid:1,api::Extra:2,api::Root:2')
+        spec.equal(info.relationships_incomplete, false)
+        _, info = hierarchy.run(G, nil, 'api::Root', { direction = 'descendants' })
+        spec.equal(#info.targets, 2)
+        spec.equal(listed(info.descendants), 'Mid:1,Other:1,Store:2')
+    end)
+    spec.it('reports unresolved, ambiguous, generic and structural-only relationships without guessing', function()
+        local G = build({ ['a.cs'] = 'namespace A { interface Root {} } namespace B { interface Root {} }',
+            ['b.cs'] = 'using A; using B; class Ambiguous : Root {} class Missing : External {} class Generic<T> : A.Root {}',
+            ['a.ts'] = 'interface Contract {} class Generic<T> implements Contract {} class Shape {}\nclass Derived extends Missing {}' })
+        local _, info = hierarchy.run(G, nil, 'Ambiguous', { direction = 'ancestors' })
+        spec.equal(#info.ancestors, 0); spec.equal(info.unresolved[1].reason, 'ambiguous type')
+        _, info = hierarchy.run(G, nil, 'Missing', { direction = 'ancestors' })
+        spec.equal(info.unresolved[1].written, 'External'); spec.truthy(info.relationships_incomplete)
+        _, info = hierarchy.run(G, nil, 'A.Root', { direction = 'descendants' })
+        spec.equal(#info.descendants, 0); spec.truthy(info.query_stats.reverse_unresolved > 0)
+        _, info = hierarchy.run(G, nil, 'Contract')
+        spec.equal(#info.descendants, 0); spec.truthy(info.relationships_incomplete)
+        _, info = hierarchy.run(G, nil, 'Shape')
+        spec.equal(#info.descendants, 0)
+        local cpp = build({ ['a.cpp'] = 'struct Root {}; template<class T> struct Generic : Root {}; struct Child : Generic<int> {};' })
+        _, info = hierarchy.run(cpp, nil, 'Child', { direction = 'ancestors' })
+        spec.equal(#info.ancestors, 0); spec.equal(info.unresolved[1].reason, 'unsupported declaration')
+    end)
+    spec.it('bounds cycles, depth, total nodes and output without treating leaves or diamonds as truncated', function()
+        local G = build({ ['a.cs'] = 'class Root {} class Mid : Root {} class Leaf : Mid {} class X : Y {} class Y : X {}' })
+        local _, info = hierarchy.run(G, nil, 'Root', { depth = 2 })
+        spec.equal(listed(info.descendants), 'Leaf:2,Mid:1'); spec.equal(info.depth_limit_reached, false)
+        _, info = hierarchy.run(G, nil, 'Root', { depth = 1 })
+        spec.equal(listed(info.descendants), 'Mid:1'); spec.truthy(info.depth_limit_reached)
+        _, info = hierarchy.run(G, nil, 'Leaf', { max_nodes = 2 })
+        spec.equal(#info.ancestors, 1); spec.truthy(info.node_limit_reached)
+        _, info = hierarchy.run(G, nil, 'X')
+        spec.truthy(info.cycle_detected); spec.truthy(info.relationships_incomplete)
+        _, info = hierarchy.run(G, nil, 'X', { depth = 1, direction = 'ancestors' })
+        spec.truthy(info.cycle_detected)
+        local output; output, info = hierarchy.run(G, nil, 'Root', { budget = 256 })
+        spec.truthy(#output <= 256); spec.truthy(info.truncated)
+        _, info = hierarchy.run(G, nil, 'missing'); spec.equal(#info.targets, 0)
+        for _, opts in ipairs({ { depth = 0 }, { max_nodes = false }, { direction = 'parents' }, { budget = 12 } }) do
+            spec.equal(pcall(hierarchy.run, G, nil, 'Root', opts), false)
+        end
+    end)
+    spec.it('verifies original base syntax rather than erased generic or dynamic expressions', function()
+        local G = build({ ['a.ts'] = 'class Factory {} class Wrong extends Factory() {} class Wrong2 extends (Factory) {}',
+            ['a.kt'] = 'interface Root {}\nclass Delegated : Root by delegate {}',
+            ['a.cs'] = 'namespace A { interface Root {} } namespace B { interface Root {} class Child : global::A.Root {} }' })
+        for _, name in ipairs({ 'Wrong', 'Wrong2', 'Delegated' }) do
+            local _, info = hierarchy.run(G, nil, name, { direction = 'ancestors' })
+            spec.equal(#info.ancestors, 0, name); spec.truthy(info.relationships_incomplete, name)
+        end
+        local _, info = hierarchy.run(G, nil, 'B.Child', { direction = 'ancestors' })
+        spec.equal(listed(info.ancestors), 'A.Root:1')
+        spec.equal(info.ancestors[1].via.written, 'global::A.Root')
+    end)
+    spec.it('reports declaration and source budgets and preserves cancellation', function()
+        local G = build({ ['a.cs'] = 'interface Root {} class A : Root {} class B : Root {}' })
+        local saved = { hierarchy.MAX_CANDIDATES, hierarchy.MAX_FILES, hierarchy.MAX_SCAN_NODES }
+        local ok, err = pcall(function()
+            hierarchy.MAX_CANDIDATES = 1
+            local _, info = hierarchy.run(G, nil, 'Root')
+            spec.equal(#info.descendants, 1); spec.truthy(info.candidate_limit_reached)
+            hierarchy.MAX_CANDIDATES = saved[1]; hierarchy.MAX_SCAN_NODES = 1
+            _, info = hierarchy.run(G, nil, 'Root'); spec.truthy(info.candidate_limit_reached)
+            hierarchy.MAX_SCAN_NODES = saved[3]; hierarchy.MAX_FILES = 0
+            _, info = hierarchy.run(G, nil, 'Root'); spec.truthy(info.candidate_limit_reached)
+        end)
+        hierarchy.MAX_CANDIDATES, hierarchy.MAX_FILES, hierarchy.MAX_SCAN_NODES = saved[1], saved[2], saved[3]
+        assert(ok, err)
+        local ctl = require('codeoutline.control'); local old = ctl.callback
+        ctl.callback = function() error(ctl.cancelled(), 0) end
+        local success, failure = pcall(hierarchy.run, G, nil, 'Root'); ctl.callback = old
+        spec.equal(success, false); spec.truthy(ctl.is_interrupted(failure))
+    end)
+    spec.it('reuses compact saved records and updates hierarchy after source edits and deletion', function()
+        local root = tmp_root .. '/type_hierarchy'
+        write(root .. '/root.cs', 'namespace Demo { interface Root {} }')
+        write(root .. '/child.cs', 'using Contract = Demo.Root; class Child : Contract {}')
+        local opts = { cache_path = root .. '/cache.bin' }
+        local _, info = svc.type_hierarchy(root, 'Demo.Root', opts)
+        spec.equal(listed(info.descendants), 'Child:1'); spec.equal(info.query_stats.ordinary.parses, 2)
+        local idx = svc.resident(root)
+        for _, rec in pairs(idx.files) do spec.nil_value(rec.implementation_evidence); spec.nil_value(rec.type_hierarchy) end
+        svc.forget(root)
+        _, info = svc.type_hierarchy(root, 'Demo.Root', opts)
+        spec.equal(info.refresh.parsed, 0); spec.equal(#info.descendants, 1)
+        write(root .. '/child.cs', 'class Child {}')
+        _, info = svc.type_hierarchy(root, 'Demo.Root', opts)
+        spec.equal(#info.descendants, 0)
+        os.remove(root .. '/child.cs')
+        _, info = svc.type_hierarchy(root, 'Child', opts); spec.equal(#info.targets, 0)
+        svc.forget(root)
+    end)
+    spec.it('handles source-byte, base and edge limits explicitly', function()
+        local G = build({ ['a.cs'] = 'interface A {} interface B {} class Child : A, B {}' })
+        local saved = { hierarchy.MAX_BYTES, hierarchy.MAX_BASES, hierarchy.MAX_EDGES }
+        local ok, err = pcall(function()
+            hierarchy.MAX_BASES = 1
+            local _, info = hierarchy.run(G, nil, 'Child', { direction = 'ancestors' })
+            spec.equal(#info.ancestors, 1); spec.truthy(info.candidate_limit_reached)
+            hierarchy.MAX_BASES = saved[2]; hierarchy.MAX_EDGES = 1
+            _, info = hierarchy.run(G, nil, 'Child', { direction = 'ancestors' })
+            spec.equal(#info.edges, 1); spec.truthy(info.candidate_limit_reached)
+            hierarchy.MAX_EDGES = saved[3]; hierarchy.MAX_BYTES = 1
+            G.files[1].size = 100
+            _, info = hierarchy.run(G, nil, 'Child')
+            spec.equal(#info.targets, 0); spec.truthy(info.candidate_limit_reached)
+        end)
+        hierarchy.MAX_BYTES, hierarchy.MAX_BASES, hierarchy.MAX_EDGES = saved[1], saved[2], saved[3]
+        assert(ok, err)
+    end)
+    spec.it('retries encoding repairs and rejects changed source snapshots', function()
+        local source = 'class Root {} class Child : Root {}'
+        local G = graph.build({ files = { ['a.cs'] = ci.parse('a.cs', source) } })
+        local output, info = hierarchy.run(G, { query_source = function()
+            graph.remove_file(G, 'a.cs') -- encoding repairs replace the old file and IDs
+            graph.add_file(G, 'a.cs', ci.parse('a.cs', source))
+            return source, true
+        end }, 'Root')
+        spec.nil_value(output); spec.truthy(info.encoding_retry)
+        local root = tmp_root .. '/hierarchy_snapshot'
+        write(root .. '/a.cs', source)
+        local idx, symbols = svc.get(root, { cache_path = root .. '/cache.bin' })
+        write(root .. '/a.cs', source .. '\nclass Changed {}')
+        local ok, err = pcall(hierarchy.run, symbols, idx, 'Root')
+        spec.equal(ok, false); spec.contains(tostring(err), 'source changed during query')
+        svc.forget(root)
+    end)
+    spec.it('does not publish C++ bases from truncated include visibility', function()
+        local G = build({ ['types.cpp'] = '#include "a.hpp"\nstruct Child : Root {};',
+            ['a.hpp'] = '#include "b.hpp"', ['b.hpp'] = 'struct Root {};' })
+        local previous = graph.MAX_INCLUDES; graph.MAX_INCLUDES = 1
+        local ok, err = pcall(function()
+            local _, info = hierarchy.run(G, nil, 'Child', { direction = 'ancestors' })
+            spec.equal(#info.ancestors, 0); spec.truthy(info.candidate_limit_reached)
+        end)
+        graph.MAX_INCLUDES = previous; assert(ok, err)
+    end)
+    spec.it('preserves aliases across ordinary FIFO eviction and scopes source limits', function()
+        local root = tmp_root .. '/hierarchy_fifo'
+        write(root .. '/root.cs', 'namespace Demo { interface Root {} }')
+        for i = 1, 24 do
+            write(root .. '/child' .. i .. '.cs', 'using Contract = Demo.Root; class Child' .. i .. ' : Contract {}')
+        end
+        local opts = { cache_path = root .. '/cache.bin' }
+        local _, info = svc.type_hierarchy(root, 'Demo.Root', opts)
+        spec.equal(#info.descendants, 24); spec.equal(info.relationships_incomplete, false)
+        spec.equal(info.query_stats.source_files, 25); spec.truthy(info.query_stats.ordinary.files <= 16)
+        local previous = hierarchy.MAX_FILES; hierarchy.MAX_FILES = 2
+        local ok, err = pcall(function()
+            local _, limited = svc.type_hierarchy(root, 'Demo.Root', opts)
+            spec.truthy(limited.candidate_limit_reached); spec.equal(limited.query_stats.source_files, 2)
+            spec.truthy(#limited.descendants < 24)
+        end)
+        hierarchy.MAX_FILES = previous; svc.forget(root); assert(ok, err)
+    end)
+end)
+
 spec.describe('recursive callers', function()
     local callers = require('codeoutline.callers')
     spec.it('finds shortest reverse paths, handles cycles and reports depth and node limits', function()

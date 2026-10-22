@@ -13,6 +13,7 @@ function M.collect(r, T)
         if index % 128 == 0 then control.check() end
         if n.kind == 'class' or n.kind == 'interface' or n.kind == 'method' then
             local d = { at = T.s[n.ti] - 1 }
+            if n.kind ~= 'method' then d.hierarchy_bases = require('codeoutline.type_bases').collect(T, n, r.language) end
             local opening, ni
             for i = n.ti, n.tj do
                 local s = T:text(i)

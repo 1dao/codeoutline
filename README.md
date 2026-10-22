@@ -51,12 +51,13 @@ On Windows, Claude Code cannot start the `codeoutline.cmd` shim directly; use `-
 
 When no project is specified, the service uses, in order: the `projectPath` argument of the call, the `--project` option, the client's roots (the first directory returned by `roots/list`), and the directory the service was started in. Clients usually start a stdio service in the project directory, so a global configuration needs no project path. Access defaults to `--project` or the start directory; repeat `--allow-root` to allow more.
 
-Three tools are provided:
+Five tools are provided:
 
 | Tool | Purpose |
 | --- | --- |
 | `codeoutline_explore` | Query source, call paths, and callers/callees by symbol or file name (`query`; optional `projectPath`, `budget`) |
 | `codeoutline_callers` | [Find recursive callers and affected files](docs/CALLERS.md) for an exact symbol/qualified name (`query`; optional `projectPath`, `depth` default 3, `max_nodes` default 200, `budget`) |
+| `codeoutline_type_hierarchy` | [Find declared ancestors and descendants](docs/TYPE-HIERARCHY.md) of a C#/Java/Kotlin/TS/C++ type (`query`; optional `projectPath`, `direction`, `depth` default 8, `max_nodes` default 200, `budget`) |
 | `codeoutline_status` | Refresh and report index, cache, scanner, and parser statistics |
 | `codeoutline_rebuild` | Rebuild fully, bypassing the cache |
 

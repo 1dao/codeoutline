@@ -1,6 +1,7 @@
 local paths = require('codeoutline.path')
 local explore = require('codeoutline.explore')
 local callers = require('codeoutline.callers')
+local type_hierarchy = require('codeoutline.type_hierarchy')
 local text = require('codeoutline.text')
 local version = require('codeoutline.version')
 local M = { VERSION = '2025-06-18' }
@@ -10,6 +11,14 @@ local function object(t) return type(t) == 'table' and getmetatable(t) ~= xutils
 local project = { type = 'string', minLength = 1,
     description = 'Project directory on the server machine; defaults to PROJECT, the first client root, then the stdio working directory.' }
 M.tools = array({
+    { name = 'codeoutline_type_hierarchy', description = 'Find declared ancestors and descendants of an exact type name (C#, Java, Kotlin, TypeScript, C++). Returns declaration locations, paths and unresolved bases. Bounded query-time resolution; refreshes automatically.',
+        inputSchema = { type = 'object', properties = { projectPath = project,
+            query = { type = 'string', minLength = 1, maxLength = 4096 },
+            direction = { type = 'string', enum = array({ 'ancestors', 'descendants', 'both' }), default = 'both' },
+            depth = { type = 'integer', minimum = 1, maximum = 32, default = 8 },
+            max_nodes = { type = 'integer', minimum = 1, maximum = 2000, default = 200 },
+            budget = { type = 'integer', minimum = 256, maximum = 262144, default = 16000 } },
+            required = array({ 'query' }), additionalProperties = false } },
     { name = 'codeoutline_callers', description = 'Find potential callers recursively, with shortest call paths and affected files. Matches an exact symbol or qualified name; defaults to 3 levels. Refreshes automatically.',
         inputSchema = { type = 'object', properties = { projectPath = project,
             query = { type = 'string', minLength = 1, maxLength = 4096 },
@@ -154,9 +163,11 @@ function M.new(config, submit, cancel)
         if args.projectPath ~= nil and (type(args.projectPath) ~= 'string' or args.projectPath == '') then
             error_result(-32602, 'projectPath must be a non-empty string'); return
         end
-        if tool.name == 'codeoutline_explore' or tool.name == 'codeoutline_callers' then
-            local engine = tool.name == 'codeoutline_callers' and callers or explore
-            local ok, err = pcall(engine.validate, args.query, { budget = args.budget, depth = args.depth, max_nodes = args.max_nodes })
+        local engine = ({ codeoutline_explore = explore, codeoutline_callers = callers,
+            codeoutline_type_hierarchy = type_hierarchy })[tool.name]
+        if engine then
+            local ok, err = pcall(engine.validate, args.query, { budget = args.budget, depth = args.depth,
+                max_nodes = args.max_nodes, direction = args.direction })
             if not ok then error_result(-32602, tostring(err)); return end
         end
         local token = object(params._meta) and params._meta.progressToken or nil
@@ -175,10 +186,11 @@ function M.new(config, submit, cancel)
                 result({ content = array({ { type = 'text', text = err or 'projectPath is outside allowed roots' } }), isError = true }); return
             end
             local job, submit_error = submit({ method = tool.name:sub(#'codeoutline_' + 1), projectPath = root,
-                allowedRoots = config.roots, query = args.query, budget = args.budget, depth = args.depth, max_nodes = args.max_nodes }, function(ok, value)
+                allowedRoots = config.roots, query = args.query, budget = args.budget, depth = args.depth,
+                max_nodes = args.max_nodes, direction = args.direction }, function(ok, value)
                 if self.pending[id] ~= p then return end
                 self.pending[id] = nil
-                local output = ok and ((tool.name == 'codeoutline_explore' or tool.name == 'codeoutline_callers') and value.text or xutils.json_pack(value)) or tostring(value)
+                local output = ok and (engine and value.text or xutils.json_pack(value)) or tostring(value)
                 result({ content = array({ { type = 'text', text = text.valid(output) } }), isError = not ok })
             end)
             p.job = job

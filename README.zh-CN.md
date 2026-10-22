@@ -51,11 +51,13 @@ Windows 上 Claude Code 无法直接启动 `codeoutline.cmd`，请改用 `-- cmd
 
 未指定项目时，服务依次使用：调用参数 `projectPath`、启动参数 `--project`、客户端 roots（`roots/list` 返回的第一个目录）、服务启动目录。客户端通常在项目目录中启动 stdio 服务，因此全局配置无需写项目路径。访问范围默认为 `--project` 或启动目录，可用可重复的 `--allow-root` 扩大。
 
-提供三个工具：
+提供五个工具：
 
 | 工具 | 用途 |
 | --- | --- |
 | `codeoutline_explore` | 按符号或文件名查询源码、调用路径与上下游（参数 `query`，可选 `projectPath`、`budget`） |
+| `codeoutline_callers` | [递归查询潜在调用者与涉及文件](docs/CALLERS.md)（参数 `query`，可选 `projectPath`、`depth` 默认 3、`max_nodes` 默认 200、`budget`） |
+| `codeoutline_type_hierarchy` | [查询类型的祖先与派生/实现类型](docs/TYPE-HIERARCHY.md)，覆盖 C#、Java、Kotlin、TS、C++（参数 `query`，可选 `projectPath`、`direction`、`depth` 默认 8、`max_nodes` 默认 200、`budget`） |
 | `codeoutline_status` | 刷新并报告索引、缓存、扫描器与解析统计 |
 | `codeoutline_rebuild` | 绕过缓存完整重建 |
 

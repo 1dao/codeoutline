@@ -30,7 +30,7 @@ test('official SDK stdio: discovery, source, incremental refresh, rebuild and er
     const c = client();
     try {
         await c.connect(transport);
-        assert.equal((await c.listTools()).tools.length, 4);
+        assert.equal((await c.listTools()).tools.length, 5);
         const query = (query) => c.callTool({ name: 'codeoutline_explore', arguments: { query } });
         assert.match((await query('greet')).content[0].text, /你好世界/);
         await writeFile(join(f.project, 'caller.lua'), 'function caller() greet() end\nfunction upper() caller() end\n');
@@ -62,6 +62,35 @@ test('official SDK stdio: discovery, source, incremental refresh, rebuild and er
         await rm(join(f.project, 'sample.lua'));
         assert.equal(JSON.parse((await c.callTool({ name: 'codeoutline_status' })).content[0].text).files, 0);
         assert.match(logs, /loading main script/);
+    } finally { await c.close(); await f.cleanup(); }
+});
+
+test('official SDK type hierarchy: aliases, directions, validation and incremental edits', { timeout: 30000 }, async () => {
+    const f = await fixture();
+    await writeFile(join(f.project, 'api.ts'), 'export interface Root {}\n');
+    await writeFile(join(f.project, 'child.ts'), "import type { Root as R } from './api';\nexport class Child implements R {}\n");
+    const transport = new StdioClientTransport({ command: defaultRuntime,
+        args: [main, 'STDIO=1', `PROJECT=${f.project}`], cwd: tmpdir(), stderr: 'pipe' });
+    transport.stderr?.resume();
+    const c = client();
+    try {
+        await c.connect(transport);
+        const query = (args) => c.callTool({ name: 'codeoutline_type_hierarchy', arguments: args });
+        const before = await query({ query: 'Root', direction: 'descendants' });
+        assert.notEqual(before.isError, true);
+        assert.match(before.content[0].text, /Descendant depth 1: Child/);
+        assert.match(before.content[0].text, /declared implements R at child.ts:2/);
+        const upward = await query({ query: 'Child', direction: 'ancestors' });
+        assert.match(upward.content[0].text, /Ancestor depth 1: Root/);
+        assert.doesNotMatch(upward.content[0].text, /Descendant depth/);
+        for (const args of [ { query: 'Root', direction: 'invalid' }, { query: 'Root', depth: 0 },
+            { query: 'Root', max_nodes: 0 }, { query: 'Root', unknown: 1 } ]) {
+            await assert.rejects(query(args));
+        }
+        await writeFile(join(f.project, 'child.ts'), 'export class Child {}\n');
+        const after = await query({ query: 'Root' });
+        assert.notEqual(after.isError, true);
+        assert.match(after.content[0].text, /0 ancestors, 0 descendants/);
     } finally { await c.close(); await f.cleanup(); }
 });
 
@@ -221,7 +250,7 @@ test('official SDK HTTP: sessions, concurrency, refresh, path aliases and perime
     try {
         await c.connect(transport);
         await c2.connect(new StreamableHTTPClientTransport(new URL(endpoint.url)));
-        assert.equal((await c.listTools()).tools.length, 4);
+        assert.equal((await c.listTools()).tools.length, 5);
         const result = await Promise.all([c, c2].map((instance) => instance.callTool({ name: 'codeoutline_explore', arguments: { query: 'greet' } })));
         assert.ok(result.every((r) => /你好世界/.test(r.content[0].text)));
         const oldPid = endpoint.child.pid;

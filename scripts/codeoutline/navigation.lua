@@ -70,12 +70,13 @@ end
 -- files. Overlay files and nodes take ids after every resident one; masked
 -- resident nodes drop out of name lists, which keep path and node order.
 -- Nothing is written to the resident tables.
-local function view(session, root)
+local function view(session, root, include_paths)
     local idx = service.resident(root)
     local G = idx:symbols()
     local V = setmetatable({ root = root, idx = idx, drafts = {}, disk = {}, dep_cache = {}, new_files = {},
         next_file = G.next_file, next_node = G.next_node, next_dir = G.next_dir }, { __index = G })
     V.js_context = require('codeoutline.js_resolution').context(V)
+    V.js_context.include_paths = include_paths
     V.js_context.lua = require('codeoutline.lua_bindings').context(V)
     V.js_context.ordinary = require('codeoutline.ordinary_bindings').context(V, V.js_context, function(f)
         return V.drafts[f] and V.drafts[f].source
@@ -459,6 +460,19 @@ local function is_decl(node) return not not graph.is_decl(node) end
 -- A declaration and its definitions (prototypes, in-class declarations) as one target.
 local function expand(V, set)
     local out = {}
+    local function same_declaration(id, candidate)
+        local a, b = V.nodes[id], V.nodes[candidate]
+        local f, g = V.node_file[id], V.node_file[candidate]
+        local language = V.files[f].language
+        if not C_FAMILY[language] then return true end
+        local owner_a = language == 'cpp' and require('codeoutline.cpp_types').owner(V, f, a, V.js_context)
+        local owner_b = V.files[g].language == 'cpp' and require('codeoutline.cpp_types').owner(V, g, b, V.js_context)
+        if owner_a and owner_b then return owner_a == owner_b end
+        if not require('codeoutline.cpp_includes').policy(V, f, V.js_context).configured then return true end
+        if owner_a or owner_b then return false end
+        local source, header = is_decl(a) and g or f, is_decl(a) and f or g
+        return graph.directly_includes(V, source, header, V.js_context)
+    end
     for id in pairs(set) do
         out[id] = true
         local node = V.nodes[id]
@@ -466,7 +480,7 @@ local function expand(V, set)
         for _, cid in ipairs(V.by_name[node.name]) do
             local c = V.nodes[cid]
             if c.qualified == node.qualified and is_decl(c) ~= is_decl(node)
-                and graph.family(V.files[V.node_file[cid]].language) == family then out[cid] = true end
+                and graph.family(V.files[V.node_file[cid]].language) == family and same_declaration(id, cid) then out[cid] = true end
         end
     end
     return out
@@ -526,6 +540,7 @@ end
 -- rules: a temporary record holding only that import.
 function M.import_files(V, f, imp)
     local rec = V.files[f]
+    if C_FAMILY[rec.language] then return (require('codeoutline.cpp_includes').resolve(V, f, imp, V.js_context)) end
     if rec.language == 'rust' then
         local files = require('codeoutline.rust_resolution').imports(V, f, imp, V.js_context)
         if files then return files end
@@ -604,19 +619,22 @@ end
 
 -- Locations of the files an import on this line names: project files by the
 -- dependency rules, and C/C++ headers found in the include directories.
-local function import_targets(V, f, line, include_paths)
+local function import_targets(V, f, line)
     local rec, result, seen = V.files[f], {}, {}
     local function add(uri)
         if not seen[uri] then seen[uri] = true; result[#result + 1] = { uri = uri, range = line_range(1) } end
     end
     for _, imp in ipairs(rec.imports or {}) do
         if imp.line == line then
-            local files = imp.system and {} or M.import_files(V, f, imp)
+            local files, selected, header
+            if C_FAMILY[rec.language] then
+                files, selected, header = require('codeoutline.cpp_includes').resolve(V, f, imp, V.js_context)
+                if imp.system and not selected then files = {} end
+            else files = M.import_files(V, f, imp) end
             for _, g in ipairs(files) do add(uri_of(V, g)) end
-            if #files == 0 and C_FAMILY[rec.language] then
+            if #files == 0 and header then add(documents.uri(header)) end
+            if #files == 0 and not header and C_FAMILY[rec.language] then
                 local dirs = {}
-                if not imp.system then dirs[1] = (V.idx:abs(rec.path):match('^(.*)/[^/]*$')) end
-                for _, dir in ipairs(include_paths or {}) do dirs[#dirs + 1] = paths.normalize(dir) end
                 for _, dir in ipairs(probe_includes()) do dirs[#dirs + 1] = dir end
                 for _, dir in ipairs(dirs) do
                     local file = dir .. '/' .. imp.path:gsub('\\', '/')
@@ -1006,7 +1024,7 @@ end
 local function at(req)
     local doc = request_doc(req)
     if not doc then return nil end
-    local V = view(req.session, req.root)
+    local V = view(req.session, req.root, req.includePaths)
     local f = V.add(doc)
     if not f then return nil end
     local offset = doc:offset(req.position)
@@ -1052,7 +1070,7 @@ function handlers.lsp_definition(req)
     end
     if #targets == 0 or importer then
         -- An import line: `require "a.b"`, `dofile("x.lua")`, `#include <x.h>`, `from . import m`.
-        local files = import_targets(V, f, line, req.includePaths)
+        local files = import_targets(V, f, line)
         if #files > 0 or #targets == 0 then
             return files, V.js_context.include_incomplete or V.js_context.workspace_incomplete or V.js_context.go_incomplete or V.js_context.rust_incomplete
         end
@@ -1202,7 +1220,7 @@ local function positions_left(t0, incomplete)
 end
 
 function handlers.lsp_incoming(req)
-    local V = view(req.session, req.root)
+    local V = view(req.session, req.root, req.includePaths)
     local id = relocate(V, req.data)
     if not id then return {} end
     local name = V.nodes[id].name
@@ -1226,7 +1244,7 @@ function handlers.lsp_incoming(req)
 end
 
 function handlers.lsp_outgoing(req)
-    local V = view(req.session, req.root)
+    local V = view(req.session, req.root, req.includePaths)
     local f = type(req.data) == 'table' and type(req.data.path) == 'string' and V.file_index[req.data.path]
     if not f then return {} end
     if not V.drafts[f] then

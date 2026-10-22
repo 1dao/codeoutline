@@ -319,6 +319,17 @@ function M.resolve(G, f, written, opts)
     return result, known
 end
 
+-- Class-outside members belong to the class visible in their own source file,
+-- not every class elsewhere with the same spelling.
+function M.owner(G, f, node, ctx)
+    local parent = node.parent and G.id_of[f][node.parent]
+    if parent and classes[G.nodes[parent].kind] then return parent end
+    local prefix = node.qualified:match('^(.*)::[^:]+$')
+    if not prefix then return nil end
+    local ids = M.resolve(G, f, prefix, { context = ctx, at = node.start_byte, undecorated = true })
+    return #ids == 1 and ids[1] or nil
+end
+
 -- Namespace members are restricted to declarations visible to the requester.
 -- Overlay nodes replace the resident by_owner entries just as by_name does.
 function M.namespace_members(G, f, namespace, ctx, at, seen, depth)

@@ -189,6 +189,38 @@ Each query retains at most 128 alias-file arrays and 1 MiB of alias evidence fro
 source loader. Reaching either limit reports incomplete relationships and suppresses uncertain
 C++ links; alias data is never persisted.
 
+C/C++ include lookup can use ordered project search paths in `.codeoutline.json`:
+
+```json
+{
+  "includePaths": ["shared/include"],
+  "includePathRules": [
+    { "directory": "apps/client", "paths": ["apps/client/include"] },
+    { "directory": "apps/server", "paths": ["apps/server/include"] }
+  ]
+}
+```
+
+Quoted includes first search the including file's directory. Other searches use the longest
+matching directory rule, then project `includePaths`, then LSP `initializationOptions.includePaths`,
+in array order, stopping at the first existing header. Rule directories match whole path
+components; `apps/client` does not match `apps/client-tools`. Paths are relative to the workspace root or absolute;
+rule directories must stay inside the workspace (`.` matches the root). Each including file
+selects its own rule. Configuration is reloaded per query and shared by explore, callers,
+definition, implementation navigation and completion. Existing same-directory source files take
+priority when pairing a header with its implementation; C++ class-outside members must belong to
+the selected class, rather than another same-named class.
+With configured paths, a paired source must directly include the selected header; unsupported
+build/forced-include relationships remain declarations instead of guessed definitions.
+
+An explicit `includePaths` (including `[]`), a matching directory rule, or nonempty LSP search
+paths disables whole-project suffix guesses for that file. Without configuration, legacy suffix
+lookup remains. External/unindexed headers can be opened from include lines but do not contribute
+indexed symbols or fall through to indexed duplicates. There are at most 128 rules and 128
+effective directories per file; paths are literal, without globs. These are per-file lookup rules,
+not compiler build configurations, forced includes or full preprocessor/translation-unit analysis.
+Only query-owned configuration and bounded path caches are added; no include maps are persisted.
+
 ## Command line
 
 ```sh

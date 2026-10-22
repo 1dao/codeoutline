@@ -2172,6 +2172,117 @@ int luaopen_native_test(lua_State *L) { luaL_setfuncs(L, methods, 0); luaL_newli
             initializationOptions = { includePaths = { 1 } } } }))
         spec.equal(replies[1].error.code, -32602)
     end)
+    spec.it('shares scoped include order across header jumps, definitions, implementations, completion and drafts', function()
+        for _, dir in ipairs({ 'searchOne', 'searchTwo', 'searchUse' }) do assert(xutils.mkdir_p(nav_root .. '/' .. dir)) end
+        for _, name in ipairs({ 'One', 'Two' }) do
+            nav_write('search' .. name .. '/api.hpp', 'namespace IncludeSearch { struct Base { virtual void save(int) = 0; }; '
+                .. 'struct Store { void only' .. name .. '() {} void out' .. name .. '(); void shared(); }; }')
+            nav_write('search' .. name .. '/impl.cpp', '#include "api.hpp"\nstruct IncludeSearch' .. name
+                .. ' : IncludeSearch::Base { void save(int) {} };\nvoid IncludeSearch::Store::out' .. name
+                .. '() {}\nvoid IncludeSearch::Store::shared() {}')
+        end
+        local source = '#include <api.hpp>\nvoid IncludeSearchUse(IncludeSearch::Base *p, IncludeSearch::Store *s) { p->save(1); s->onlyOne(); }'
+        nav_write('searchUse/main.cpp', source)
+        local config_path = nav_root .. '/.codeoutline.json'
+        local options = { cache_path = nav_root .. '/cache.idx', lister = 'walk' }
+        local function configure(name)
+            nav_write('.codeoutline.json', xutils.json_pack({ includePathRules = {
+                { directory = 'searchUse', paths = { 'search' .. name } } } }))
+        end
+        configure('One'); service.refresh(nav_root, options)
+        local idx = service.resident(nav_root); idx:save(); service.forget(nav_root); service.refresh(nav_root, options)
+        local doc = docs.read(nav_root .. '/searchUse/main.cpp')
+        local function query(method, offset, extra)
+            local req = { method = method, session = 'include-search', uri = doc.uri, position = doc:position(offset) }
+            for k, v in pairs(extra or {}) do req[k] = v end
+            return nav(req)
+        end
+        local ok, err = pcall(function()
+            for _, name in ipairs({ 'One', 'Two' }) do
+                configure(name)
+                local header = query('lsp_definition', (assert(source:find('api.hpp', 1, true))))
+                spec.equal(#header, 1); spec.equal(header[1].uri, nav_uri('search' .. name .. '/api.hpp'))
+                local definition = query('lsp_definition', (assert(source:find('save', 1, true))))
+                spec.equal(#definition, 1); spec.equal(definition[1].uri, header[1].uri)
+                local implementation = query('lsp_implementation', (assert(source:find('save', 1, true))))
+                spec.equal(#implementation, 1); spec.equal(implementation[1].uri, nav_uri('search' .. name .. '/impl.cpp'))
+                local labels = {}
+                for _, item in ipairs(require('codeoutline.completion').complete({ uri = doc.uri, root = nav_root,
+                    session = 'include-search', position = doc:position(assert(source:find('s->', 1, true)) + 2) }).items) do
+                    labels[item.label] = true
+                end
+                spec.truthy(labels['only' .. name]); spec.nil_value(labels['only' .. (name == 'One' and 'Two' or 'One')])
+                spec.truthy(labels['out' .. name]); spec.nil_value(labels['out' .. (name == 'One' and 'Two' or 'One')])
+                local declaration = docs.read(nav_root .. '/search' .. name .. '/api.hpp')
+                local bodies = nav({ method = 'lsp_definition', session = 'include-search', uri = declaration.uri,
+                    position = declaration:position(assert(declaration.source:find('shared', 1, true))) })
+                spec.equal(#bodies, 1); spec.equal(bodies[1].uri, nav_uri('search' .. name .. '/impl.cpp'))
+            end
+            os.remove(config_path)
+            local from_client = query('lsp_definition', assert(source:find('save', 1, true)), { includePaths = { 'searchOne' } })
+            spec.equal(#from_client, 1); spec.equal(from_client[1].uri, nav_uri('searchOne/api.hpp'))
+            configure('One')
+            local edited = source:gsub('<api.hpp>', '"../searchTwo/api.hpp"')
+            navigation.sync({ session = 'include-search', open = { [doc.uri] = 1 }, changed = {
+                [doc.uri] = { version = 1, language = 'cpp', source = edited } } })
+            local draft = docs.new(doc.uri, edited, 1, 'cpp')
+            local changed = nav({ method = 'lsp_implementation', session = 'include-search', uri = doc.uri,
+                position = draft:position(assert(edited:find('save', 1, true))) })
+            spec.equal(#changed, 1); spec.equal(changed[1].uri, nav_uri('searchTwo/impl.cpp'))
+            spec.nil_value(service.resident(nav_root):symbols().cpp_includes)
+        end)
+        navigation.close('include-search'); os.remove(config_path)
+        for _, dir in ipairs({ 'searchOne', 'searchTwo', 'searchUse' }) do assert(xutils.rmtree(nav_root .. '/' .. dir)) end
+        service.refresh(nav_root, options); assert(ok, err)
+    end)
+    spec.it('keeps configured C prototype navigation and references inside the selected header project', function()
+        for _, dir in ipairs({ 'cSearchOne', 'cSearchTwo', 'cSearchUse' }) do assert(xutils.mkdir_p(nav_root .. '/' .. dir)) end
+        for _, name in ipairs({ 'One', 'Two' }) do
+            nav_write('cSearch' .. name .. '/api.h', 'int include_search_c(void);')
+            nav_write('cSearch' .. name .. '/api.c', '#include "api.h"\nint include_search_c(void) { return 1; }')
+        end
+        local source = '#include <api.h>\nvoid IncludeSearchCUse(void) { include_search_c(); }'
+        nav_write('cSearchUse/main.c', source)
+        nav_write('.codeoutline.json', '{"includePaths":["cSearchOne"]}')
+        local options = { cache_path = nav_root .. '/cache.idx', lister = 'walk' }
+        service.refresh(nav_root, options)
+        local ok, err = pcall(function()
+            local header = docs.read(nav_root .. '/cSearchOne/api.h')
+            local body = nav({ method = 'lsp_definition', uri = header.uri,
+                position = header:position(assert(header.source:find('include_search_c', 1, true))) })
+            spec.equal(#body, 1); spec.equal(body[1].uri, nav_uri('cSearchOne/api.c'))
+            local doc = docs.read(nav_root .. '/cSearchUse/main.c')
+            local result = nav({ method = 'lsp_references', uri = doc.uri,
+                position = doc:position(assert(source:find('include_search_c', 1, true))), includeDeclaration = true })
+            spec.truthy(#result > 0)
+            for _, location in ipairs(result) do spec.truthy(not location.uri:find('/cSearchTwo/', 1, true)) end
+        end)
+        os.remove(nav_root .. '/.codeoutline.json')
+        for _, dir in ipairs({ 'cSearchOne', 'cSearchTwo', 'cSearchUse' }) do assert(xutils.rmtree(nav_root .. '/' .. dir)) end
+        service.refresh(nav_root, options); assert(ok, err)
+    end)
+    spec.it('opens a configured external header without binding indexed same-name symbols', function()
+        local external = nav_root .. '-external-includes'
+        assert(xutils.mkdir_p(external)); assert(xutils.mkdir_p(nav_root .. '/externalSearch'))
+        local f = assert(io.open(external .. '/external_api.hpp', 'wb'))
+        f:write('namespace ExternalInclude { struct Store { void save() {} }; }'); f:close()
+        nav_write('externalSearch/external_api.hpp', 'namespace ExternalInclude { struct Store { void save() {} }; }')
+        local source = '#include <external_api.hpp>\nvoid ExternalIncludeUse(ExternalInclude::Store *p) { p->save(); }'
+        nav_write('externalSearch/main.cpp', source)
+        local options = { cache_path = nav_root .. '/cache.idx', lister = 'walk' }
+        service.refresh(nav_root, options)
+        local doc = docs.read(nav_root .. '/externalSearch/main.cpp')
+        local ok, err = pcall(function()
+            local header = nav({ method = 'lsp_definition', uri = doc.uri, includePaths = { external },
+                position = doc:position(assert(source:find('external_api.hpp', 1, true))) })
+            spec.equal(#header, 1); spec.equal(header[1].uri, docs.uri(external .. '/external_api.hpp'))
+            local definition = nav({ method = 'lsp_definition', uri = doc.uri, includePaths = { external },
+                position = doc:position(assert(source:find('save', 1, true))) })
+            spec.equal(#definition, 0)
+        end)
+        assert(xutils.rmtree(external)); assert(xutils.rmtree(nav_root .. '/externalSearch'))
+        service.refresh(nav_root, options); assert(ok, err)
+    end)
     spec.it('falls back to a visible prototype when definitions are ambiguous', function()
         for _, dir in ipairs({ 'api', 'impl_a', 'impl_b', 'user' }) do assert(xutils.mkdir_p(nav_root .. '/' .. dir)) end
         nav_write('api/proto.h', 'int ambiguous_fn(int x);\n')

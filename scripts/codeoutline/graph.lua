@@ -71,28 +71,14 @@ end
 -- Files a file depends on, resolved from its #include / import records.
 local function resolve_deps(G, f, js_context, imports_only)
     local rec = G.files[f]
+    if C_FAMILY[rec.language] then js_context = js_context or {} end
     local deps = {}
     local function add(g) if g and g ~= f then deps[g] = true end end
     local here = dirname(rec.path)
     for _, imp in ipairs(rec.imports) do
         local path = imp.path
         if C_FAMILY[rec.language] then
-            path = path:gsub('\\', '/')
-            local parts = {}
-            for segment in ((here ~= '' and here .. '/' or '') .. path):gmatch('[^/]+') do
-                if segment == '..' then parts[#parts] = nil
-                elseif segment ~= '.' then parts[#parts + 1] = segment end
-            end
-            local relative = G.file_index[table.concat(parts, '/')]
-            if relative and not imp.system then
-                add(relative)
-                goto next_import
-            end
-            -- Fall back to suffix candidates when the local quoted path is absent.
-            for _, g in ipairs(G.by_base[basename(path)] or {}) do
-                local p = G.files[g].path
-                if p == path or p:sub(-(#path + 1)) == '/' .. path then add(g) end
-            end
+            for _, g in ipairs(require('codeoutline.cpp_includes').resolve(G, f, imp, js_context)) do add(g) end
         elseif rec.language == 'python' then
             local rel = path
             local base = here
@@ -199,12 +185,27 @@ local function resolve_deps(G, f, js_context, imports_only)
     -- C: x.c usually implements what x.h declares, so a file that includes
     -- x.h also "depends on" x.c for resolution purposes.
     local paired = {}
-    if C_FAMILY[rec.language] then
+    if C_FAMILY[rec.language] and not imports_only then
+        local strict = require('codeoutline.cpp_includes').policy(G, f, js_context).configured
+        local function can_pair(source, header)
+            if not strict then return true end
+            return M.directly_includes(G, source, header, js_context)
+        end
         for g in pairs(deps) do
             local p = G.files[g].path
             if HEADER_EXT[p:match('%.(%w+)$') or ''] then
+                local local_sources, has_local = {}, false
                 for _, h in ipairs(G.by_stem[stem(p)] or {}) do
-                    if h ~= f and SOURCE_EXT[G.files[h].path:match('%.(%w+)$') or ''] then paired[h] = true end
+                    if SOURCE_EXT[G.files[h].path:match('%.(%w+)$') or ''] and dirname(G.files[h].path) == dirname(p) then
+                        has_local = true
+                        if h ~= f and can_pair(h, g) then local_sources[#local_sources + 1] = h end
+                    end
+                end
+                if has_local then for _, h in ipairs(local_sources) do paired[h] = true end
+                else
+                    for _, h in ipairs(G.by_stem[stem(p)] or {}) do
+                        if h ~= f and SOURCE_EXT[G.files[h].path:match('%.(%w+)$') or ''] and can_pair(h, g) then paired[h] = true end
+                    end
                 end
             end
         end
@@ -212,9 +213,18 @@ local function resolve_deps(G, f, js_context, imports_only)
     return deps, paired
 end
 
+function M.directly_includes(G, source, header, ctx)
+    ctx = ctx or {}
+    local cache = ctx.cpp_source_dependencies
+    if not cache then cache = {}; ctx.cpp_source_dependencies = cache end
+    if not cache[source] then cache[source] = resolve_deps(G, source, ctx, true) end
+    return cache[source][header] or false
+end
+
 -- One bounded include closure for graph queries, navigation and type lookup.
 -- Paired implementations may supply definitions, never declarations/imports.
 function M.visible_dependencies(G, f, ctx)
+    if C_FAMILY[G.files[f].language] then ctx = ctx or {} end
     local cache = ctx and ctx.include_dependencies
     if not cache and ctx then cache = {}; ctx.include_dependencies = cache end
     local old = cache and cache[f]
@@ -582,6 +592,7 @@ function M.query(symbols, opts)
         stats = { expanded = 0, incoming_scans = 0, resolved_refs = 0 }, incomplete = false }, { __index = symbols })
     local dependencies, references = {}, {}
     local js_context = js_resolution.context(symbols)
+    js_context.include_paths = opts.include_paths
     js_context.lua = lua_bindings.context(symbols)
     js_context.ordinary = require('codeoutline.ordinary_bindings').context(symbols, js_context)
     Q.stats.ordinary = js_context.ordinary.stats
@@ -690,14 +701,35 @@ function M.query(symbols, opts)
         for src, edges in pairs(static_dispatch.incoming(wanted)) do
             for _, edge in ipairs(edges) do push3(incoming, edge.target, src, edge.line, edge.kind) end
         end
-        for _, f in ipairs(symbols.file_order) do
-            for _, src in ipairs(symbols.id_of[f]) do
-                for _, edge in ipairs(indirect_incoming[src] or {}) do
-                    if wanted[edge.target] then push3(incoming, edge.target, src, edge.line, edge.kind) end
-                end
+        local indirect_sources = {}
+        for src in pairs(indirect_incoming) do
+            if #indirect_sources % 128 == 0 then control.check() end
+            indirect_sources[#indirect_sources + 1] = src
+        end
+        table.sort(indirect_sources, function(a, b) return M.before(symbols, a, b) end)
+        for _, src in ipairs(indirect_sources) do
+            control.check()
+            for _, edge in ipairs(indirect_incoming[src]) do
+                if wanted[edge.target] then push3(incoming, edge.target, src, edge.line, edge.kind) end
             end
         end
         self.stats.incoming_scans = self.stats.incoming_scans + 1
+        -- Lua modules can target Lua files or native files identified by
+        -- luaopen_* (the same resident evidence used by foreign.modules).
+        -- Other targets cannot be reached through Lua import/local bindings.
+        local lua_targets, checked_native = false, {}
+        for id in pairs(wanted) do
+            local f = symbols.node_file[id]
+            local rec = symbols.files[f]
+            if rec.language == 'lua' then lua_targets = true; break end
+            if C_FAMILY[rec.language] and not checked_native[f] then
+                checked_native[f] = true
+                for _, node in ipairs(rec.nodes) do
+                    if node.name:match('^luaopen_(.+)$') then lua_targets = true; break end
+                end
+                if lua_targets then break end
+            end
+        end
         -- Hot loop over every reference: numeric loops, hoisted fields, and the
         -- selective name test first. Checkpoints run per file and per chunk.
         local files = symbols.files
@@ -705,6 +737,7 @@ function M.query(symbols, opts)
         if js_context.workspace_incomplete or js_context.go_incomplete then Q.incomplete = true end
         for _, f in ipairs(symbols.file_order) do
             control.check()
+            if files[f].language == 'lua' and not lua_targets then goto next_incoming_file end
             local alias_refs = js_context.ordinary.aliases(f, wanted, candidates)
             if files[f].language == 'rust' then
                 for i in pairs(require('codeoutline.rust_resolution').alias_refs(symbols, f, wanted, js_context)) do alias_refs[i] = true end
@@ -732,6 +765,7 @@ function M.query(symbols, opts)
                     end
                 end
             end
+            ::next_incoming_file::
         end
         -- Interrupted scans never publish partial caller lists.
         if js_context.rust_incomplete then self.incomplete = true end

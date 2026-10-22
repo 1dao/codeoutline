@@ -1950,6 +1950,158 @@ class Use { void call(I value) { { Object value = unknown; value.run(1); } value
     end)
 end)
 
+spec.describe('query-owned C/C++ include search paths', function()
+    local serial = 0
+    local function build(files, config)
+        serial = serial + 1
+        local root, records = tmp_root .. '/include_paths/' .. serial, {}
+        for path, source in pairs(files) do
+            write(root .. '/' .. path, source)
+            records[path] = ci.parse(path, source, { ordinary_bindings = true })
+        end
+        if config then write(root .. '/.codeoutline.json', xutils.json_pack(config)) end
+        return graph.build({ root = root, files = records })
+    end
+    local store = 'namespace Include { struct Store { void save() {} }; }'
+    spec.it('uses ordered includePaths and reloads configuration without rebuilding symbol tables', function()
+        local G = build({ ['one/api.hpp'] = store, ['two/api.hpp'] = store,
+            ['app/main.cpp'] = '#include <api.hpp>\nvoid IncludeEntry(Include::Store *value) { value->save(); }' },
+            { includePaths = { 'two', 'one' } })
+        spec.equal(edges_from(G, 'IncludeEntry'), 'save@two/api.hpp')
+        write(G.root .. '/.codeoutline.json', '{"includePaths":["one","two"]}')
+        spec.equal(edges_from(G, 'IncludeEntry'), 'save@one/api.hpp')
+        write(G.root .. '/.codeoutline.json', '{"includePaths":["one/../two/.","two"]}')
+        spec.equal(edges_from(G, 'IncludeEntry'), 'save@two/api.hpp')
+        if require('codeoutline.path').windows then
+            write(G.root .. '/.codeoutline.json', '{"includePaths":["TWO"]}')
+            spec.equal(edges_from(G, 'IncludeEntry'), 'save@two/api.hpp')
+        end
+    end)
+    spec.it('prefers quoted local headers and blocks suffix guesses after explicit search misses', function()
+        local G = build({ ['one/api.hpp'] = store, ['app/api.hpp'] = store, ['other/missing.hpp'] = store,
+            ['app/quoted.cpp'] = '#include "api.hpp"\nvoid Quoted(Include::Store *p) { p->save(); }',
+            ['app/angle.cpp'] = '#include <api.hpp>\nvoid Angled(Include::Store *p) { p->save(); }',
+            ['app/missing.cpp'] = '#include <missing.hpp>\nvoid MissingInclude(Include::Store *p) { p->save(); }' },
+            { includePaths = { 'one' } })
+        spec.equal(edges_from(G, 'Quoted'), 'save@app/api.hpp')
+        spec.equal(edges_from(G, 'Angled'), 'save@one/api.hpp')
+        spec.equal(edges_from(G, 'MissingInclude'), '')
+        write(G.root .. '/.codeoutline.json', '{"includePaths":[]}')
+        spec.equal(edges_from(G, 'Quoted'), 'save@app/api.hpp')
+        spec.equal(edges_from(G, 'Angled'), '')
+        os.remove(G.root .. '/.codeoutline.json')
+        local found = graph.dependencies(G, G.file_index['app/angle.cpp'], { include_paths = { 'one' } })
+        spec.truthy(found[G.file_index['one/api.hpp']]); spec.nil_value(found[G.file_index['app/api.hpp']])
+    end)
+    spec.it('selects the longest directory rule with component boundaries and shared default paths', function()
+        local files = { ['one/api.hpp'] = store, ['two/api.hpp'] = store, ['fallback/api.hpp'] = store,
+            ['fallback/shared.hpp'] = 'namespace Include { struct Shared { void common() {} }; }' }
+        for name, dir in pairs({ Aur = 'aur', Nested = 'aur/nested', Server = 'server', Boundary = 'aurora' }) do
+            files[dir .. '/client.cpp'] = '#include <api.hpp>\n#include <shared.hpp>\nvoid ' .. name
+                .. '(Include::Store *p, Include::Shared *s) { p->save(); s->common(); }'
+        end
+        local G = build(files, { includePaths = { 'fallback' }, includePathRules = {
+            { directory = 'aur', paths = { 'one' } }, { directory = 'aur/nested', paths = { 'two' } },
+            { directory = 'server', paths = { 'two' } } } })
+        spec.equal(edges_from(G, 'Aur'), 'common@fallback/shared.hpp save@one/api.hpp')
+        spec.equal(edges_from(G, 'Nested'), 'common@fallback/shared.hpp save@two/api.hpp')
+        spec.equal(edges_from(G, 'Server'), 'common@fallback/shared.hpp save@two/api.hpp')
+        spec.equal(edges_from(G, 'Boundary'), 'common@fallback/shared.hpp save@fallback/api.hpp')
+    end)
+    spec.it('shares indirect includes and pairs the selected header with its own directory implementation', function()
+        local G = build({ ['one/api.hpp'] = 'namespace Include { struct Store { void save(); }; }',
+            ['one/api.cpp'] = '#include "api.hpp"\nvoid Include::Store::save() {}',
+            ['one/bridge.hpp'] = '#include "api.hpp"\n',
+            ['two/api.hpp'] = 'namespace Include { struct Store { void save(); }; }',
+            ['two/api.cpp'] = '#include "api.hpp"\nvoid Include::Store::save() {}',
+            ['app/main.cpp'] = '#include <bridge.hpp>\nvoid IndirectInclude(Include::Store *p) { p->save(); }' },
+            { includePaths = { 'one', 'two' } })
+        spec.equal(edges_from(G, 'IndirectInclude'), 'save@one/api.cpp')
+        local deps, paired = graph.visible_dependencies(G, G.file_index['app/main.cpp'])
+        spec.truthy(deps[G.file_index['one/api.hpp']]); spec.nil_value(deps[G.file_index['two/api.hpp']])
+        spec.truthy(paired[G.file_index['one/api.cpp']]); spec.nil_value(paired[G.file_index['two/api.cpp']])
+        local _, own_paired = graph.visible_dependencies(G, G.file_index['one/api.cpp'])
+        spec.nil_value(own_paired[G.file_index['two/api.cpp']])
+    end)
+    spec.it('stops at existing unindexed headers without falling through to an indexed duplicate', function()
+        local G = build({ ['two/api.hpp'] = store,
+            ['app/main.cpp'] = '#include <api.hpp>\nvoid UnindexedInclude(Include::Store *p) { p->save(); }' },
+            { includePaths = { 'hidden', 'two' } })
+        spec.equal(edges_from(G, 'UnindexedInclude'), 'save@two/api.hpp')
+        write(G.root .. '/hidden/api.hpp', store)
+        spec.equal(edges_from(G, 'UnindexedInclude'), '')
+        local files, selected, path = require('codeoutline.cpp_includes').resolve(G, G.file_index['app/main.cpp'],
+            G.files[G.file_index['app/main.cpp']].imports[1], {})
+        spec.equal(#files, 0); spec.truthy(selected); spec.equal(path, G.root .. '/hidden/api.hpp')
+    end)
+    spec.it('pairs configured C headers with sources in separate directories without crossing projects', function()
+        local G = build({ ['one/include/entry.h'] = 'int separate_include_target(void);',
+            ['two/include/entry.h'] = 'int separate_include_target(void);',
+            ['one/src/entry.c'] = '#include "../include/entry.h"\nint separate_include_target(void) { return 1; }',
+            ['two/src/entry.c'] = '#include "../include/entry.h"\nint separate_include_target(void) { return 2; }',
+            ['app/main.c'] = '#include <entry.h>\nvoid SeparateIncludeEntry(void) { separate_include_target(); }' },
+            { includePaths = { 'one/include', 'two/include' } })
+        spec.equal(edges_from(G, 'SeparateIncludeEntry'), 'separate_include_target@one/src/entry.c')
+    end)
+    spec.it('uses include scopes for C declarations and C++ virtual implementation relationships', function()
+        local G = build({ ['one/api.hpp'] = 'namespace Include { struct Base { virtual void run() = 0; }; }',
+            ['two/api.hpp'] = 'namespace Include { struct Base { virtual void run() = 0; }; }',
+            ['app/impl.cpp'] = '#include <api.hpp>\nstruct IncludeStore : Include::Base { void run() {} };',
+            ['one/capi.h'] = 'int include_c_target(void);', ['two/capi.h'] = 'int include_c_target(void);',
+            ['one/capi.c'] = '#include "capi.h"\nint include_c_target(void) { return 1; }',
+            ['two/capi.c'] = '#include "capi.h"\nint include_c_target(void) { return 2; }',
+            ['app/main.c'] = '#include <capi.h>\nvoid CIncludeEntry(void) { include_c_target(); }' },
+            { includePaths = { 'one', 'two' } })
+        spec.equal(edges_from(G, 'CIncludeEntry'), 'include_c_target@one/capi.c')
+        local Q, count = graph.query(G), 0
+        for _, id in ipairs(G.by_qualified['Include::Base::run']) do
+            local expected = G.files[G.node_file[id]].path == 'one/api.hpp' and graph.EDGE or 0
+            spec.equal(#Q.out[id], expected); count = count + #Q.out[id]
+        end
+        spec.equal(count, graph.EDGE)
+    end)
+    spec.it('validates include configuration, limits, root boundaries and cancellation', function()
+        local includes = require('codeoutline.cpp_includes')
+        local G = build({ ['main.cpp'] = '#include <api.hpp>\n', ['one/api.hpp'] = store })
+        local invalid = { { includePaths = 'one' }, { includePaths = false }, { includePaths = { 1 } }, { includePaths = { ['x'] = 'one' } },
+            { includePaths = { 'C:relative' } }, { includePathRules = 'one' }, { includePathRules = false }, { includePathRules = { false } },
+            { includePathRules = { { directory = '../outside', paths = {} } } },
+            { includePathRules = { { directory = '/absolute', paths = {} } } },
+            { includePathRules = { { directory = '.', typo = {} } } },
+            { includePathRules = { { directory = 'one', paths = {} }, { directory = './one', paths = {} } } } }
+        for _, config in ipairs(invalid) do
+            write(G.root .. '/.codeoutline.json', xutils.json_pack(config))
+            spec.equal(pcall(includes.context, G), false)
+        end
+        write(G.root .. '/.codeoutline.json', '{"includePaths":["one"]}')
+        local limit = includes.MAX_PATHS; includes.MAX_PATHS = 0
+        local ok = pcall(includes.context, G); includes.MAX_PATHS = limit; spec.equal(ok, false)
+        local control = require('codeoutline.control'); local previous = control.callback
+        control.callback = function() error(control.cancelled('cancel include search')) end
+        local err; ok, err = pcall(graph.visible_dependencies, G, G.file_index['main.cpp'], {})
+        control.callback = previous
+        spec.equal(ok, false); spec.truthy(control.is_interrupted(err))
+    end)
+    spec.it('preserves renamed Lua native callers while filtering Lua bindings for ordinary C++ targets', function()
+        local root = tmp_root .. '/include_native_callers'
+        write(root .. '/native.c', [[static int native_saved(lua_State *L) { return 0; }
+static const luaL_Reg funcs[] = {{"run", native_saved}, {NULL, NULL}};
+int luaopen_native(lua_State *L) { luaL_newlib(L, funcs); return 1; }]])
+        write(root .. '/use.lua', 'local api = require("native")\nfunction NativeIncludeCaller() api.run() end')
+        write(root .. '/plain.cpp', 'struct PlainInclude { void run() {} };')
+        local options = { cache_path = root .. '/cache.idx', lister = 'walk' }
+        local idx, G = svc.get(root, options)
+        idx:save(); svc.forget(root); idx, G = svc.get(root, options)
+        local Q = graph.query(G)
+        local callers = Q.inn[G.by_name.native_saved[1]]
+        local found = false
+        for i = 1, #callers, graph.EDGE do if G.nodes[callers[i]].qualified == 'NativeIncludeCaller' then found = true end end
+        spec.truthy(found)
+        spec.equal(#Q.inn[G.by_qualified['PlainInclude::run'][1]], 0)
+        svc.forget(root)
+    end)
+end)
+
 spec.describe('query-time C++ virtual implementations', function()
     local function build(files)
         local records = {}

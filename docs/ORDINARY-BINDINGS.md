@@ -76,6 +76,14 @@ navigation and labeled possible-implementation edges in explore/callers; it does
 runtime receiver or change ordinary definition navigation. See the README for signature and
 inheritance exclusions. No virtual method evidence or implementation edges are serialized.
 
+Project `includePaths` and directory-scoped `includePathRules` control the same bounded include
+closure used by calls, types, namespaces, implementations and completion. A configured search
+stops at the first existing header; an external/unindexed header is a barrier to indexed
+same-name substitutes. Class-outside C++ members are checked against the class visible in their
+defining file. Unconfigured lookup retains legacy suffix resolution and unsupported class-outside
+hints; explicit include policies require resolved class ownership. Configuration changes take
+effect on the next query without building another index.
+
 ## Storage and validation
 
 Full and incremental indexing skip this additional JS alias, Python import and

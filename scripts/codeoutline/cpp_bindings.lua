@@ -97,6 +97,19 @@ function M.resolve(G, f, src, name, evidence, deps, ctx, accept)
     end
     local scope = src and G.nodes[src].qualified:match('^(.*)::[^:]+$')
     local result, seen, emitted = {}, {}, {}
+    local definition_owners = {}
+    local configured = require('codeoutline.cpp_includes').policy(G, f, ctx).configured
+    local function belongs(id, cls)
+        if definition_owners[id] == nil then
+            definition_owners[id] = require('codeoutline.cpp_types').owner(G, G.node_file[id], G.nodes[id], ctx) or false
+        end
+        if definition_owners[id] == cls then return true end
+        -- Keep legacy class-outside hints when there is no configured policy
+        -- and the defining file provides no class evidence (e.g. forced includes).
+        local node = G.nodes[id]
+        local parent = node.parent and G.files[G.node_file[id]].nodes[node.parent]
+        return not configured and definition_owners[id] == false and (not parent or not types[parent.kind])
+    end
     local function members(cls, depth)
         control.check()
         if seen[cls] or depth > 8 then return end
@@ -105,9 +118,8 @@ function M.resolve(G, f, src, name, evidence, deps, ctx, accept)
         local matches, has_definition = {}, false
         for _, id in ipairs(G.by_name[name] or {}) do
             local n = G.nodes[id]
-            local owner = n.parent and G.files[G.node_file[id]].nodes[n.parent]
             if n.qualified == q and G.files[G.node_file[id]].language == 'cpp'
-                and (not owner or not types[owner.kind] or G.id_of[G.node_file[id]][n.parent] == cls) then
+                and belongs(id, cls) then
                 matches[#matches + 1] = id
                 if not n.decl and n.kind ~= 'prototype' then has_definition = true end
             end

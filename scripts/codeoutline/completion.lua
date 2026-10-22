@@ -529,9 +529,14 @@ function Completion:members(ids, depth, seen)
         end
         -- Out-of-line members anywhere: `Box::area`, Go methods, Lua `M.f` / `M:f`.
         for _, entry in ipairs(self:owned(node.qualified, graph.family(language))) do
+            if self:expired() then break end
+            local owner = language == 'cpp' and require('codeoutline.cpp_types').owner(V, entry.file, entry.node, V.js_context)
             local parent = entry.node.parent and V.files[entry.file].nodes[entry.node.parent]
-            if language ~= 'cpp' or not parent or not TYPES[parent.kind]
-                or entry.file == f and entry.node.parent == n then out[#out + 1] = entry end
+            local legacy = language == 'cpp' and not owner and (not parent or not TYPES[parent.kind])
+                and not require('codeoutline.cpp_includes').policy(V, self.f, V.js_context).configured
+            if language ~= 'cpp' or owner == id or legacy then
+                out[#out + 1] = entry
+            end
         end
         -- Attributes assigned in methods (Python, JS) or on Lua tables.
         if T and (language == 'python' or language == 'javascript' or language == 'typescript' or language == 'arkts' or language == 'lua') then
@@ -943,7 +948,7 @@ end
 function M.complete(req)
     local doc = navigation.request_doc(req)
     if not doc then return { items = {} } end
-    local V = navigation.view(req.session, req.root)
+    local V = navigation.view(req.session, req.root, req.includePaths)
     local f = V.add(doc)
     if not f then return { items = {} } end
     local self = setmetatable({ V = V, f = f, doc = doc, deadline = os.clock() + M.BUDGET_SECONDS,

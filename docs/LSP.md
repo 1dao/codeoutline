@@ -135,12 +135,18 @@ overlay never writes to the resident tables.
 - On an import line (`require`/`dofile` strings or names, `#include`, JS/TS module
   strings, Python/Go/Java/Kotlin/Rust imports), definition goes to the loaded file,
   resolved by the same dependency rules as explore. C/C++ headers not in the
-  project are searched in `initializationOptions.includePaths`, then INCLUDE/CPATH
+  project are searched in project `includePathRules`/`includePaths` and
+  `initializationOptions.includePaths`, then INCLUDE/CPATH
   variables, then the compiler's list (`cc -E -v`) or, on Windows, the newest
   Windows Kits and the MSVC found by vswhere (probed once). Symbols inside system
   headers are not indexed. Relative `#include "../x.h"` resolves against the
   including file. When definitions are too far apart to choose between, a visible
   prototype is the target.
+  Project include configuration also controls indexed C/C++ type/member lookup,
+  implementations and completion. Quoted local headers win; configured directories
+  are ordered and stop at the first existing header. Explicit paths suppress
+  whole-project suffix guesses, even when the selected header is outside the index.
+  See the README for directory rules, limits and a multi-project example.
 - Hover shows the target's signature, kind, qualified name and location.
 - Signature help, triggered by `(` and `,`, finds the innermost open call before
   the cursor (commas inside nested calls, literals and brackets do not count),

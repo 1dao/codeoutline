@@ -33,7 +33,7 @@ end
 M.VERSION = (function()
     local parts = {}
     for _, m in ipairs({ 'xscan', 'text', 'common', 'indirect', 'dispatch_aliases', 'static_dispatch', 'js_evidence', 'python_bindings', 'cpp_bindings', 'cpp_types', 'csharp_bindings', 'lua_bindings', 'foreign', 'foreign_lua', 'parse', 'lang.c', 'lang.cpp', 'lang.lua', 'lang.python',
-        'implementations', 'cpp_implementations', 'ts_implementations', 'type_bases', 'automatic_events', 'lua_callback_loops', 'lang.java', 'lang.kotlin', 'lang.go', 'lang.js', 'lang.csharp', 'lang.rust' }) do
+        'function_values', 'implementations', 'cpp_implementations', 'ts_implementations', 'type_bases', 'automatic_events', 'lua_callback_loops', 'lang.java', 'lang.kotlin', 'lang.go', 'lang.js', 'lang.csharp', 'lang.rust' }) do
         local file = package.searchpath and package.searchpath('codeoutline.' .. m, package.path)
         local h = file and io.open(file, 'rb')
         if h then parts[#parts + 1] = h:read('a'); h:close() end
@@ -276,11 +276,13 @@ function Index:query_source(rel)
             parsed.encoding = encoding
             self:commit(rel, parsed)
             changed = true
+            self.encoding_dirty = true
         else
-            -- Metadata only: names and positions are unchanged.
+            -- Metadata only: names and positions are unchanged. Keep this hint
+            -- resident and include it in the next normal save; confirming UTF-8
+            -- must not rewrite a large project cache on the query's hot path.
             rec.encoding = encoding
         end
-        self.encoding_dirty = true
     end
     self.query_sources[rel] = src
     return src, changed

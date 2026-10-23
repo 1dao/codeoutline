@@ -24,13 +24,13 @@ function M.collect(r, T)
     end
     for i, ref in ipairs(r.refs) do
         if i % 128 == 0 then control.check() end
-        if (ref.kind == 'call' or ref.kind == 'member_call') and ref.recv ~= 'self' and ref.recv ~= 'cls' then
+        if (ref.kind == 'call' or ref.kind == 'member_call' or ref.kind == 'ref') and ref.recv ~= 'self' and ref.recv ~= 'cls' then
             local symbol, first = ref.name, ref.tok
             while T:text(first - 1) == '.' and T.k[first - 2] == 'id' do
                 symbol = T:text(first - 2) .. '.' .. symbol; first = first - 2
             end
             local value = expand({ symbol = symbol }, ref.tok)
-            if value == false or ref.kind == 'member_call' and first == ref.tok then ref.binding = 'py:?'
+            if value == false or ref.recv and first == ref.tok then ref.binding = 'py:?'
             elseif value and value.import then
                 ref.binding = 'py:import:' .. value.import.path .. '\0' .. value.member
             elseif value and value.node and not ref.recv then ref.binding = 'py:node:' .. value.node end

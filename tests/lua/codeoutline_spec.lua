@@ -2806,8 +2806,9 @@ spec.describe('query-owned ordinary bindings', function()
         local idx, G = svc.get(root, { cache_path = root .. '/cache.idx', lister = 'walk' })
         write(root .. '/unrelated.ts', 'function changed() {}')
         local Q = graph.query(G)
-        spec.equal(#Q.inn[G.by_name.save[1]], graph.EDGE)
-        spec.equal(#Q.inn[G.by_name.local_save[1]], graph.EDGE)
+        -- Alias initializers now retain reference dependencies as well as calls.
+        spec.equal(#Q.inn[G.by_name.save[1]], 4 * graph.EDGE)
+        spec.equal(#Q.inn[G.by_name.local_save[1]], 2 * graph.EDGE)
         spec.equal(#Q.out[G.by_name.run[1]], 2 * graph.EDGE)
         for _, rec in pairs(idx.files) do
             spec.nil_value(rec.ordinary_bindings)
@@ -2921,8 +2922,8 @@ spec.describe('JS module and receiver resolution', function()
                 .. 'function run() { two(); imported(); }',
         })
         spec.equal(edges_from(G, 'run'), 'local_save@use.ts save@lib.ts')
-        spec.equal(#graph.query(G).inn[G.by_name.save[1]], graph.EDGE)
-        spec.equal(#graph.query(G).inn[G.by_name.local_save[1]], graph.EDGE)
+        spec.equal(#graph.query(G).inn[G.by_name.save[1]], 4 * graph.EDGE)
+        spec.equal(#graph.query(G).inn[G.by_name.local_save[1]], 3 * graph.EDGE)
     end)
     spec.it('does not follow reassigned, shadowed, cyclic or computed function aliases', function()
         local G = build({
@@ -4207,7 +4208,7 @@ function run() { api.emit(event); later(1, cb); rpc.post(1, target); }]],
             local G = build({ ['a.' .. ext] = source })
             local found, Q = indirect(G, 'run')
             spec.equal(found, 'done,done,done', ext)
-            spec.equal(#Q.inn[G.by_name.done[1]], 9, ext)
+            spec.equal(#Q.inn[G.by_name.done[1]], ext == 'lua' and 9 or 12, ext)
         end
     end)
     spec.it('rejects overwritten, shadowed and computed dispatch aliases', function()
@@ -4310,7 +4311,7 @@ void run(void) {
             spec.equal(indirect(G, 'run'), 'done', ext)
             idx:save(); svc.forget(root)
             local _, info = svc.callers(root, 'done', opts)
-            spec.equal(#info.callers, 1, ext)
+            spec.equal(#info.callers, (ext == 'lua' or ext == 'c') and 1 or 2, ext)
             -- A successful on-disk query must not leave full alias/site data.
             idx = svc.get(root, opts)
             spec.equal(idx.files['a.' .. ext].dispatch_sites, nil)
@@ -4812,6 +4813,84 @@ end
         output, info = svc.callers(root, 'save', opts)
         spec.equal(#info.callers, 0)
         svc.forget(root)
+    end)
+end)
+
+spec.describe('function values as reference dependencies', function()
+    local function edges(G, source, target)
+        local Q, hits = graph.query(G), 0
+        local src, dst = G.by_name[source][1], G.by_name[target][1]
+        local out = Q.out[src]
+        for i = 1, #out, graph.EDGE do
+            if out[i] == dst and out[i + 2] == 'ref' then hits = hits + 1 end
+        end
+        return hits, Q, src, dst
+    end
+    spec.it('resolves imported JS function values, aliases and namespace members in both directions', function()
+        local root = tmp_root .. '/function_values_js'
+        write(root .. '/lib.ts', 'export function saved() {}')
+        write(root .. '/app.ts', "import { saved as cb } from './lib'; import * as api from './lib';\n"
+            .. 'const alias = cb; function register() {}\nfunction run() { register(alias); register(api.saved); }\n'
+            .. 'function blocked(cb: number) { register(cb); }')
+        local opts = { cache_path = root .. '/cache.idx', lister = 'walk' }
+        local idx, G = svc.get(root, opts)
+        local count, Q, src, dst = edges(G, 'run', 'saved')
+        spec.equal(count, 2)
+        spec.equal(edges(G, 'blocked', 'saved'), 0)
+        local incoming = Q.inn[dst]; local seen = 0
+        for i = 1, #incoming, graph.EDGE do if incoming[i] == src and incoming[i + 2] == 'ref' then seen = seen + 1 end end
+        spec.equal(seen, 2)
+        idx:save(); svc.forget(root)
+        idx, G = svc.get(root, opts); spec.truthy(idx.cache_loaded)
+        spec.equal(edges(G, 'run', 'saved'), 2)
+        write(root .. '/app.ts', "import { saved as cb } from './lib'; function run(cb: number) { register(cb); }")
+        _, G = svc.get(root, opts); spec.equal(edges(G, 'run', 'saved'), 0)
+        svc.forget(root)
+    end)
+    spec.it('resolves Python imported callback values and honors parameter shadowing', function()
+        local root = tmp_root .. '/function_values_py'
+        write(root .. '/lib.py', 'def saved():\n    pass\n')
+        write(root .. '/app.py', 'from lib import saved as cb\nimport lib as api\n'
+            .. 'def run():\n    register(cb)\n    register(api.saved)\n'
+            .. 'def blocked(cb):\n    register(cb)\n')
+        local _, G = svc.get(root, { cache_path = root .. '/cache.idx', lister = 'walk' })
+        spec.equal(edges(G, 'run', 'saved'), 2)
+        spec.equal(edges(G, 'blocked', 'saved'), 0)
+        svc.forget(root)
+    end)
+    spec.it('resolves Java and Kotlin typed method references without guessing unknown receivers', function()
+        for _, ext in ipairs({ 'java', 'kt' }) do
+            local root = tmp_root .. '/function_values_' .. ext
+            local source = ext == 'java' and [[class Store { void saved() {} }
+class App { void run(Store s) { register(s::saved); register(Store::saved); }
+void blocked(Object s) { register(s::saved); } }]] or [[class Store { fun saved() {} }
+class App { fun run(s: Store) { register(s::saved); register(Store::saved) }
+fun blocked(s: Any) { register(s::saved) } }]]
+            write(root .. '/app.' .. ext, source)
+            local _, G = svc.get(root, { cache_path = root .. '/cache.idx', lister = 'walk' })
+            spec.equal(edges(G, 'run', 'saved'), 2)
+            spec.equal(edges(G, 'blocked', 'saved'), 0)
+            svc.forget(root)
+        end
+    end)
+    spec.it('rejects value names that are not callable and unknown or chained member receivers', function()
+        local root = tmp_root .. '/function_values_negative'
+        write(root .. '/app.ts', 'function saved() {} const ordinary = 42; class Store { saved() {} }\n'
+            .. 'function run(unknown: any) { register(ordinary); register(unknown.saved); register(unknown.field.saved); }')
+        local _, G = svc.get(root, { cache_path = root .. '/cache.idx', lister = 'walk' })
+        local Q = graph.query(G); local out = Q.out[G.by_name.run[1]]
+        for i = 1, #out, graph.EDGE do spec.truthy(G.nodes[out[i]].name ~= 'saved' and G.nodes[out[i]].name ~= 'ordinary') end
+        svc.forget(root)
+    end)
+    spec.it('does not borrow outer bindings inside unrepresented anonymous scopes', function()
+        for _, item in ipairs({ { 'js', 'function saved() {} function run() { register((saved) => register(saved)); }' },
+            { 'py', 'def saved():\n    pass\ndef run():\n    register(lambda saved: register(saved))\n' } }) do
+            local root = tmp_root .. '/function_values_anonymous_' .. item[1]
+            write(root .. '/app.' .. item[1], item[2])
+            local _, G = svc.get(root, { cache_path = root .. '/cache.idx', lister = 'walk' })
+            spec.equal(edges(G, 'run', 'saved'), 0)
+            svc.forget(root)
+        end
     end)
 end)
 

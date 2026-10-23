@@ -329,6 +329,12 @@ local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired, accept,
     if kind == 'annotation' then return nil end
     if evidence and evidence:sub(1, 7) == 'cs:new:' then kind = 'new' end
     accept = accept or (kind == 'new' and NEWABLE) or (kind == 'ref' and VALUE) or CALLABLE
+    -- A method value needs the same receiver checks as a method call; its
+    -- stored edge remains a reference and its target remains callable-only.
+    local function_value = kind == 'ref' and (G.files[f].language == 'javascript'
+        or G.files[f].language == 'typescript' or G.files[f].language == 'arkts'
+        or G.files[f].language == 'python' or G.files[f].language == 'java' or G.files[f].language == 'kotlin')
+    if function_value and recv then kind = 'member_call' end
     if evidence == '' then evidence = nil end
     local strategy = 'js/ts binding'
     local exact, binding_reason = js_resolution.resolve(G, f, name, kind, recv, evidence, js_context)
@@ -355,6 +361,10 @@ local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired, accept,
     if exact == nil and (G.files[f].language == 'java' or G.files[f].language == 'kotlin') then
         strategy = 'declared JVM receiver'
         exact = require('codeoutline.implementations').resolve(G, f, src_id, name, evidence, js_context)
+        if function_value and recv and exact == nil then
+            exact = require('codeoutline.implementations').resolve(G, f, src_id, name,
+                'jvm:type:' .. recv .. '\0' .. '0', js_context)
+        end
     end
     if exact == nil then
         strategy = 'lua binding'
@@ -364,6 +374,9 @@ local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired, accept,
         local result = {}
         for _, id in ipairs(exact) do if accept[G.nodes[id].kind] then result[#result + 1] = id end end
         return result, #result == 0 and (binding_reason or 'binding target unresolved') or strategy
+    end
+    if function_value and recv and recv ~= 'self' and recv ~= 'cls' and recv ~= 'this' then
+        return {}, 'unresolved function-value receiver'
     end
     local cands = G.by_name[name]
     if G.files[f].language == 'kotlin' and not recv then

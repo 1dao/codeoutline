@@ -134,6 +134,7 @@ end
 
 -- Drop parser-internal fields so the result is plain data.
 function M.finish(r, T)
+    if T then require('codeoutline.function_values').collect(r, T) end
     if T and r.collect_foreign and (r.language == 'c' or r.language == 'cpp') then
         require('codeoutline.foreign').collect(r, T)
     end

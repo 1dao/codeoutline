@@ -78,9 +78,8 @@ spec.describe('service stability', function()
         spec.equal(rebuilt.refresh.parsed, 1)
     end)
     spec.it('does not rewrite an unchanged cache after loading it', function()
-        -- The first query persists its encoding confirmation once.
-        service.forget(project)
-        service.explore(project, 'original', opts)
+        -- First UTF-8 confirmation is metadata only: even a cold query must
+        -- not rewrite the entire cache. Hints join a later normal save.
         service.forget(project)
         local replace, published = xutils.replace_file, 0
         xutils.replace_file = function(...) published = published + 1; return replace(...) end

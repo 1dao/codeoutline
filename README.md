@@ -168,6 +168,11 @@ patch/replace overrides, glob re-exports,
 `#[path]`/generated modules, custom binary targets, block-local imports and full Rust type,
 privacy or macro analysis are not modeled. Without Cargo metadata, legacy Rust lookup remains.
 
+Function values in supported JS/TS/ArkTS, Python and Java/Kotlin forms retain
+[`ref` dependencies](docs/FUNCTION-VALUES.md), including explicit imports and typed method
+references. A reference is not proof of callback execution; anonymous scopes and complex
+expressions have conservative limits.
+
 C#, Java and Kotlin implementation relationships use declared inheritance and matching named
 parameter types. Explore and callers label these edges `implementation`: they describe possible
 implementations, not calls made by the method or a proven runtime receiver. Go to Implementation

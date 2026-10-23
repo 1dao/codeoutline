@@ -90,7 +90,7 @@ function M.collect(r, T)
     -- Java and Kotlin receiver declarations use the same lexical barriers as
     -- C#/C++ bindings. No assignment flow or factory-return inference is done.
     local wanted, stack, scopes, bindings = {}, {}, {}, {}
-    for _, ref in ipairs(r.refs) do if ref.kind == 'member_call' and ref.recv then wanted[ref.recv] = true end end
+    for _, ref in ipairs(r.refs) do if (ref.kind == 'member_call' or ref.kind == 'ref') and ref.recv then wanted[ref.recv] = true end end
     if not next(wanted) then return end
     for i = 1, T.n do
         if T:text(i) == '{' and T.m[i] then stack[#stack + 1] = i end
@@ -134,7 +134,7 @@ function M.collect(r, T)
         end
     end
     for _, ref in ipairs(r.refs) do
-        if ref.kind == 'member_call' and ref.recv then
+        if (ref.kind == 'member_call' or ref.kind == 'ref') and ref.recv then
             local best
             for _, b in ipairs(bindings[ref.recv] or {}) do
                 if b.first <= ref.tok and ref.tok <= b.last and b.token < ref.tok
@@ -190,7 +190,7 @@ function M.types(G, f, written, ctx, scope, at)
         end
     end
     if #imported > 0 then return imported end
-    local found = exact((rec.package and rec.package .. '.' or '') .. written)
+    local found = exact((rec.package and rec.package ~= '' and rec.package .. '.' or '') .. written)
     if #found > 0 then return found end
     if written:find('.', 1, true) then
         found = exact(written)

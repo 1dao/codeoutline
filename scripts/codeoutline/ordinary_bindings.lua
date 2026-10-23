@@ -85,11 +85,11 @@ function M.context(G, ctx, source, options)
         local value = evidence(rec, i)
         local kind = rec.refs.kind[i]
         if kind ~= 'call' and kind ~= 'member_call' and not (rec.language == 'csharp' and kind == 'new')
-            and not (rec.language == 'cpp' and kind == 'ref') then return value end
+            and kind ~= 'ref' then return value end
         -- JS already keeps receiver barriers. Only a bare blocked call can be
         -- a newly supported lexical alias; typed/member calls need no reparse.
-        if js(rec) and (kind ~= 'call' or value ~= '?') then return value end
-        if js(rec) and not next(alias_hints(f)) then return value end
+        if js(rec) and kind ~= 'ref' and (kind ~= 'call' or value ~= '?') then return value end
+        if js(rec) and kind ~= 'ref' and not next(alias_hints(f)) then return value end
         local recv = rec.refs.recv[i]
         if rec.language == 'python' and (recv == 'self' or recv == 'cls') then return value end
         if rec.language == 'cpp' and recv == 'this' then return value end
@@ -97,7 +97,7 @@ function M.context(G, ctx, source, options)
             return require('codeoutline.rust_packages').guard(ctx, function() return evidence(C.data(f), i) or value end) or value
         end
         if js(rec) or rec.language == 'python' or rec.language == 'csharp' or rec.language == 'cpp'
-            or (rec.language == 'java' or rec.language == 'kotlin') and kind == 'member_call' then
+            or (rec.language == 'java' or rec.language == 'kotlin') and (kind == 'member_call' or kind == 'ref') then
             return evidence(C.data(f), i) or value
         end
         return value
@@ -200,8 +200,8 @@ function M.context(G, ctx, source, options)
             for name in pairs(imports) do if roots[name] then analyze = true; break end end
         end
         for i, kind in ipairs(rec.refs.kind) do
-            if kind == 'call' or kind == 'member_call' or imports[rec.refs.name[i]] or imports[rec.refs.recv[i]] then
-                local value = analyze and C.evidence(f, i) or evidence(rec, i)
+            if kind == 'call' or kind == 'member_call' or kind == 'ref' or imports[rec.refs.name[i]] or imports[rec.refs.recv[i]] then
+                local value = (analyze or kind == 'ref') and C.evidence(f, i) or evidence(rec, i)
                 local path = value and (value:match('^import:(.-)%z') or value:match('^py:import:(.-)%z'))
                 if path then
                     local resolver = js(rec) and require('codeoutline.js_resolution') or require('codeoutline.python_bindings')

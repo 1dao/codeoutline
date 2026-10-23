@@ -48,17 +48,22 @@ local function condition(expr, env, depth)
     end
 end
 
-function M.collect(r, T)
+local function scanner_for(language)
+    local scanner = scanners[language]
+    if not scanner then
+        local config = {}
+        for k, v in pairs(require('codeoutline.lang.' .. language).config) do config[k] = v end
+        config.pp_first_branch = false
+        scanner = require('codeoutline.xscan').lang(config); scanners[language] = scanner
+    end
+    return scanner
+end
+
+function M.collect(r, T, all_branches)
     if r.language ~= 'c' and r.language ~= 'cpp' then return end
     local result = {}; r.cpp_macros = result
     if not T.src:find('#', 1, true) then return end
-    local scanner = scanners[r.language]
-    if not scanner then
-        local config = {}
-        for k, v in pairs(require('codeoutline.lang.' .. r.language).config) do config[k] = v end
-        config.pp_first_branch = false
-        scanner = require('codeoutline.xscan').lang(config); scanners[r.language] = scanner
-    end
+    local scanner = scanner_for(r.language)
     local source = T.src
     if r.language == 'cpp' and source:find('R"', 1, true) then
         local starts = {}
@@ -91,7 +96,7 @@ function M.collect(r, T)
         pieces[#pieces + 1] = source:sub(previous)
         source = table.concat(pieces)
     end
-    local full = source == T.src and not source:find('#%s*if') and T or scanner:tokenize(source)
+    local full = source == T.src and (all_branches or not source:find('#%s*if')) and T or scanner:tokenize(source)
     local nodes = {}
     for i, n in ipairs(r.nodes) do
         if n.kind == 'macro' then nodes[n.line .. '\0' .. n.name] = i end
@@ -126,6 +131,13 @@ function M.collect(r, T)
         and result[1].name == result[2].name then result.guard = result[1].name end
 end
 
+function M.summary(rec, source)
+    if source:sub(1, 3) == '\239\187\191' then source = source:sub(4) end
+    local r = { language = rec.language, nodes = rec.nodes }
+    M.collect(r, scanner_for(rec.language):tokenize(source), true)
+    return r.cpp_macros
+end
+
 function M.context(G, ctx)
     if ctx.cpp_macro_context then return ctx.cpp_macro_context end
     local C = { stats = { files = 0, bytes = 0, summary_bytes = 0, events = 0, checks = 0 }, incomplete = false }
@@ -136,7 +148,7 @@ function M.context(G, ctx)
         if summaries[f] then return summaries[f] end
         local rec = G.files[f]
         if C.stats.files >= M.MAX_FILES or C.stats.bytes + (rec.size or 0) > M.MAX_BYTES then return limited() end
-        local value = ctx.ordinary.data(f).cpp_macros
+        local value = ctx.ordinary.macros(f)
         if not value or value.incomplete then return limited() end
         local weight = #value * 192
         for _, e in ipairs(value) do weight = weight + #(e.name or '') + #(e.expression or '') + #(e.path or '') end
@@ -147,10 +159,10 @@ function M.context(G, ctx)
     end
     function C.resolve(f, name, line)
         local key = f .. '\0' .. name .. '\0' .. line
-        if results[key] then return results[key][1], results[key][2] end
+        if results[key] then return results[key][1], results[key][2], results[key][3] end
         if result_count >= M.MAX_RESULTS then limited(); return {}, true end
         C.stats.checks = C.stats.checks + 1
-        local env, once, active_files = {}, {}, {}
+        local env, once, active_files, definitions = {}, {}, {}, {}
         local failed = false
         local function walk(file, cutoff, parent, depth)
             control.check()
@@ -187,6 +199,10 @@ function M.context(G, ctx)
                     active = frame.parent
                 elseif active ~= false then
                     if (kind == 'define' or kind == 'undef') and e.name then
+                        if e.name == name then
+                            if active == true then definitions = {} end
+                            if kind == 'define' and e.node then definitions[G.id_of[file][e.node]] = true end
+                        end
                         if active == nil then env[e.name] = UNKNOWN
                         elseif kind == 'undef' then env[e.name] = false
                         else env[e.name] = { callable = e.callable, number = e.number, node = e.node,
@@ -211,8 +227,15 @@ function M.context(G, ctx)
         elseif not failed and value ~= UNKNOWN and value and value.callable and value.node and not value.recursive then
             ids[1] = G.id_of[value.file][value.node]
         end
-        result_count = result_count + 1; results[key] = { ids, handled }
-        return ids, handled
+        -- Definition navigation may inspect the declarations reached on an
+        -- unknown branch without asserting an execution edge. An unconditional
+        -- redefine/undef clears older candidates; directives after the call and
+        -- known-false branches never contribute. Graph resolution stays strict.
+        local sites = {}
+        if not failed then for id in pairs(definitions) do sites[#sites + 1] = id end end
+        table.sort(sites)
+        result_count = result_count + 1; results[key] = { ids, handled, sites }
+        return ids, handled, sites
     end
     return C
 end
@@ -225,8 +248,8 @@ function M.resolve(G, f, name, line, ctx)
         if G.nodes[id].kind == 'macro' then candidate = true; break end
     end
     if not candidate then return nil end
-    local ids, handled = M.context(G, ctx).resolve(f, name, line)
-    return handled and ids or false
+    local ids, handled, definitions = M.context(G, ctx).resolve(f, name, line)
+    return handled and ids or false, definitions
 end
 
 return M

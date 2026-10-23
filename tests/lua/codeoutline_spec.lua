@@ -4951,6 +4951,30 @@ int luaopen_native(lua_State *L) { luaL_newlib(L, funcs); return 1; }]])
 end)
 
 spec.describe('query-time C and C++ macro visibility', function()
+    spec.it('extracts the same directive summaries without a full syntax or binding parse', function()
+        local macros = require('codeoutline.cpp_macros')
+        local cases = {
+            { 'summary.c', '\239\187\191#ifndef HEADER\n#define HEADER\n/* #define FAKE(x) 0 */\n'
+                .. '#if FEATURE\n#define LIVE(x) helper(x)\n#else\n#undef LIVE\n#endif\n#include "dep.h"\n#endif\n' },
+            { 'summary.cpp', 'const char* value = R"tag(\n#define FAKE(x) 0\n)tag";\n'
+                .. '#define REAL(x) \\\n helper(x)\n#pragma once\n#if 0\n#define HIDDEN(x) 1\n#endif\n' },
+        }
+        for _, example in ipairs(cases) do
+            local expected = ci.parse(example[1], example[2], { ordinary_bindings = true }).cpp_macros
+            local rec = ci.parse(example[1], example[2], { ranges = false })
+            local original, tokens = ci.parse, ci.parse_tokens
+            ci.parse, ci.parse_tokens = function() error('unexpected syntax parse') end, function() error('unexpected syntax parse') end
+            local ok, actual = pcall(macros.summary, rec, example[2])
+            ci.parse, ci.parse_tokens = original, tokens
+            if not ok then error(actual, 0) end
+            spec.equal(#actual, #expected); spec.equal(actual.guard, expected.guard)
+            spec.equal(actual.incomplete, expected.incomplete)
+            for i, event in ipairs(expected) do
+                for key, value in pairs(event) do spec.equal(actual[i][key], value) end
+                for key, value in pairs(actual[i]) do spec.equal(event[key], value) end
+            end
+        end
+    end)
     local function kinds(G, source, wanted)
         local Q, result = graph.query(G), {}
         for _, src in ipairs(G.by_name[source] or {}) do

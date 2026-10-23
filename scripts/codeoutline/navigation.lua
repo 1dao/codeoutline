@@ -17,6 +17,10 @@ local M = { MAX_RESULTS = 1000, MAX_HOVER = 3, SCAN_SECONDS = 3, POSITION_SECOND
     MAX_FILE_BYTES = 1048576, CACHE_FILES = 64 }
 
 local sessions = {}
+-- Pure per-file binding evidence, shared across navigation requests. Its
+-- existing 16-file/about-8-MiB FIFO is keyed by source-node identity; each
+-- query still validates source before reusing a shared entry.
+local binding_cache = { entries = {}, order = {}, bytes = 0 }
 local ANY = setmetatable({}, { __index = function() return true end })
 -- Bare identifiers bind only nearby, except type names used across files.
 local TYPES = { class = true, struct = true, union = true, interface = true, enum = true, record = true,
@@ -80,7 +84,7 @@ local function view(session, root, include_paths)
     V.js_context.lua = require('codeoutline.lua_bindings').context(V)
     V.js_context.ordinary = require('codeoutline.ordinary_bindings').context(V, V.js_context, function(f)
         return V.drafts[f] and V.drafts[f].source
-    end)
+    end, { cache = binding_cache })
     for _, name in ipairs({ 'files', 'nodes', 'node_file', 'id_of', 'file_index', 'file_dir' }) do
         V[name] = setmetatable({}, { __index = G[name] })
     end
@@ -260,10 +264,13 @@ local function find_cursor(doc, offset, strict)
     end
 end
 
-local function cursor(doc, offset)
+local function cursor(doc, offset, V, f)
     local found = find_cursor(doc, offset, true) or find_cursor(doc, offset, false)
     if found then return found end
-    local rec, T = doc:parse(), doc:tokens()
+    local rec, T
+    if V then rec, T = M.full(V, f) end
+    rec = rec or doc:parse()
+    T = T or doc:tokens()
     if not T then return nil end
     local t
     for i = 1, T.n do
@@ -318,6 +325,12 @@ end
 -- Full parse (record plus tokens) of one file, cached per record. Shared with
 -- completion, which needs tokens for types this index does not store.
 local full_cache, full_order = setmetatable({}, { __mode = 'k' }), {}
+local function cache_full(key, entry)
+    if not full_cache[key] then full_order[#full_order + 1] = key end
+    full_cache[key] = entry
+    while #full_order > M.CACHE_FILES do full_cache[table.remove(full_order, 1)] = nil end
+end
+
 function M.full(V, f, native)
     local draft = V.drafts and V.drafts[f]
     if draft then
@@ -331,8 +344,7 @@ function M.full(V, f, native)
     end
     local key = V.files[f]
     local entry = full_cache[key]
-    if entry == nil or native and not entry.foreign then
-        local fresh = entry == nil
+    if entry == nil or not entry.tokens or native and not entry.foreign then
         if (key.size or 0) > M.MAX_FILE_BYTES then return nil end
         local doc = source_doc(V, f)
         -- Read/parse failures are transient, unlike a successful empty result.
@@ -340,12 +352,26 @@ function M.full(V, f, native)
         local rec, tokens = parse.parse_tokens(key.path, doc.source, { foreign = native })
         if not rec then return nil end
         entry = { rec = rec, tokens = tokens, foreign = native }
-        full_cache[key] = entry
-        if fresh then full_order[#full_order + 1] = key end
-        if #full_order > M.CACHE_FILES then full_cache[table.remove(full_order, 1)] = nil end
+        cache_full(key, entry)
     end
     if not entry then return nil end
     return entry.rec, entry.tokens
+end
+
+-- A target's exact positions need a full parse too. Reuse the same bounded
+-- cache as completion/details instead of reparsing large headers on every
+-- definition/hover/reference request. Callers must obtain doc from source_doc
+-- first: it validates the on-disk size/checksum even on a cache hit. Drafts
+-- keep their own versioned parse and never enter this shared cache.
+local function position_record(V, f, doc)
+    if V.drafts[f] or (V.files[f].size or #doc.source) > M.MAX_FILE_BYTES then return doc:parse() end
+    local key = V.files[f]
+    local entry = full_cache[key]
+    if not entry then
+        entry = { rec = doc:parse() }
+        cache_full(key, entry)
+    end
+    return entry.rec
 end
 
 -- Restore display/type details without attaching them to resident index nodes.
@@ -380,7 +406,7 @@ local function locate(V, id)
     local n, f = index_of(V, id)
     local node, doc = V.nodes[id], source_doc(V, f)
     if not doc then return nil end
-    local nodes = doc:parse().nodes
+    local nodes = position_record(V, f, doc).nodes
     local hit = nodes[n]
     if hit and hit.name == node.name and hit.qualified == node.qualified and hit.name_start then return doc, hit end
     hit = nil
@@ -433,7 +459,7 @@ end
 local function site_range(V, f, i)
     local doc = source_doc(V, f)
     if not doc then return nil end
-    local refs, indexed = doc:parse().refs, V.files[f].refs
+    local refs, indexed = position_record(V, f, doc).refs, V.files[f].refs
     if not refs or not refs.start then return nil end
     local j = i
     if refs.name[i] ~= indexed.name[i] or refs.line[i] ~= indexed.line[i] then
@@ -1030,7 +1056,7 @@ local function at(req)
     local f = V.add(doc)
     if not f then return nil end
     local offset = doc:offset(req.position)
-    local c = cursor(doc, offset)
+    local c = cursor(doc, offset, V, f)
     local targets = {}
     if c and c.decl then targets = { V.id_of[f][c.decl] }
     elseif c then targets = resolve_site(V, f, c.from, c.name, c.kind, c.recv, c.evidence, c.first, c.index) end
@@ -1063,6 +1089,12 @@ function handlers.lsp_definition(req)
     end
     if configured then return configured, incomplete end
     local line = doc:position(offset).line + 1
+    if #targets == 0 and c and c.kind == 'call' and C_FAMILY[V.files[f].language] then
+        -- Unknown build flags block execution binding, but F12 can still show
+        -- the macro declaration sites that may be active at this call.
+        local _, definitions = require('codeoutline.cpp_macros').resolve(V, f, c.name, line, V.js_context)
+        if definitions and #definitions > 0 then targets = definitions end
+    end
     local importer = false
     if c and not c.decl then
         -- `require`/`dofile` themselves name the file they load, not a same-named project function.

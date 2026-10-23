@@ -561,6 +561,136 @@ end
 
 spec.describe('LSP navigation', function()
     service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+    spec.it('shares binding evidence across overlays while validating source and evicting old entries', function()
+        local ordinary = require('codeoutline.ordinary_bindings')
+        local storage = { entries = {}, order = {}, bytes = 0 }
+        local source = 'namespace A {} namespace B {} namespace Alias = A;\n'
+        nav_write('SharedBinding.cpp', source)
+        nav_write('OtherBinding.cpp', 'namespace Other {} namespace Alias = Other;\n')
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local G = service.resident(nav_root):symbols()
+        local f, other = G.file_index['SharedBinding.cpp'], G.file_index['OtherBinding.cpp']
+        local function context(graph, loader)
+            return ordinary.context(graph, {}, loader, { cache = storage, max_files = 1 })
+        end
+        local first = context(G)
+        local expected = first.data(f)
+        spec.equal(first.stats.parses, 1)
+        local second = context(G)
+        spec.equal(second.data(f), expected); spec.equal(second.stats.parses, 0)
+        -- Overlay wrappers are rebuilt per navigation request; their parsed
+        -- node identity and validated source still identify the same evidence.
+        local copied = {}; for key, value in pairs(G.files[f]) do copied[key] = value end
+        local overlay = { files = { [f] = copied } }
+        local reads = 0
+        local third = context(overlay, function() reads = reads + 1; return source end)
+        spec.equal(third.data(f), expected); spec.equal(reads, 1); spec.equal(third.stats.parses, 0)
+        nav_write('SharedBinding.cpp', source:gsub('Alias = A', 'Alias = B'))
+        local ok, err = pcall(function() context(G).data(f) end)
+        spec.equal(ok, false); spec.truthy(tostring(err):find('source changed', 1, true))
+        nav_write('SharedBinding.cpp', source)
+        context(G).data(other)
+        spec.equal(#storage.order, 1); spec.truthy(storage.bytes <= 8 * 1024 * 1024)
+        local evicted = context(G)
+        evicted.data(f); spec.equal(evicted.stats.parses, 1)
+        os.remove(nav_root .. '/SharedBinding.cpp'); os.remove(nav_root .. '/OtherBinding.cpp')
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+    end)
+    spec.it('reuses fallback cursor tokens until the open document version changes', function()
+        local source = 'void token_cursor(int parameter) { int local_value = parameter; }\n'
+        nav_write('TokenCursor.cpp', source)
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local uri = nav_uri('TokenCursor.cpp')
+        navigation.sync({ session = 'cursor-tokens', open = { [uri] = 1 }, changed = {
+            [uri] = { version = 1, language = 'cpp', source = source } } })
+        local original, parses = parse.parse_tokens, 0
+        parse.parse_tokens = function(path, ...)
+            if path:match('TokenCursor%.cpp$') then parses = parses + 1 end
+            return original(path, ...)
+        end
+        local ok, err = pcall(function()
+            local req = { session = 'cursor-tokens', method = 'lsp_definition', uri = uri,
+                position = { line = 0, character = source:find('local_value', 1, true) - 1 } }
+            nav(req)
+            local cold = parses
+            spec.truthy(cold > 0)
+            nav(req); spec.equal(parses, cold, 'a second parameter/local lookup must reuse tokens and binding evidence')
+            navigation.sync({ session = 'cursor-tokens', open = { [uri] = 2 }, changed = {
+                [uri] = { version = 2, language = 'cpp', source = source:gsub('local_value', 'fresh_local') } } })
+            nav(req); spec.truthy(parses > cold)
+        end)
+        parse.parse_tokens = original
+        navigation.close('cursor-tokens')
+        os.remove(nav_root .. '/TokenCursor.cpp')
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        if not ok then error(err, 0) end
+    end)
+    spec.it('reuses target positions while validating disk edits and isolating drafts', function()
+        nav_write('PositionCache.h', 'int position_cache_target(void);\n')
+        nav_write('PositionCache.c', '#include "PositionCache.h"\nint position_cache_target(void) { return 1; }\n')
+        nav_write('PositionCaller.c', '#include "PositionCache.h"\nint position_caller(void) { return position_cache_target(); }\n')
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local req = { method = 'lsp_definition', uri = nav_uri('PositionCaller.c'), position = { line = 1, character = 40 } }
+        local original, parses = parse.parse, 0
+        parse.parse = function(path, ...)
+            if path:match('PositionCache%.c$') then parses = parses + 1 end
+            return original(path, ...)
+        end
+        local ok, err = pcall(function()
+            local first = nav(req)
+            spec.equal(#first, 1); spec.equal(first[1].uri, nav_uri('PositionCache.c'))
+            spec.equal(first[1].range.start.line, 1)
+            local second = nav(req)
+            spec.equal(second[1].range.start.line, 1); spec.equal(parses, 1)
+            -- Position-only entries must still upgrade to tokens for completion.
+            local V = navigation.view('spec', nav_root)
+            local rec, T = navigation.full(V, V.file_index['PositionCache.c'])
+            spec.truthy(T); spec.equal(rec.nodes[1].name, 'position_cache_target')
+            local edited = '\n#include "PositionCache.h"\nint position_cache_target(void) { return 2; }\n'
+            nav_write('PositionCache.c', edited)
+            local fresh, failure = pcall(nav, req)
+            spec.equal(fresh, false); spec.truthy(tostring(failure):find('source changed', 1, true))
+            service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+            local moved = nav(req)
+            spec.equal(moved[1].range.start.line, 2)
+            local uri = nav_uri('PositionCache.c')
+            navigation.sync({ session = 'position-draft', open = { [uri] = 1 }, changed = {
+                [uri] = { version = 1, language = 'c', source = '\n' .. edited } } })
+            local draft = nav({ method = req.method, uri = req.uri, position = req.position, session = 'position-draft' })
+            spec.equal(draft[1].range.start.line, 3)
+            spec.equal(nav(req)[1].range.start.line, 2)
+        end)
+        parse.parse = original
+        navigation.close('position-draft')
+        for _, file in ipairs({ 'PositionCache.h', 'PositionCache.c', 'PositionCaller.c' }) do os.remove(nav_root .. '/' .. file) end
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        if not ok then error(err, 0) end
+    end)
+    spec.it('evicts target position parses through the existing file cache limit', function()
+        nav_write('PositionEvictA.lua', 'function position_evict_a() end\n')
+        nav_write('PositionEvictB.lua', 'function position_evict_b() end\n')
+        nav_write('PositionEvictCaller.lua', 'position_evict_a()\nposition_evict_b()\n')
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local original, limit, parses = parse.parse, navigation.CACHE_FILES, 0
+        navigation.CACHE_FILES = 1
+        parse.parse = function(path, ...)
+            if path:match('PositionEvictA%.lua$') then parses = parses + 1 end
+            return original(path, ...)
+        end
+        local ok, err = pcall(function()
+            local req = { method = 'lsp_definition', uri = nav_uri('PositionEvictCaller.lua'), position = { line = 0, character = 2 } }
+            spec.equal(nav(req)[1].uri, nav_uri('PositionEvictA.lua'))
+            req.position.line = 1
+            spec.equal(nav(req)[1].uri, nav_uri('PositionEvictB.lua'))
+            req.position.line = 0
+            spec.equal(nav(req)[1].uri, nav_uri('PositionEvictA.lua'))
+            spec.equal(parses, 2)
+        end)
+        parse.parse, navigation.CACHE_FILES = original, limit
+        for _, file in ipairs({ 'PositionEvictA.lua', 'PositionEvictB.lua', 'PositionEvictCaller.lua' }) do os.remove(nav_root .. '/' .. file) end
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        if not ok then error(err, 0) end
+    end)
     spec.it('ArkTS imports and this calls resolve with exact ranges and draft overlays', function()
         nav_write('ArkHelper.ets', 'export function arkSave(value: number) {}\n')
         local source = "import { arkSave } from './ArkHelper';\n@Component\nstruct ArkPage {\n"
@@ -2194,7 +2324,7 @@ int luaopen_native_test(lua_State *L) { luaL_setfuncs(L, methods, 0); luaL_newli
             initializationOptions = { includePaths = { 1 } } } }))
         spec.equal(replies[1].error.code, -32602)
     end)
-    spec.it('shares macro order and uncertainty barriers with definitions including unsaved source', function()
+    spec.it('navigates conditional macro declarations without weakening execution barriers', function()
         local source = [[void MACRO_NAV(int x);
 #define MACRO_NAV(x) 0
 void MacroNavUse(void) { MACRO_NAV(1); }
@@ -2214,7 +2344,11 @@ void MacroNavUnknown(void) { MACRO_NAV(3); }
         end
         local found = jump('MACRO_NAV(1)'); spec.equal(#found, 1); spec.equal(found[1].range.start.line, 1)
         found = jump('MACRO_NAV(2)'); spec.equal(#found, 1); spec.equal(found[1].range.start.line, 0)
-        spec.equal(#jump('MACRO_NAV(3)'), 0)
+        found = jump('MACRO_NAV(3)'); spec.equal(#found, 1); spec.equal(found[1].range.start.line, 6)
+        local V = navigation.view('spec', nav_root)
+        local f = V.file_index['macro-nav.c']
+        local ids, handled = require('codeoutline.cpp_macros').context(V, V.js_context).resolve(f, 'MACRO_NAV', 9)
+        spec.equal(#ids, 0); spec.equal(handled, true, 'unknown branches must still block graph execution binding')
         navigation.sync({ session = 'macro-nav', open = { [doc.uri] = 1 }, changed = {
             [doc.uri] = { version = 1, language = 'c', source = source:gsub('#undef MACRO_NAV', '#define MACRO_NAV(x) 0') } } })
         found = jump('MACRO_NAV(2)', 'macro-nav'); spec.equal(#found, 1); spec.equal(found[1].range.start.line, 3)
@@ -2487,9 +2621,9 @@ void MacroNavUnknown(void) { MACRO_NAV(3); }
     end)
 end)
 
-local function session_with(submit, init)
+local function session_with(submit, init, cancel)
     local output = {}
-    local session = lsp.new({}, function(msg) output[#output + 1] = msg end, submit, function() end, function() end)
+    local session = lsp.new({}, function(msg) output[#output + 1] = msg end, submit, cancel or function() end, function() end)
     local function send(method, params, id)
         session:accept(xutils.json_pack({ jsonrpc = '2.0', method = method, params = params or {}, id = id }))
         return output[#output]
@@ -2503,6 +2637,62 @@ local function session_with(submit, init)
 end
 
 spec.describe('LSP navigation requests', function()
+    spec.it('shares in-flight identifier navigation and keeps cancellation per request', function()
+        local jobs, cancelled = {}, {}
+        local session, send, output = session_with(function(req, done)
+            if req.method == 'lsp_refresh' then return 'scan' end
+            jobs[#jobs + 1] = { req = req, done = done }; return 'job' .. #jobs
+        end, nil, function(id) cancelled[#cancelled + 1] = id end)
+        local uri = nav_uri('m.lua')
+        send('textDocument/didOpen', { textDocument = { uri = uri, languageId = 'lua', version = 1, text = 'shared_symbol()' } })
+        local function definition(id, character)
+            send('textDocument/definition', { textDocument = { uri = uri }, position = { line = 0, character = character } }, id)
+        end
+        definition(2, 0); definition(3, 3); definition(4, 8)
+        spec.equal(#jobs, 1)
+        send('$/cancelRequest', { id = 2 }) -- Cancelling the transport owner must not cancel its followers.
+        spec.equal(#cancelled, 0)
+        jobs[1].done(true, { result = {}, incomplete = false })
+        local replies = {}
+        for _, msg in ipairs(output) do if msg.id then replies[msg.id] = msg end end
+        spec.equal(replies[2].error.code, -32800)
+        spec.equal(#replies[3].result, 0); spec.equal(#replies[4].result, 0)
+        spec.equal(next(session.pending), nil)
+        definition(5, 0); definition(6, 2)
+        spec.equal(#jobs, 2, 'completed results are never reused')
+        send('$/cancelRequest', { id = 6 }); spec.equal(#cancelled, 0)
+        send('$/cancelRequest', { id = 5 }); spec.equal(cancelled[1], 'job2')
+        definition(7, 0); spec.equal(#jobs, 3, 'a cancelled flight must not capture new requests')
+        jobs[2].done(false, 'cancelled')
+        jobs[3].done(true, { result = {}, incomplete = false })
+        spec.equal(next(session.pending), nil)
+    end)
+    spec.it('separates navigation by document changes, method and reference options', function()
+        local jobs = {}
+        local session, send, output = session_with(function(req, done)
+            if req.method == 'lsp_refresh' then return 'scan' end
+            jobs[#jobs + 1] = { req = req, done = done }; return 'job' .. #jobs
+        end)
+        local uri = nav_uri('m.lua')
+        send('textDocument/didOpen', { textDocument = { uri = uri, languageId = 'lua', version = 1, text = 'shared_symbol()' } })
+        local params = { textDocument = { uri = uri }, position = { line = 0, character = 0 } }
+        send('textDocument/definition', params, 2)
+        send('textDocument/hover', params, 3)
+        send('textDocument/references', params, 4)
+        send('textDocument/references', { textDocument = params.textDocument, position = params.position,
+            context = { includeDeclaration = true } }, 5)
+        spec.equal(#jobs, 4)
+        send('textDocument/didChange', { textDocument = { uri = uri, version = 2 }, contentChanges = { { text = 'changed_symbol()' } } })
+        send('textDocument/definition', params, 6)
+        spec.equal(#jobs, 5)
+        send('textDocument/definition', params, 7); spec.equal(#jobs, 5)
+        jobs[5].done(false, 'query failed')
+        local errors = {}
+        for _, msg in ipairs(output) do if msg.error then errors[msg.id] = msg.error.message end end
+        spec.equal(errors[6], 'query failed'); spec.equal(errors[7], 'query failed')
+        for i = 1, 4 do jobs[i].done(true, { result = {}, incomplete = false }) end
+        spec.equal(next(session.pending), nil)
+    end)
     spec.it('advertises navigation and honours disabled features', function()
         local _, _, output = session_with(fake_submit)
         local caps = output[1].result.capabilities

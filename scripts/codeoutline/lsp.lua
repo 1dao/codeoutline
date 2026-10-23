@@ -96,6 +96,7 @@ function M.new(config, emit, submit, cancel, stop, await_worker)
         document_bytes = 0, document_count = 0, session = config.session or ('lsp-' .. sessions),
         synced = {}, features = {} }
     local progress, server_pending, next_id, next_poll = {}, {}, 0, 0
+    local navigation_flights, navigation_epoch = {}, 0
     local handlers = {}
     local function error_response(id, code, message)
         emit({ jsonrpc = '2.0', id = id == nil and null or id, error = { code = code, message = message } })
@@ -242,7 +243,14 @@ function M.new(config, emit, submit, cancel, stop, await_worker)
         local job = self.pending[id]
         if job then
             self.pending[id] = nil
-            cancel(job.id)
+            if job.flight then
+                local flight = job.flight
+                flight.waiters[id] = nil
+                if not next(flight.waiters) then
+                    if navigation_flights[flight.key] == flight then navigation_flights[flight.key] = nil end
+                    cancel(flight.id)
+                end
+            else cancel(job.id) end
             error_response(id, -32800, 'Request cancelled')
         end
     end
@@ -375,16 +383,45 @@ function M.new(config, emit, submit, cancel, stop, await_worker)
         return outcome, value
     end
     -- Each query owns a coroutine; cancelled/replaced requests discard replies.
-    local function request(id, req, started)
+    local function request(id, req, started, key)
         local count = 0
         for _ in pairs(self.pending) do count = count + 1 end
         assert(count < M.MAX_PENDING, 'too many pending requests')
         local job = { coroutine = coroutine.running() }
         self.pending[id] = job
-        local called, ok, result = pcall(await_worker, req, function(job_id)
-            job.id = job_id
-            if started then started() end
-        end)
+        local called, ok, result
+        local flight = key and navigation_flights[key]
+        if flight then
+            job.flight, flight.waiters[id] = flight, job
+            coroutine.yield()
+            called, ok, result = true, job.ok, job.result
+        else
+            if key then
+                flight = { key = key, waiters = { [id] = job } }
+                job.flight, navigation_flights[key] = flight, flight
+            end
+            called, ok, result = pcall(await_worker, req, function(job_id)
+                job.id = job_id
+                if flight then flight.id = job_id end
+                if started then started() end
+            end)
+            if flight then
+                if navigation_flights[key] == flight then navigation_flights[key] = nil end
+                local waiters = flight.waiters
+                flight.waiters = {}
+                for waiter_id, waiter in pairs(waiters) do
+                    if waiter ~= job and self.pending[waiter_id] == waiter then
+                        if called then waiter.ok, waiter.result = ok, result
+                        else waiter.ok, waiter.result = false, ok end
+                        local resumed, err = coroutine.resume(waiter.coroutine)
+                        if not resumed then
+                            self.pending[waiter_id] = nil
+                            error_response(waiter_id, -32603, tostring(err))
+                        end
+                    end
+                end
+            end
+        end
         if not called then result, ok = ok, false end
         -- Even a cancelled request may fail before its drafts reach the worker.
         if not ok and req.changed then self.synced = {} end
@@ -428,7 +465,7 @@ function M.new(config, emit, submit, cancel, stop, await_worker)
     end
     -- Navigation runs in the worker against the session's drafts: every request
     -- carries the open set and the text of versions the worker has not seen.
-    local function navigate(id, req, finish)
+    local function navigate(id, req, finish, key)
         assert(id ~= nil, 'navigation must be a request')
         local open, changed, sent = {}, {}, {}
         for uri, doc in pairs(self.documents) do
@@ -447,7 +484,7 @@ function M.new(config, emit, submit, cancel, stop, await_worker)
             -- Record submission before yielding so subsequent requests send only
             -- newer drafts. The worker applies drafts even to cancelled jobs.
             for uri, version in pairs(sent) do self.synced[uri] = version end
-        end)
+        end, key)
         if not ok then return end
         if value.error then error_response(id, -32803, value.error); return end
         if value.incomplete then
@@ -472,7 +509,24 @@ function M.new(config, emit, submit, cancel, stop, await_worker)
         if not root then reply(id, empty); return end
         local req = { method = method, root = root, uri = server_uri(params.textDocument.uri), position = params.position }
         for key, value in pairs(extra or {}) do req[key] = value end
-        navigate(id, req, finish)
+        local key
+        if method ~= 'lsp_signature' and method ~= 'lsp_completion' then
+            local doc = self.documents[params.textDocument.uri]
+            local point = tostring(params.position.line) .. ':' .. tostring(params.position.character)
+            if doc then
+                local offset = doc:offset(params.position)
+                -- Cursor motion over one identifier asks the same read-only
+                -- question. Only share work while it is in flight; document
+                -- notifications invalidate the key, and results are not cached.
+                local first, last = offset, offset
+                while first > 0 and offset - first < 1024 and doc.source:sub(first, first):match('[%w_]') do first = first - 1 end
+                while last < #doc.source and last - offset < 1024 and doc.source:sub(last + 1, last + 1):match('[%w_]') do last = last + 1 end
+                if last > first then point = tostring(first) .. ':' .. tostring(last) end
+            end
+            key = table.concat({ method, root, req.uri, tostring(navigation_epoch), point,
+                tostring(req.includeDeclaration == true) }, '\0')
+        end
+        navigate(id, req, finish, key)
     end
     handlers['textDocument/definition'] = function(id, params)
         at(id, params, 'lsp_definition', array(), list)
@@ -534,6 +588,11 @@ function M.new(config, emit, submit, cancel, stop, await_worker)
         end
         if self.state == 'closed' then return end
         if method == '$/cancelRequest' then cancel_pending(params.id); return end
+        if method == 'textDocument/didOpen' or method == 'textDocument/didChange'
+            or method == 'textDocument/didClose' or method == 'textDocument/didSave'
+            or method == 'workspace/didChangeWatchedFiles' or method == 'workspace/didChangeWorkspaceFolders' then
+            navigation_epoch = navigation_epoch + 1
+        end
         if self.pending[id] then error_response(id, -32600, 'Request ID is already pending'); return end
         if method == 'initialize' then handlers.initialize(id, params); return end
         if self.state == 'new' then if id ~= nil then error_response(id, -32002, 'Server not initialized') end; return end

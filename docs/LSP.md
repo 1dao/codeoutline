@@ -13,6 +13,24 @@ The server shares `main.lua` and the INDEX worker's submission and cancellation
 path with MCP. A process serves either MCP or LSP: the language server does not
 join the shared MCP HTTP service, and there is no TCP transport.
 
+Concurrent position-navigation requests over the same identifier share in-flight
+work. Each request receives its own response and may be cancelled independently;
+the worker is cancelled only after the last waiter leaves. Document and workspace
+notifications invalidate sharing, and completed results are never reused. Signature
+help and completion retain their cursor-sensitive request behavior.
+
+Exact target positions reuse the existing bounded full-parse cache, with disk
+size/checksum validation before every reuse. Unsaved documents keep their own
+versioned parses. This does not add fields to the persistent index.
+
+Navigation also reuses per-file ordinary binding evidence across requests in a
+shared FIFO capped at 16 files and about 8 MiB. Overlay wrappers share evidence
+only when their parsed node identity and validated source match. Every query
+checks source before reuse, and file/configuration-dependent resolution remains
+query-local. Cursor lookups reuse the full-parse token cache, so background
+definition requests for parameters in large headers do not reparse that header
+at every position. Neither tokens nor detailed binding evidence are serialized.
+
 ## Launch
 
 From an installation, the editor runs `codeoutline lsp --stdio`. On Windows, npm

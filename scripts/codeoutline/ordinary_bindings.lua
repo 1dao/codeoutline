@@ -10,8 +10,13 @@ end
 
 function M.context(G, ctx, source, options)
     options = options or {}
-    local cache, order, bytes = {}, {}, 0
+    local storage = options.cache or { entries = {}, order = {}, bytes = 0 }
+    local cache, order = storage.entries, storage.order
+    local validated = {}
     local max_files, max_bytes = options.max_files or 16, options.max_bytes or 8 * 1024 * 1024
+    while #order > 0 and (#order > max_files or storage.bytes > max_bytes) do
+        local old = table.remove(order, 1); storage.bytes = storage.bytes - cache[old].weight; cache[old] = nil
+    end
     local C = { stats = { parses = 0, files = 0, bytes = 0 } }
     local hints = {}
     local function alias_hints(f)
@@ -23,11 +28,8 @@ function M.context(G, ctx, source, options)
         hints[f] = { record = G.files[f], roots = result }
         return result
     end
-    function C.data(f)
+    local function read_source(f)
         local rec = G.files[f]
-        if rec.ordinary_bindings then return rec end -- explicit in-memory parse
-        if cache[f] and cache[f].record == rec then return cache[f].data end
-        if not G.root and not source then return rec end
         control.check()
         local raw = source and source(f)
         if not raw then
@@ -39,6 +41,43 @@ function M.context(G, ctx, source, options)
                 raw = assert(xutils.to_utf8(raw, rec.encoding == 'gbk' and 'gbk' or 'auto'))
             end
         end
+        return raw
+    end
+    local function cached_data(rec, raw)
+        local key, entry = rec.nodes, cache[rec.nodes]
+        if not entry then return nil end
+        if not validated[key] then
+            if not raw then return nil end
+            local checksum = xcompress and xcompress.crc32 and xcompress.crc32(raw) or xutils.sha256_hex(raw)
+            if entry.checksum ~= checksum or entry.size ~= #raw or entry.language ~= rec.language then return nil end
+            validated[key] = true
+        end
+        C.stats.files, C.stats.bytes = #order, storage.bytes
+        return entry.data
+    end
+    function C.macros(f)
+        local rec = G.files[f]
+        if rec.cpp_macros then return rec.cpp_macros end
+        local cached = cached_data(rec)
+        if cached then return cached.cpp_macros end
+        if not G.root and not source then return nil end
+        local raw = read_source(f)
+        cached = cached_data(rec, raw)
+        if cached then return cached.cpp_macros end
+        -- Macro visibility needs directive events, not a second syntax tree,
+        -- receiver bindings or implementation evidence for the whole header.
+        return require('codeoutline.cpp_macros').summary(rec, raw)
+    end
+    function C.data(f)
+        local rec = G.files[f]
+        if rec.ordinary_bindings then return rec end -- explicit in-memory parse
+        local key, cached = rec.nodes, cached_data(rec)
+        if cached then return cached end
+        if not G.root and not source then return rec end
+        local raw = read_source(f)
+        cached = cached_data(rec, raw)
+        if cached then return cached end
+        local checksum = xcompress and xcompress.crc32 and xcompress.crc32(raw) or xutils.sha256_hex(raw)
         local parsed = assert(require('codeoutline.parse').parse(rec.path, raw,
             { ranges = false, ordinary_bindings = true }))
         local function check(ok) assert(ok, 'source changed; refresh index before binding query: ' .. rec.path) end
@@ -68,18 +107,19 @@ function M.context(G, ctx, source, options)
             + #(parsed.cpp_macros or {}) * 256
             + #(parsed.automatic_events or {}) * 512
             + (parsed.lua_callback_loops and parsed.lua_callback_loops.weight or 0)
-        if cache[f] then
-            bytes = bytes - cache[f].weight; cache[f] = nil
-            for i, old in ipairs(order) do if old == f then table.remove(order, i); break end end
+        if cache[key] then
+            storage.bytes = storage.bytes - cache[key].weight; cache[key] = nil
+            for i, old in ipairs(order) do if old == key then table.remove(order, i); break end end
         end
-        while #order > 0 and (#order >= max_files or bytes + weight > max_bytes) do
-            local old = table.remove(order, 1); bytes = bytes - cache[old].weight; cache[old] = nil
+        while #order > 0 and (#order >= max_files or storage.bytes + weight > max_bytes) do
+            local old = table.remove(order, 1); storage.bytes = storage.bytes - cache[old].weight; cache[old] = nil
         end
         if weight <= max_bytes then
-            cache[f] = { record = rec, data = data, weight = weight }
-            order[#order + 1] = f; bytes = bytes + weight
+            cache[key] = { data = data, weight = weight, checksum = checksum, size = #raw, language = rec.language }
+            order[#order + 1] = key; storage.bytes = storage.bytes + weight
+            validated[key] = true
         end
-        C.stats.parses, C.stats.files, C.stats.bytes = C.stats.parses + 1, #order, bytes
+        C.stats.parses, C.stats.files, C.stats.bytes = C.stats.parses + 1, #order, storage.bytes
         return data
     end
     function C.evidence(f, i)

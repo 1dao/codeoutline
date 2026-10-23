@@ -359,6 +359,32 @@ test('LSP stdio handles drafts, UTF-16 ranges, cancellation and close restoratio
     assert.equal((await client.request('workspace/symbol', { query: 'unsaved' }))[0].name, 'unsaved');
 });
 
+test('LSP macro navigation bursts preserve following ordinary definitions', { timeout: 30000 }, async (t) => {
+    const client = await start(t);
+    const source = '#include "api.h"\nvoid run(void) { api_push(); api_pcall(); api_push(); }\n';
+    await writeFile(join(client.project, 'api.h'), 'void api_push(void);\n#if UNKNOWN_BUILD\n#define api_pcall() api_push()\n#endif\n');
+    await writeFile(join(client.project, 'api.c'), '#include "api.h"\nvoid api_push(void) {}\n');
+    await writeFile(join(client.project, 'use.c'), source);
+    await initialize(client, [client.project]);
+    await indexed(client);
+    const uri = pathToFileURL(join(client.project, 'use.c')).href;
+    client.notify('textDocument/didOpen', { textDocument: { uri, languageId: 'c', version: 1, text: source } });
+    const params = name => ({ textDocument: { uri }, position: { line: 1,
+        character: source.split('\n')[1].indexOf(name) } });
+    const push = params('api_push'), pcall = params('api_pcall');
+    const before = await client.request('textDocument/definition', push);
+    assert.equal(before.length, 1); assert.equal(fileURLToPath(before[0].uri), join(client.project, 'api.c'));
+    const requests = Array.from({ length: 40 }, (_, i) => client.request('textDocument/definition', {
+        ...pcall, position: { ...pcall.position, character: pcall.position.character + i % 'api_pcall'.length },
+    }));
+    const following = client.request('textDocument/definition', push);
+    for (const targets of await Promise.all(requests)) {
+        assert.equal(targets.length, 1); assert.equal(fileURLToPath(targets[0].uri), join(client.project, 'api.h'));
+        assert.equal(targets[0].range.start.line, 2);
+    }
+    assert.deepEqual(await following, before);
+});
+
 test('LSP indexing accepts split frames and deduplicates nested workspace roots', { timeout: 30000 }, async (t) => {
     const client = await start(t);
     const sub = join(client.project, 'sub');

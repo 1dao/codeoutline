@@ -5092,6 +5092,143 @@ void run() { TRACE(1); }
     end)
 end)
 
+spec.describe('changed file impact', function()
+    local affected = require('codeoutline.affected')
+    local function project(sources)
+        local records = {}
+        for path, source in pairs(sources) do records[path] = ci.parse(path, source, { foreign = true }) end
+        return graph.build({ files = records }), { root = 'C:/impact', query_source = function(_, path) return sources[path], false end }
+    end
+    spec.it('batches file seeds, merges shared callers, keeps shortest paths and identifies changed tests', function()
+        local G, idx = project({
+            ['a.lua'] = 'function alpha() end', ['b.lua'] = 'function beta() end',
+            ['run.lua'] = 'function run() alpha() beta() end',
+            ['tests/run_spec.lua'] = 'function check() run() end', ['tests/empty.lua'] = '-- empty',
+        })
+        local output, info = affected.run(G, idx, { './b.lua', 'a.lua', 'a.lua', 'tests/empty.lua' })
+        spec.equal(#info.changed_files, 3); spec.equal(#info.targets, 2)
+        spec.equal(#info.callers, 2); spec.equal(info.callers[1].name, 'run')
+        spec.equal(info.callers[2].path[1].name, 'check')
+        spec.equal(#info.callers[2].path, 3)
+        spec.equal(info.query_stats.incoming_scans, 3)
+        spec.equal(table.concat(info.tests, ','), 'tests/empty.lua,tests/run_spec.lua')
+        spec.equal(table.concat(info.files, ','), 'a.lua,b.lua,run.lua,tests/empty.lua,tests/run_spec.lua')
+        spec.truthy(info.incomplete); spec.contains(output, 'No indexed symbols: tests/empty.lua')
+        spec.nil_value(G.inn); spec.nil_value(G.out)
+    end)
+    spec.it('reports missing files, bounded seeds, depth, nodes and output without inventing history', function()
+        local G, idx = project({ ['a.lua'] = 'function a() end\nfunction b() end',
+            ['b.lua'] = 'function c() a() end\nfunction d() c() end\nfunction e() d() end' })
+        local output, info = affected.run(G, idx, { 'a.lua', 'old.lua' }, { max_nodes = 1 })
+        spec.truthy(info.seed_limit_reached); spec.truthy(info.node_limit_reached); spec.truthy(info.incomplete)
+        spec.equal(info.unresolved_files[1], 'old.lua'); spec.contains(output, 'deleted, renamed')
+        _, info = affected.run(G, idx, { 'a.lua' }, { depth = 1 })
+        spec.truthy(info.depth_limit_reached)
+        output, info = affected.run(G, idx, { 'a.lua' }, { budget = 256 })
+        spec.truthy(info.truncated); spec.truthy(#output <= 256)
+        _, info = affected.run(G, idx, { 'missing.lua' })
+        spec.equal(info.query_stats.incoming_scans, 0); spec.truthy(info.incomplete)
+    end)
+    spec.it('normalizes exact paths, rejects traversal and malformed file arrays', function()
+        local G, idx = project({ ['dir/a.lua'] = 'function a() end' })
+        local _, info = affected.run(G, idx, { 'dir/../dir/a.lua', 'C:/impact/dir/a.lua', 'dir\\a.lua' })
+        spec.equal(#info.changed_files, 1)
+        for _, files in ipairs({ {}, { '../a.lua' }, { '/outside/a.lua' }, { 'a\0.lua' }, { 'a\nb' }, { false }, { file = 'a.lua' } }) do
+            spec.equal(pcall(affected.run, G, idx, files), false)
+        end
+        spec.equal(pcall(affected.run, G, idx, { 'dir/a.lua' }, { depth = 0 }), false)
+    end)
+    spec.it('returns explicit time limits and restores cancellation callbacks without swallowing cancellation', function()
+        local G, idx = project({ ['a.lua'] = 'function a() end', ['b.lua'] = 'function b() a() end' })
+        local ctrl = require('codeoutline.control')
+        local previous, limit = ctrl.callback, affected.TIME_LIMIT_MS
+        local calls = 0
+        local callback = function() calls = calls + 1 end
+        ctrl.callback, affected.TIME_LIMIT_MS = callback, 0
+        local ok, err = pcall(function()
+            local output, info = affected.run(G, idx, { 'a.lua' })
+            spec.truthy(info.time_limit_reached); spec.truthy(info.incomplete)
+            spec.contains(output, 'Time limit reached'); spec.equal(ctrl.callback, callback); spec.truthy(calls > 0)
+            ctrl.callback = function() error(ctrl.cancelled(), 0) end
+            local success, failure = pcall(affected.run, G, idx, { 'a.lua' })
+            spec.equal(success, false); spec.truthy(ctrl.is_interrupted(failure))
+        end)
+        ctrl.callback, affected.TIME_LIMIT_MS = previous, limit
+        assert(ok, err)
+    end)
+    spec.it('retains renamed Lua to native dependencies when the changed file is C', function()
+        local root = tmp_root .. '/affected_native'
+        write(root .. '/native.c', 'static int native_save(lua_State *L) { return 0; }\nstatic const luaL_Reg api[] = {{"save", native_save}, {NULL, NULL}};\nint luaopen_store(lua_State *L) { luaL_newlib(L, api); return 1; }')
+        write(root .. '/run.lua', 'local store = require("store")\nfunction run() store.save() end')
+        local _, info = svc.affected(root, { 'native.c' }, { cache_path = root .. '/cache.idx', lister = 'walk' })
+        local found = false
+        for _, caller in ipairs(info.callers) do if caller.name == 'run' then found = true end end
+        spec.truthy(found); svc.forget(root)
+    end)
+    spec.it('keeps verified scan-prefix paths on timeout without publishing partial incoming lists', function()
+        local G, idx = project({ ['a.lua'] = 'function a() end', ['b.lua'] = 'function b() a() end' })
+        local query, now, clock = graph.query, xtimer.now_ms, 0
+        xtimer.now_ms = function() return clock end
+        local Q
+        graph.query = function(symbols, opts)
+            Q = query(symbols, opts)
+            Q.load_incoming = function(_, ids, progress)
+                local incoming = { [ids[1]] = { G.by_name.b[1], 1, 'call' } }
+                progress(incoming)
+                clock = 1000; require('codeoutline.control').check()
+            end
+            return Q
+        end
+        local ok, err = pcall(function()
+            local output, info = affected.run(G, idx, { 'a.lua' })
+            spec.truthy(info.time_limit_reached); spec.equal(#info.callers, 1)
+            spec.contains(output, 'Depth 1: b'); spec.nil_value(rawget(Q.inn, G.by_name.a[1]))
+        end)
+        graph.query, xtimer.now_ms = query, now; assert(ok, err)
+    end)
+    spec.it('keeps C header statics, C to C++ callers and JavaScript to TypeScript callers', function()
+        local G, idx = project({
+            ['a.h'] = 'static inline void kept() {}', ['b.cpp'] = '#include "a.h"\nvoid caller() { kept(); }',
+            ['a.c'] = 'void common_c() {}', ['c.cpp'] = 'void cpp_caller() { common_c(); }',
+            ['leaf.ts'] = 'export function ts_leaf() {}', ['use.js'] = 'import { ts_leaf } from "./leaf"; function js_caller() { ts_leaf(); }',
+        })
+        for _, pair in ipairs({ { 'a.h', 'caller' }, { 'a.c', 'cpp_caller' }, { 'leaf.ts', 'js_caller' } }) do
+            local _, info = affected.run(G, idx, { pair[1] })
+            local found = false
+            for _, caller in ipairs(info.callers) do if caller.name == pair[2] then found = true end end
+            spec.truthy(found, pair[1])
+        end
+    end)
+    spec.it('retries both file and symbol queries when source repair renumbers nodes', function()
+        local G, idx = project({ ['a.lua'] = 'function a() end', ['b.lua'] = 'function b() a() end' })
+        idx.query_source = function() return 'decoded source', true end
+        local output, info = affected.run(G, idx, { 'a.lua' })
+        spec.nil_value(output); spec.truthy(info.encoding_retry)
+        output, info = require('codeoutline.callers').run(G, idx, 'a')
+        spec.nil_value(output); spec.truthy(info.encoding_retry)
+    end)
+    spec.it('refreshes service queries after reload, edits, renames and removal without serializing impact state', function()
+        local root = tmp_root .. '/affected'
+        write(root .. '/a.lua', 'function leaf() end')
+        write(root .. '/b.lua', 'function outer() leaf() end')
+        local opts = { cache_path = root .. '/cache.idx', lister = 'walk' }
+        local _, info = svc.affected(root, { 'a.lua' }, opts)
+        spec.equal(#info.callers, 1)
+        svc.forget(root)
+        _, info = svc.affected(root, { 'a.lua' }, opts); spec.equal(#info.callers, 1)
+        write(root .. '/b.lua', 'function outer() end')
+        _, info = svc.affected(root, { 'a.lua' }, opts); spec.equal(#info.callers, 0)
+        assert(os.rename(root .. '/a.lua', root .. '/renamed.lua'))
+        _, info = svc.affected(root, { 'a.lua', 'renamed.lua' }, opts)
+        spec.equal(info.unresolved_files[1], 'a.lua'); spec.equal(info.changed_files[1], 'renamed.lua')
+        assert(os.remove(root .. '/renamed.lua'))
+        _, info = svc.affected(root, { 'renamed.lua' }, opts); spec.equal(#info.targets, 0)
+        local idx, G = svc.resident(root)
+        spec.nil_value(G.inn); for _, rec in pairs(idx.files) do spec.nil_value(rec.affected) end
+        svc.forget(root)
+    end)
+end)
+
 return {
     __init = function()
         local failed = spec.finish()

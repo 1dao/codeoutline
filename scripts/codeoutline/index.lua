@@ -439,8 +439,6 @@ function Index:list_files()
     return out
 end
 
-local MISSING = { exists = false }
-
 -- Stat fields for every listed file, read one directory at a time:
 -- list_dir reports them per entry, so a tree costs a call per directory
 -- rather than a stat per file. Older runtimes fall back to stat.
@@ -464,7 +462,9 @@ function Index:stat_listing(list)
         end
         for _, name in ipairs(names) do
             local rel = dir == '' and name or (dir .. '/' .. name)
-            meta[rel] = by_name and (by_name[name] or MISSING) or xutils.stat(self:abs(rel))
+            -- rg and a native directory listing can disagree on filename
+            -- encoding. Check a listed path before treating it as deleted.
+            meta[rel] = by_name and by_name[name] or xutils.stat(self:abs(rel))
         end
     end
     return meta

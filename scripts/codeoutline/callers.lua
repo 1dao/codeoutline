@@ -16,24 +16,16 @@ function M.validate(query, opts)
     end
 end
 
-function M.run(symbols, idx, query, opts)
-    M.validate(query, opts)
+-- Shared by symbol callers and file-change impact. Ordered targets are bounded below.
+function M.from_targets(symbols, idx, ordered, opts)
     opts = opts or {}
     local depth, cap = opts.depth or 3, opts.max_nodes or 200
-    local budget = require('codeoutline.explore').validate(query, opts)
     local Q = graph.query(symbols, opts)
     local result = { targets = {}, callers = {}, files = {}, depth = depth,
         node_limit_reached = false, depth_limit_reached = false }
     local function describe(id)
         return { id = id, name = Q.nodes[id].qualified, file = Q.files[Q.node_file[id]].path, line = Q.nodes[id].line }
     end
-    local filters = require('codeoutline.query_filters').parse(query)
-    local candidates = symbols.by_qualified[filters.text] or symbols.by_name[filters.text] or {}
-    local ordered = {}
-    for _, id in ipairs(candidates) do
-        if require('codeoutline.query_filters').id(filters, symbols, id) then ordered[#ordered + 1] = id end
-    end
-    table.sort(ordered, function(a, b) return graph.before(Q, a, b) end)
     local frontier, seen, next_hop = {}, {}, {}
     for _, id in ipairs(ordered) do
         if #frontier >= cap then result.node_limit_reached = true; break end
@@ -41,13 +33,11 @@ function M.run(symbols, idx, query, opts)
         result.targets[#result.targets + 1] = describe(id)
     end
     local files = {}
-    for level = 1, depth do
-        if #frontier == 0 then break end
-        control.check()
-        Q:load_incoming(frontier) -- one project reference scan per layer
+    local partial, active_level
+    local function append(incoming, level)
         local pending, links = {}, {}
         for _, dst in ipairs(frontier) do
-            local edges = Q.inn[dst] or {}
+            local edges = incoming[dst] or rawget(Q.inn, dst) or {}
             for i = 1, #edges, graph.EDGE do
                 if i % 384 == 1 then control.check() end
                 local src = edges[i]
@@ -77,8 +67,33 @@ function M.run(symbols, idx, query, opts)
             result.callers[#result.callers + 1] = entry
             files[entry.file] = true
         end
-        if level == depth and #frontier > 0 then result.depth_limit_reached = true end
-        if result.node_limit_reached then break end
+    end
+    local previous, expired = control.callback, control.deadline()
+    local deadline = opts.time_limit_ms and (xtimer.now_ms() + opts.time_limit_ms)
+    if deadline then
+        control.callback = function()
+            if previous then previous() end
+            if xtimer.now_ms() >= deadline then error(expired, 0) end
+        end
+    end
+    local ok, err = pcall(function()
+        for level = 1, depth do
+            if #frontier == 0 then break end
+            control.check()
+            active_level, partial = level, nil
+            Q:load_incoming(frontier, deadline and function(edges) partial = edges end or nil)
+            append(Q.inn, level)
+            partial = nil
+            if level == depth and #frontier > 0 then result.depth_limit_reached = true end
+            if result.node_limit_reached then break end
+        end
+    end)
+    control.callback = previous
+    if not ok then
+        if err == expired then
+            result.time_limit_reached = true
+            if partial then append(partial, active_level) end
+        else error(err, 0) end
     end
     for file in pairs(files) do result.files[#result.files + 1] = file end
     table.sort(result.files)
@@ -92,7 +107,26 @@ function M.run(symbols, idx, query, opts)
         assert(source, 'cannot read source: ' .. path)
         changed = changed or repaired
     end
-    if changed then return nil, { encoding_retry = true } end
+    if changed then return { encoding_retry = true } end
+    result.relationships_incomplete = Q.incomplete or false
+    result.query_stats = Q.stats
+    return result
+end
+
+function M.run(symbols, idx, query, opts)
+    M.validate(query, opts)
+    opts = opts or {}
+    local filters = require('codeoutline.query_filters').parse(query)
+    local candidates = symbols.by_qualified[filters.text] or symbols.by_name[filters.text] or {}
+    local ordered = {}
+    for _, id in ipairs(candidates) do
+        if require('codeoutline.query_filters').id(filters, symbols, id) then ordered[#ordered + 1] = id end
+    end
+    table.sort(ordered, function(a, b) return graph.before(symbols, a, b) end)
+    local result = M.from_targets(symbols, idx, ordered, opts)
+    if result.encoding_retry then return nil, result end
+    local depth = opts.depth or 3
+    local budget = require('codeoutline.explore').validate(query, opts)
     local lines = { string.format('Matched %d target(s); %d potential callers in %d files, searched up to %d levels.',
         #result.targets, #result.callers, #result.files, depth),
         'Static potential impact; each caller has one shortest path. This is not proof of runtime execution or complete impact coverage.' }
@@ -100,7 +134,6 @@ function M.run(symbols, idx, query, opts)
     if #result.targets > 1 then lines[#lines + 1] = 'Multiple definitions matched; results cover the listed targets.' end
     if result.node_limit_reached then lines[#lines + 1] = 'Node limit reached; targets or callers were omitted.' end
     if result.depth_limit_reached then lines[#lines + 1] = 'Depth limit reached; callers beyond this depth were not checked.' end
-    result.relationships_incomplete = Q.incomplete or false
     if result.relationships_incomplete then lines[#lines + 1] = 'Relationship candidate limit reached; some potential relationships were omitted.' end
     for _, target in ipairs(result.targets) do
         lines[#lines + 1] = string.format('Target: %s (%s:%d)', target.name, target.file, target.line)
@@ -115,7 +148,7 @@ function M.run(symbols, idx, query, opts)
     end
     if #result.files > 0 then lines[#lines + 1] = 'Affected caller files:\n' .. table.concat(result.files, '\n') end
     local output, cut = text.limit(table.concat(lines, '\n'), budget, result.node_limit_reached or result.relationships_incomplete)
-    result.truncated, result.query_stats = cut, Q.stats
+    result.truncated = cut
     return output, result
 end
 

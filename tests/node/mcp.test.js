@@ -30,7 +30,7 @@ test('official SDK stdio: discovery, source, incremental refresh, rebuild and er
     const c = client();
     try {
         await c.connect(transport);
-        assert.equal((await c.listTools()).tools.length, 5);
+        assert.equal((await c.listTools()).tools.length, 6);
         const query = (query) => c.callTool({ name: 'codeoutline_explore', arguments: { query } });
         assert.match((await query('greet')).content[0].text, /你好世界/);
         assert.match((await query('lang:lua path:sample.lua greet')).content[0].text, /你好世界/);
@@ -42,6 +42,14 @@ test('official SDK stdio: discovery, source, incremental refresh, rebuild and er
         assert.match(callers.content[0].text, /Depth 2: upper/);
         const filteredCallers = await c.callTool({ name: 'codeoutline_callers', arguments: { query: 'path:sample.lua lang:lua greet', depth: 2 } });
         assert.match(filteredCallers.content[0].text, /Depth 2: upper/);
+        const affected = await c.callTool({ name: 'codeoutline_affected', arguments: { files: ['sample.lua'], depth: 2 } });
+        assert.notEqual(affected.isError, true);
+        assert.match(affected.content[0].text, /Depth 2: upper/);
+        const batch = await c.callTool({ name: 'codeoutline_affected', arguments: { files: ['sample.lua', 'caller.lua', 'missing.lua'] } });
+        assert.match(batch.content[0].text, /Changed 2 indexed file/);
+        assert.match(batch.content[0].text, /Unresolved file.*missing.lua/);
+        await assert.rejects(c.callTool({ name: 'codeoutline_affected', arguments: { files: [] } }), /files/);
+        await assert.rejects(c.callTool({ name: 'codeoutline_affected', arguments: { files: ['../outside.lua'] } }), /inside the project/);
         await assert.rejects(c.callTool({ name: 'codeoutline_callers', arguments: { query: 'greet', depth: 0 } }), /depth/);
         await rm(join(f.project, 'caller.lua'));
         const status = JSON.parse((await c.callTool({ name: 'codeoutline_status' })).content[0].text);
@@ -255,7 +263,7 @@ test('official SDK HTTP: sessions, concurrency, refresh, path aliases and perime
     try {
         await c.connect(transport);
         await c2.connect(new StreamableHTTPClientTransport(new URL(endpoint.url)));
-        assert.equal((await c.listTools()).tools.length, 5);
+        assert.equal((await c.listTools()).tools.length, 6);
         const result = await Promise.all([c, c2].map((instance) => instance.callTool({ name: 'codeoutline_explore', arguments: { query: 'greet' } })));
         assert.ok(result.every((r) => /你好世界/.test(r.content[0].text)));
         const oldPid = endpoint.child.pid;

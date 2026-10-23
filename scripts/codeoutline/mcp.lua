@@ -1,6 +1,7 @@
 local paths = require('codeoutline.path')
 local explore = require('codeoutline.explore')
 local callers = require('codeoutline.callers')
+local affected = require('codeoutline.affected')
 local type_hierarchy = require('codeoutline.type_hierarchy')
 local text = require('codeoutline.text')
 local version = require('codeoutline.version')
@@ -11,6 +12,13 @@ local function object(t) return type(t) == 'table' and getmetatable(t) ~= xutils
 local project = { type = 'string', minLength = 1,
     description = 'Project directory on the server machine; defaults to PROJECT, the first client root, then the stdio working directory.' }
 M.tools = array({
+    { name = 'codeoutline_affected', description = 'Analyze potential impact of changed project files in one shared reverse traversal. Returns affected files, shortest symbol paths, test candidates by naming, and explicit coverage limits. Missing/deleted files are reported; no historical graph is inferred. Refreshes automatically.',
+        inputSchema = { type = 'object', properties = { projectPath = project,
+            files = { type = 'array', minItems = 1, maxItems = 128, items = { type = 'string', minLength = 1, maxLength = 4096 } },
+            depth = { type = 'integer', minimum = 1, maximum = 8, default = 3 },
+            max_nodes = { type = 'integer', minimum = 1, maximum = 2000, default = 200 },
+            budget = { type = 'integer', minimum = 256, maximum = 262144, default = 16000 } },
+            required = array({ 'files' }), additionalProperties = false } },
     { name = 'codeoutline_type_hierarchy', description = 'Find declared ancestors and descendants of an exact type name (C#, Java, Kotlin, TypeScript, C++). Returns declaration locations, paths and unresolved bases. Bounded query-time resolution; refreshes automatically.',
         inputSchema = { type = 'object', properties = { projectPath = project,
             query = { type = 'string', minLength = 1, maxLength = 4096 },
@@ -164,9 +172,9 @@ function M.new(config, submit, cancel)
             error_result(-32602, 'projectPath must be a non-empty string'); return
         end
         local engine = ({ codeoutline_explore = explore, codeoutline_callers = callers,
-            codeoutline_type_hierarchy = type_hierarchy })[tool.name]
+            codeoutline_type_hierarchy = type_hierarchy, codeoutline_affected = affected })[tool.name]
         if engine then
-            local ok, err = pcall(engine.validate, args.query, { budget = args.budget, depth = args.depth,
+            local ok, err = pcall(engine.validate, tool.name == 'codeoutline_affected' and args.files or args.query, { budget = args.budget, depth = args.depth,
                 max_nodes = args.max_nodes, direction = args.direction })
             if not ok then error_result(-32602, tostring(err)); return end
         end
@@ -186,7 +194,7 @@ function M.new(config, submit, cancel)
                 result({ content = array({ { type = 'text', text = err or 'projectPath is outside allowed roots' } }), isError = true }); return
             end
             local job, submit_error = submit({ method = tool.name:sub(#'codeoutline_' + 1), projectPath = root,
-                allowedRoots = config.roots, query = args.query, budget = args.budget, depth = args.depth,
+                allowedRoots = config.roots, query = args.query, files = args.files, budget = args.budget, depth = args.depth,
                 max_nodes = args.max_nodes, direction = args.direction }, function(ok, value)
                 if self.pending[id] ~= p then return end
                 self.pending[id] = nil

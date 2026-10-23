@@ -723,12 +723,25 @@ function M.query(symbols, opts)
         return edges
     end })
     -- Resolve all requested callers with a single ordered multi-name scan.
-    function Q:load_incoming(ids)
-        local wanted, names, found = {}, {}, false
+    function Q:load_incoming(ids, progress)
+        local wanted, names, family_names, local_names, found = {}, {}, {}, {}, false
         for _, id in ipairs(ids) do
             if rawget(self.inn, id) == nil then
                 wanted[id], names[symbols.nodes[id].name], found = true, true, true
-                for _, alias in ipairs(lua_bindings.aliases(symbols.nodes[id], symbols.lua_global_export_tables)) do names[alias] = true end
+                local f = symbols.node_file[id]
+                local rec, node = symbols.files[f], symbols.nodes[id]
+                local lang = family(rec.language)
+                -- The generic resolver cannot reach a translation-unit static
+                -- from another source file. Header statics remain visible.
+                local private = C_FAMILY[rec.language] and node.static
+                    and not HEADER_EXT[rec.path:match('%.(%w+)$') or '']
+                local bucket = private and local_names or family_names
+                local key = private and f or lang
+                bucket[key] = bucket[key] or {}
+                bucket[key][node.name] = true
+                for _, alias in ipairs(lua_bindings.aliases(symbols.nodes[id], symbols.lua_global_export_tables)) do
+                    names[alias], bucket[key][alias] = true, true
+                end
             end
         end
         if not found then return end
@@ -739,6 +752,9 @@ function M.query(symbols, opts)
                 push3(incoming, id, source, symbols.nodes[source].line, 'implementation')
             end
         end
+        -- A bounded impact query may retain verified edges from a completed
+        -- prefix of the scan. They never enter the normal incoming cache.
+        if progress then progress(incoming) end
         if implementations.incomplete then Q.incomplete = true end
         local indirect_incoming = indirect.incoming(wanted)
         for src, edges in pairs(callback_loops.incoming(wanted)) do
@@ -768,13 +784,12 @@ function M.query(symbols, opts)
         -- Lua modules can target Lua files or native files identified by
         -- luaopen_* (the same resident evidence used by foreign.modules).
         -- Other targets cannot be reached through Lua import/local bindings.
-        local lua_targets, native_targets, checked_native = false, false, {}
+        local native_targets, checked_native = false, {}
         local lua_names = {}
         for id in pairs(wanted) do
             local f = symbols.node_file[id]
             local rec = symbols.files[f]
             if rec.language == 'lua' then
-                lua_targets = true
                 local local_index = id - symbols.id_of[f][1] + 1
                 for name, n in pairs(rec.lua_exports or {}) do if n == local_index then lua_names[name] = true end end
                 for _, members in ipairs(rec.lua_locals or {}) do
@@ -784,7 +799,7 @@ function M.query(symbols, opts)
             if C_FAMILY[rec.language] and not checked_native[f] then
                 checked_native[f] = true
                 for _, node in ipairs(rec.nodes) do
-                    if node.name:match('^luaopen_(.+)$') then lua_targets, native_targets = true, true; break end
+                    if node.name:match('^luaopen_(.+)$') then native_targets = true; break end
                 end
             end
         end
@@ -795,7 +810,12 @@ function M.query(symbols, opts)
         if js_context.workspace_incomplete or js_context.go_incomplete then Q.incomplete = true end
         for _, f in ipairs(symbols.file_order) do
             control.check()
-            if files[f].language == 'lua' and not lua_targets then goto next_incoming_file end
+            local language = files[f].language
+            local file_names = family_names[family(language)]
+            local private_names = local_names[f]
+            if language == 'lua' and native_targets then file_names = names end
+            if not file_names and not private_names then goto next_incoming_file end
+            file_names = file_names or {}
             local alias_refs = js_context.ordinary.aliases(f, wanted, candidates)
             if files[f].language == 'rust' then
                 for i in pairs(require('codeoutline.rust_resolution').alias_refs(symbols, f, wanted, js_context)) do alias_refs[i] = true end
@@ -803,7 +823,7 @@ function M.query(symbols, opts)
             local aliases = {}
             if files[f].language == 'kotlin' then
                 for _, imp in ipairs(files[f].imports) do
-                    if imp.alias and names[imp.path:match('([^.]+)$')] then aliases[imp.alias] = true end
+                    if imp.alias and file_names[imp.path:match('([^.]+)$')] then aliases[imp.alias] = true end
                 end
             end
             local refs = files[f].refs
@@ -812,7 +832,8 @@ function M.query(symbols, opts)
             for first = 1, count, 4096 do
                 if first > 1 then control.check() end
                 for i = first, math.min(count, first + 4095) do
-                    if (names[ref_names[i]] or aliases[ref_names[i]] or aliases[refs.recv[i]]
+                    if (file_names[ref_names[i]] or private_names and private_names[ref_names[i]]
+                        or aliases[ref_names[i]] or aliases[refs.recv[i]]
                         or alias_refs[i]
                         or (refs.lua_binding and refs.lua_binding[i] ~= '' and
                             (native_targets or lua_names[ref_names[i]]))) and froms[i] > 0 then

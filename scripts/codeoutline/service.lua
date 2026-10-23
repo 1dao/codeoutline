@@ -174,6 +174,10 @@ function M.callers(root, query, opts)
     return run_query(require('codeoutline.callers'), root, query, opts)
 end
 
+function M.affected(root, files, opts)
+    return run_query(require('codeoutline.affected'), root, files, opts)
+end
+
 function M.type_hierarchy(root, query, opts)
     return run_query(require('codeoutline.type_hierarchy'), root, query, opts)
 end

@@ -57,6 +57,7 @@ Five tools are provided:
 | --- | --- |
 | `codeoutline_explore` | Query source, call paths, and callers/callees by symbol or file name (`query`; optional `projectPath`, `budget`) |
 | `codeoutline_callers` | [Find recursive callers and affected files](docs/CALLERS.md) for an exact symbol/qualified name (`query`; optional `projectPath`, `depth` default 3, `max_nodes` default 200, `budget`) |
+| `codeoutline_affected` | [Analyze changed files](docs/AFFECTED.md) with shared reverse traversal, shortest paths and test candidates (`files`; optional `projectPath`, `depth`, `max_nodes`, `budget`) |
 | `codeoutline_type_hierarchy` | [Find declared ancestors and descendants](docs/TYPE-HIERARCHY.md) of a C#/Java/Kotlin/TS/C++ type (`query`; optional `projectPath`, `direction`, `depth` default 8, `max_nodes` default 200, `budget`) |
 | `codeoutline_status` | Refresh and report index, cache, scanner, and parser statistics |
 | `codeoutline_rebuild` | Rebuild fully, bypassing the cache |

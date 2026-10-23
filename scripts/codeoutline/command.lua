@@ -20,6 +20,7 @@ Usage:
   codeoutline serve --http [--host HOST] [--port PORT] [--project PATH] [--allow-root PATH ...]
   codeoutline explore --project PATH --query QUERY [--budget BYTES]
   codeoutline callers --project PATH --query SYMBOL [--depth 3] [--max-nodes 200] [--budget BYTES]
+  codeoutline affected --project PATH --file FILE [--file FILE ...] [--files-from PATH|-] [--depth 3] [--max-nodes 200] [--budget BYTES]
   codeoutline type-hierarchy --project PATH --query TYPE [--direction both|ancestors|descendants] [--depth 8] [--max-nodes 200] [--budget BYTES]
   codeoutline status [--project PATH]
   codeoutline rebuild [--project PATH]
@@ -63,6 +64,7 @@ local function parse(args)
         daemon = { port = true }, install = { port = true, npm = true }, uninstall = { port = true },
         explore = { project = true, query = true, budget = true },
         callers = { project = true, query = true, budget = true, depth = true, ['max-nodes'] = true },
+        affected = { project = true, file = true, ['files-from'] = true, budget = true, depth = true, ['max-nodes'] = true },
         ['type-hierarchy'] = { project = true, query = true, budget = true, depth = true, ['max-nodes'] = true, direction = true },
         update = { check = true, channel = true },
         status = { project = true }, rebuild = { project = true }, doctor = { project = true },
@@ -83,7 +85,7 @@ local function parse(args)
             assert(value and not value:match('^%-%-'), 'missing value for --' .. name)
         end
         assert(value ~= '', 'empty value for --' .. name)
-        if name:match('^allow-') then
+        if name:match('^allow-') or name == 'file' then
             options[name] = options[name] or {}
             table.insert(options[name], value)
         else
@@ -241,13 +243,28 @@ local function run()
     local root = options.project or '.'
     if command == 'doctor' then return doctor(root) end
     local svc = require('codeoutline.service')
-    if command == 'explore' or command == 'callers' or command == 'type-hierarchy' then
-        assert(options.query, command .. ' requires --query')
+    if command == 'explore' or command == 'callers' or command == 'type-hierarchy' or command == 'affected' then
+        local query = options.query
+        if command == 'affected' then
+            query = options.file or {}
+            if options['files-from'] then
+                local from = options['files-from']
+                local f = from == '-' and io.stdin or assert(io.open(from, 'rb'))
+                local raw = f:read(65537) or ''
+                if from ~= '-' then f:close() end
+                assert(#raw <= 65536, '--files-from exceeds 64 KiB')
+                raw = raw:gsub('^\239\187\191', '')
+                for line in (raw .. '\n'):gmatch('(.-)\n') do
+                    line = line:gsub('\r$', '')
+                    if line ~= '' then query[#query + 1] = line end
+                end
+            end
+        else assert(query, command .. ' requires --query') end
         local budget
         if options.budget then budget = assert(tonumber(options.budget), '--budget must be a number') end
         local depth = options.depth and assert(tonumber(options.depth), '--depth must be a number')
         local max_nodes = options['max-nodes'] and assert(tonumber(options['max-nodes']), '--max-nodes must be a number')
-        local text = svc[command == 'type-hierarchy' and 'type_hierarchy' or command](root, options.query,
+        local text = svc[command == 'type-hierarchy' and 'type_hierarchy' or command](root, query,
             { budget = budget, depth = depth, max_nodes = max_nodes, direction = options.direction })
         io.write(text, '\n')
     else

@@ -29,6 +29,22 @@ test('unified Lua CLI: commands, JSON output, failures and MCP startup', async (
         assert.match(success('explore', '--query=lang:python hello_world'), /No symbols matched/);
         await writeFile(join(project, 'caller.lua'), 'function invoke() hello_world() end\n');
         assert.match(success('callers', '--query=hello_world', '--depth=2'), /Depth 1: invoke/);
+        assert.match(success('affected', '--file=demo.lua', '--file=caller.lua'), /Changed 2 indexed file/);
+        assert.match(success('affected', '--file=demo.lua'), /Depth 1: invoke/);
+        await writeFile(join(project, 'changes.txt'), 'demo.lua\r\nmissing.lua\r\n');
+        assert.match(success('affected', '--files-from=changes.txt'), /Unresolved file.*missing.lua/);
+        const piped = spawnSync(defaultRuntime, [command, 'LOG_STDERR=1', 'affected', '--files-from=-'], {
+            cwd: project, encoding: 'utf8', timeout: 15000, input: 'demo.lua\n',
+        });
+        assert.equal(piped.status, 0, piped.stderr); assert.match(piped.stdout, /Depth 1: invoke/);
+        await writeFile(join(project, '中文 source.lua'), 'function unicode_impact() end\n');
+        const unicode = spawnSync(defaultRuntime, [command, 'LOG_STDERR=1', 'affected', '--files-from=-'], {
+            cwd: project, encoding: 'utf8', timeout: 15000, input: '\uFEFF中文 source.lua\r\n',
+        });
+        assert.equal(unicode.status, 0, unicode.stderr); assert.match(unicode.stdout, /Changed: 中文 source.lua/);
+        assert.notEqual(run('affected').status, 0);
+        assert.notEqual(run('affected', '--file=../demo.lua').status, 0);
+        assert.notEqual(run('affected', '--file=demo.lua', '--depth=0').status, 0);
         assert.notEqual(run('callers', '--query=hello_world', '--depth=0').status, 0);
         assert.notEqual(run('callers', '--query=hello_world', '--max-nodes=bad').status, 0);
         await writeFile(join(project, 'types.ts'), 'interface Root {} class Child implements Root {}\n');

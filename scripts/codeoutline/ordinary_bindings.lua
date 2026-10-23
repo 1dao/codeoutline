@@ -56,6 +56,7 @@ function M.context(G, ctx, source, options)
             csharp_usings = parsed.csharp_usings, csharp_statics = parsed.csharp_statics,
             csharp_scopes = parsed.csharp_scopes, csharp_parameters = parsed.csharp_parameters, csharp_access = parsed.csharp_access }
         data.implementation_evidence = parsed.implementation_evidence
+        data.cpp_macros = parsed.cpp_macros
         data.automatic_events = parsed.automatic_events
         data.lua_callback_loops = parsed.lua_callback_loops
         data.rust_imports, data.rust_public = parsed.rust_imports, parsed.rust_public
@@ -64,6 +65,7 @@ function M.context(G, ctx, source, options)
             + #(parsed.csharp_usings or {}) * 256 + #(parsed.csharp_scopes or {}) * 256
             + #(parsed.csharp_parameters or {}) * 128 + #parsed.nodes * (parsed.implementation_evidence and 256 or 0)
             + #(parsed.rust_imports or {}) * 256 + #(parsed.rust_public or {}) * 32
+            + #(parsed.cpp_macros or {}) * 256
             + #(parsed.automatic_events or {}) * 512
             + (parsed.lua_callback_loops and parsed.lua_callback_loops.weight or 0)
         if cache[f] then

@@ -2194,6 +2194,32 @@ int luaopen_native_test(lua_State *L) { luaL_setfuncs(L, methods, 0); luaL_newli
             initializationOptions = { includePaths = { 1 } } } }))
         spec.equal(replies[1].error.code, -32602)
     end)
+    spec.it('shares macro order and uncertainty barriers with definitions including unsaved source', function()
+        local source = [[void MACRO_NAV(int x);
+#define MACRO_NAV(x) 0
+void MacroNavUse(void) { MACRO_NAV(1); }
+#undef MACRO_NAV
+void MacroNavAfter(void) { MACRO_NAV(2); }
+#if UNKNOWN_FLAG
+#define MACRO_NAV(x) 1
+#endif
+void MacroNavUnknown(void) { MACRO_NAV(3); }
+]]
+        nav_write('macro-nav.c', source)
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local doc = assert(docs.read(nav_root .. '/macro-nav.c'))
+        local function jump(value, session)
+            return nav({ method = 'lsp_definition', session = session, uri = doc.uri,
+                position = doc:position(assert(source:find(value, 1, true)) - 1) })
+        end
+        local found = jump('MACRO_NAV(1)'); spec.equal(#found, 1); spec.equal(found[1].range.start.line, 1)
+        found = jump('MACRO_NAV(2)'); spec.equal(#found, 1); spec.equal(found[1].range.start.line, 0)
+        spec.equal(#jump('MACRO_NAV(3)'), 0)
+        navigation.sync({ session = 'macro-nav', open = { [doc.uri] = 1 }, changed = {
+            [doc.uri] = { version = 1, language = 'c', source = source:gsub('#undef MACRO_NAV', '#define MACRO_NAV(x) 0') } } })
+        found = jump('MACRO_NAV(2)', 'macro-nav'); spec.equal(#found, 1); spec.equal(found[1].range.start.line, 3)
+        navigation.close('macro-nav')
+    end)
     spec.it('shares scoped include order across header jumps, definitions, implementations, completion and drafts', function()
         for _, dir in ipairs({ 'searchOne', 'searchTwo', 'searchUse' }) do assert(xutils.mkdir_p(nav_root .. '/' .. dir)) end
         for _, name in ipairs({ 'One', 'Two' }) do

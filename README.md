@@ -111,6 +111,10 @@ package imports (including aliases), and ordinary, generic and trailing-lambda c
 Resolution is heuristic: compiler-generated members, implicit lambda receivers, string-template
 expressions, Java interop and coroutine/framework dispatch are not modeled.
 
+C/C++ bare calls check [project macro visibility](docs/CPP-MACROS.md) on demand: define/undef,
+indexed include order and finite conditions distinguish visible macros from ordinary
+functions. Unknown expansions remain unresolved; this does not run a preprocessor.
+
 C++ lookup covers named type aliases, namespace aliases, `using ns::Type`, `using ns::function`,
 and bounded `using namespace` chains across included headers. Calls, navigation and completion
 share this lookup; local imports respect their declaration position and block scope, and

@@ -151,6 +151,7 @@ function M.finish(r, T)
     end
     if T then require('codeoutline.js_evidence').collect(r, T) end
     if T and r.ordinary_bindings then
+        require('codeoutline.cpp_macros').collect(r, T)
         require('codeoutline.python_bindings').collect(r, T)
         require('codeoutline.cpp_bindings').collect(r, T)
         if r.language == 'csharp' then require('codeoutline.csharp_bindings').collect(r, T) end

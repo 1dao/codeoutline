@@ -186,7 +186,9 @@ local function resolve_site(V, f, from, name, kind, recv, evidence, offset, inde
     local rkind, accept = kind, nil
     if kind == 'symbol' then rkind, accept = 'call', ANY
     elseif kind == 'member_symbol' then rkind, accept = 'member_call', ANY end
-    local targets = graph.resolve(V, f, src, name, rkind, recv or nil, direct, paired, accept, evidence, V.js_context) or {}
+    local site_line = index and V.files[f].refs.line[index]
+    local targets, reason = graph.resolve(V, f, src, name, rkind, recv or nil, direct, paired, accept, evidence, V.js_context, site_line)
+    targets = targets or {}
     if kind == 'symbol' then
         local kept = {}
         for _, id in ipairs(targets) do
@@ -198,13 +200,13 @@ local function resolve_site(V, f, from, name, kind, recv, evidence, offset, inde
         targets = kept
     end
     -- The resolver never binds a ref to its enclosing node, which hides recursion.
-    if #targets == 0 and src and V.nodes[src].name == name and (kind == 'call' or recursive(V.nodes[src], recv)) then
+    if #targets == 0 and reason ~= 'unknown or unsupported macro visibility' and src and V.nodes[src].name == name and (kind == 'call' or recursive(V.nodes[src], recv)) then
         targets = { src }
     end
     -- Definitions too far apart to choose between: a visible prototype still
     -- names the function, and going to its definition lists them all.
     if #targets == 0 and (kind == 'call' or kind == 'ref') then
-        targets = graph.resolve(V, f, src, name, kind, recv or nil, direct, paired, PROTOTYPE, evidence, V.js_context) or {}
+        targets = graph.resolve(V, f, src, name, kind, recv or nil, direct, paired, PROTOTYPE, evidence, V.js_context, site_line) or {}
     end
     -- A native object: the local's initializer chain names the metatable whose
     -- methods the C side registers (`local pool = mod.open()`, then `pool:read()`).

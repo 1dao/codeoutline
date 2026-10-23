@@ -43,6 +43,8 @@ local CALLABLE = {
 }
 local NEWABLE = { class = true, record = true, constructor = true, enum = true }
 local VALUE = { ['function'] = true, method = true }
+local NO_MACRO = {}
+for kind in pairs(CALLABLE) do if kind ~= 'macro' then NO_MACRO[kind] = true end end
 
 -- C and C++ call each other (extern "C", shared headers); others don't mix.
 local C_FAMILY = { c = true, cpp = true }
@@ -325,8 +327,13 @@ local function is_decl(node) return node.kind == 'prototype' or node.decl end
 local scored_ids, scored_vals = {}, {}
 
 -- accept overrides the node kinds the ref kind may bind to (navigation only).
-local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired, accept, evidence, js_context)
+local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired, accept, evidence, js_context, line)
     if kind == 'annotation' then return nil end
+    if kind == 'call' and C_FAMILY[G.files[f].language] and (not src_id or G.nodes[src_id].kind ~= 'macro') then
+        local macro = require('codeoutline.cpp_macros').resolve(G, f, name, line, js_context)
+        if macro then return macro, #macro > 0 and 'visible macro' or 'unknown or unsupported macro visibility' end
+        if macro == false then accept = accept or NO_MACRO end
+    end
     if evidence and evidence:sub(1, 7) == 'cs:new:' then kind = 'new' end
     accept = accept or (kind == 'new' and NEWABLE) or (kind == 'ref' and VALUE) or CALLABLE
     -- A method value needs the same receiver checks as a method call; its
@@ -609,6 +616,8 @@ function M.query(symbols, opts)
     js_context.lua = lua_bindings.context(symbols)
     js_context.ordinary = require('codeoutline.ordinary_bindings').context(symbols, js_context)
     Q.stats.ordinary = js_context.ordinary.stats
+    local macros = require('codeoutline.cpp_macros').context(symbols, js_context)
+    Q.stats.macros = macros.stats
     Q.stats.workspace = js_context.workspace_stats
     Q.stats.go = js_context.go_stats
     Q.stats.rust = js_context.rust_stats
@@ -642,7 +651,8 @@ function M.query(symbols, opts)
         local direct, paired = deps(f)
         Q.stats.resolved_refs = Q.stats.resolved_refs + 1
         local found, reason = resolve_ref(symbols, f, ids[refs.from[i]], refs.name[i], refs.kind[i],
-            refs.recv[i] or nil, direct, paired, nil, js_context.ordinary.evidence(f, i), js_context)
+            refs.recv[i] or nil, direct, paired, nil, js_context.ordinary.evidence(f, i), js_context, refs.line[i])
+        if macros.incomplete then Q.incomplete = true end
         if js_context.workspace_incomplete or js_context.go_incomplete or js_context.rust_incomplete then Q.incomplete = true end
         if report and explain and (refs.kind[i] == 'call' or refs.kind[i] == 'member_call') then
             if (not found or #found == 0) and explain == true then

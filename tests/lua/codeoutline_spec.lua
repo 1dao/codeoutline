@@ -4950,6 +4950,148 @@ int luaopen_native(lua_State *L) { luaL_newlib(L, funcs); return 1; }]])
     end)
 end)
 
+spec.describe('query-time C and C++ macro visibility', function()
+    local function kinds(G, source, wanted)
+        local Q, result = graph.query(G), {}
+        for _, src in ipairs(G.by_name[source] or {}) do
+            local out = Q.out[src]
+            for i = 1, #out, graph.EDGE do
+                local n = G.nodes[out[i]]
+                if n.name == wanted then result[#result + 1] = n.kind .. '@' .. G.files[G.node_file[out[i]]].path end
+            end
+        end
+        table.sort(result); return table.concat(result, ','), Q
+    end
+    spec.it('honors define and undef order and preserves calls inside macro bodies', function()
+        local root = tmp_root .. '/macros_order'
+        write(root .. '/a.c', [[void TRACE(int x); void real(int x);
+void before(void) { TRACE(1); }
+#define TRACE(x) real(x)
+void during(void) { TRACE(2); }
+#undef TRACE
+void after(void) { TRACE(3); }
+]])
+        local opts = { cache_path = root .. '/cache.idx', lister = 'walk' }
+        local idx, G = svc.get(root, opts)
+        spec.equal(kinds(G, 'before', 'TRACE'), 'prototype@a.c')
+        spec.equal(kinds(G, 'during', 'TRACE'), 'macro@a.c')
+        spec.equal(kinds(G, 'after', 'TRACE'), 'prototype@a.c')
+        spec.equal(kinds(G, 'TRACE', 'real'), 'prototype@a.c')
+        local Q = graph.query(G); local macro
+        for _, id in ipairs(G.by_name.TRACE) do if G.nodes[id].kind == 'macro' then macro = id end end
+        spec.truthy(macro); spec.equal(#Q.inn[macro], graph.EDGE)
+        spec.equal(G.nodes[Q.inn[macro][1]].name, 'during')
+        spec.nil_value(idx.files['a.c'].cpp_macros)
+        idx:save(); svc.forget(root); _, G = svc.get(root, opts)
+        spec.equal(kinds(G, 'during', 'TRACE'), 'macro@a.c')
+        write(root .. '/a.c', 'void TRACE(int x);\nvoid during(void) { TRACE(2); }\n')
+        local ok, err = pcall(kinds, G, 'during', 'TRACE')
+        spec.equal(ok, false); spec.contains(tostring(err), 'source changed during query')
+        _, G = svc.get(root, opts); spec.equal(kinds(G, 'during', 'TRACE'), 'prototype@a.c')
+        svc.forget(root)
+    end)
+    spec.it('walks includes in translation-unit order and honors guards and pragma once', function()
+        for _, guard in ipairs({ 'guard', 'once' }) do
+            local root = tmp_root .. '/macros_include_' .. guard
+            local head = guard == 'guard' and '#ifndef API_H\n#define API_H\n' or '#pragma once\n'
+            write(root .. '/api.h', head .. '#define TRACE(x) real(x)\n' .. (guard == 'guard' and '#endif\n' or ''))
+            write(root .. '/a.cpp', [[void TRACE(int x); void real(int x);
+#include "api.h"
+void first() { TRACE(1); }
+#undef TRACE
+#include "api.h"
+void second() { TRACE(2); }
+]])
+            local _, G = svc.get(root, { cache_path = root .. '/cache.idx', lister = 'walk' })
+            spec.equal(kinds(G, 'first', 'TRACE'), 'macro@api.h')
+            spec.equal(kinds(G, 'second', 'TRACE'), 'prototype@a.cpp')
+            svc.forget(root)
+        end
+    end)
+    spec.it('evaluates finite conditions and blocks uncertain macro names without same-name guesses', function()
+        local root = tmp_root .. '/macros_conditions'
+        write(root .. '/a.c', [[void TRACE(int x);
+#undef ENABLED
+#if defined(ENABLED)
+#define TRACE(x) wrong(x)
+#elif !defined(ENABLED) && (1 || UNKNOWN_FLAG)
+#define TRACE(x) right(x)
+#endif
+void certain(void) { TRACE(1); }
+#if UNKNOWN_FLAG
+#undef TRACE
+#endif
+void uncertain(void) { TRACE(2); }
+]])
+        local _, G = svc.get(root, { cache_path = root .. '/cache.idx', lister = 'walk' })
+        spec.equal(kinds(G, 'certain', 'TRACE'), 'macro@a.c')
+        spec.equal(kinds(G, 'uncertain', 'TRACE'), '')
+        svc.forget(root)
+    end)
+    spec.it('does not make unrelated macros visible or read directives in comments and strings', function()
+        local root = tmp_root .. '/macros_unrelated'
+        write(root .. '/unrelated.h', '#define TRACE(x) other(x)\n')
+        write(root .. '/a.cpp', [[void TRACE(int x);
+/*
+#define TRACE(x) wrong(x)
+*/
+const char *s = R"raw(
+#define TRACE(x) wrong(x)
+)raw";
+void run() { TRACE(1); }
+]])
+        local _, G = svc.get(root, { cache_path = root .. '/cache.idx', lister = 'walk' })
+        spec.equal(kinds(G, 'run', 'TRACE'), 'prototype@a.cpp')
+        svc.forget(root)
+    end)
+    spec.it('reports source and event budgets rather than falling back to unproven calls', function()
+        local root = tmp_root .. '/macros_limits'
+        write(root .. '/a.c', '#define TRACE(x) real(x)\nvoid run(void) { TRACE(1); }\n')
+        local _, G = svc.get(root, { cache_path = root .. '/cache.idx', lister = 'walk' })
+        local macros = require('codeoutline.cpp_macros'); local before = macros.MAX_EVENTS; macros.MAX_EVENTS = 0
+        local ok, value, Q = pcall(kinds, G, 'run', 'TRACE'); macros.MAX_EVENTS = before
+        spec.truthy(ok); spec.equal(value, ''); spec.truthy(Q.incomplete)
+        svc.forget(root)
+    end)
+    spec.it('does not start raw strings at markers inside comments', function()
+        local root = tmp_root .. '/macros_raw_comment'
+        write(root .. '/a.cpp', [[void TRACE(int x);
+/* R"tag( */
+#define TRACE(x) real(x)
+/* )tag" */
+void run() { TRACE(1); }
+]])
+        local _, G = svc.get(root, { cache_path = root .. '/cache.idx', lister = 'walk' })
+        spec.equal(kinds(G, 'run', 'TRACE'), 'macro@a.cpp')
+        svc.forget(root)
+    end)
+    spec.it('keeps forward macro-body dependencies rather than evaluating them at definition time', function()
+        local root = tmp_root .. '/macros_body_forward'
+        write(root .. '/a.c', '#define OUTER(x) INNER(x)\n#define INNER(x) real(x)\nvoid run(void) { OUTER(1); }\n')
+        local _, G = svc.get(root, { cache_path = root .. '/cache.idx', lister = 'walk' })
+        spec.equal(kinds(G, 'run', 'OUTER'), 'macro@a.c')
+        spec.equal(kinds(G, 'OUTER', 'INNER'), 'macro@a.c')
+        svc.forget(root)
+    end)
+    spec.it('does not assume the queried macro is undefined when a source condition reads it', function()
+        local root = tmp_root .. '/macros_self_condition'
+        write(root .. '/a.c', 'void TRACE(int x);\n#ifdef TRACE\n#define TRACE(x) real(x)\n#endif\nvoid run(void) { TRACE(1); }\n')
+        local _, G = svc.get(root, { cache_path = root .. '/cache.idx', lister = 'walk' })
+        spec.equal(kinds(G, 'run', 'TRACE'), '')
+        svc.forget(root)
+    end)
+    spec.it('masks standard C++ raw string prefixes in directive evidence', function()
+        for _, prefix in ipairs({ 'R', 'LR', 'uR', 'UR', 'u8R' }) do
+            local root = tmp_root .. '/macros_raw_' .. prefix
+            write(root .. '/unrelated.h', '#define TRACE(x) other(x)\n')
+            write(root .. '/a.cpp', 'void TRACE(int x);\nconst char *s = ' .. prefix .. '"tag(\n#define TRACE(x) wrong(x)\n)tag";\nvoid run() { TRACE(1); }\n')
+            local _, G = svc.get(root, { cache_path = root .. '/cache.idx', lister = 'walk' })
+            spec.equal(kinds(G, 'run', 'TRACE'), 'prototype@a.cpp', prefix)
+            svc.forget(root)
+        end
+    end)
+end)
+
 return {
     __init = function()
         local failed = spec.finish()

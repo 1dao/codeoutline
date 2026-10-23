@@ -269,6 +269,24 @@ function Index:symbols()
     return self.symbol_tables
 end
 
+-- Encoding confirmation need not replace a semantically identical parse.
+local function same_value(a, b)
+    if type(a) ~= type(b) then return false end
+    if type(a) ~= 'table' then return a == b end
+    local count = 0
+    for key, value in pairs(a) do
+        count = count + 1
+        if count % 128 == 0 then control.check() end
+        if not same_value(value, b[key]) then return false end
+    end
+    for key in pairs(b) do
+        count = count + 1
+        if count % 128 == 0 then control.check() end
+        if a[key] == nil then return false end
+    end
+    return true
+end
+
 -- Only query-selected files are decoded. This cache lasts for one query and
 -- holds the exact snapshot used for both reparsing and source rendering.
 function Index:query_source(rel)
@@ -300,13 +318,20 @@ function Index:query_source(rel)
         if encoding == 'gbk' then
             local parsed = assert(ci.parse(rel, src, parse_options(src)), 'cannot parse decoded source: ' .. rel)
             parsed.size, parsed.crc, parsed.mtime, parsed.checked = rec.size, rec.crc, rec.mtime, rec.checked
-            parsed.encoding = encoding
             local repair_only = not self:needs_save() or self.repair_only
-            self:commit(rel, parsed)
+            if same_value(parsed, rec) then
+                -- GBK comments often leave every compact parse field intact.
+                -- Keep IDs and query evidence valid instead of restarting work.
+                rec.encoding = encoding
+                parsed = rec
+            else
+                parsed.encoding = encoding
+                self:commit(rel, parsed)
+                changed = true
+            end
             self.repair_only = repair_only
             self.repair_records = self.repair_records or {}
             self.repair_records[rel] = parsed
-            changed = true
             self.encoding_dirty = true
         else
             -- Metadata only: names and positions are unchanged. Keep this hint

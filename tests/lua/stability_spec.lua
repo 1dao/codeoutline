@@ -290,6 +290,26 @@ do
             xutils.to_utf8 = original
             assert(ok, output)
         end)
+        spec.it('preserves symbol identities when GBK decoding changes only source comments', function()
+            if not gbk_or_skip() then return end
+            local dir, cache_path = root .. '/stable-encoding', root .. '/stable-encoding.idx'
+            assert(xutils.mkdir_p(dir))
+            local f = assert(io.open(dir .. '/stable.lua', 'wb'))
+            f:write('function stable()\n -- \214\208\206\196\n return helper()\nend\nfunction helper() return 1 end\n'); f:close()
+            local idx = index.open(dir, { cache_path = cache_path, lister = 'walk', rebuild = true })
+            idx:refresh_all(); assert(idx:save())
+            local before, generation, rec = read(cache_path), idx.generation, idx.files['stable.lua']
+            local G = idx:symbols(); local id = G.by_name.stable[1]
+            local source, changed = idx:query_source('stable.lua')
+            spec.contains(source, '-- 中文'); spec.equal(changed, false)
+            spec.equal(idx.files['stable.lua'], rec); spec.equal(idx.generation, generation)
+            spec.equal(G.by_name.stable[1], id); spec.equal(rec.encoding, 'gbk')
+            spec.truthy(idx:needs_save()); assert(idx:save()); spec.equal(idx:needs_save(), false)
+            spec.equal(read(cache_path), before)
+            local loaded = index.open(dir, { cache_path = cache_path, lister = 'walk' })
+            spec.truthy(loaded.cache_loaded); spec.equal(loaded.files['stable.lua'].encoding, 'gbk')
+            local _, repaired = loaded:query_source('stable.lua'); spec.equal(repaired, false)
+        end)
         spec.it('persists repaired records and invalidates encoding after editing', function()
             if not gbk_or_skip() then return end
             svc.forget(project)
@@ -312,7 +332,9 @@ do
             local function write(path, data) local f = assert(io.open(path, 'wb')); f:write(data); f:close() end
             local dir, file_cache = root .. '/repair-journal', root .. '/repair-journal.idx'
             assert(xutils.mkdir_p(dir))
-            write(dir .. '/a.lua', 'function repaired() return "\129\92" end\n')
+            -- A decoded module path changes binding evidence even if names stay
+            -- ASCII, so this must still replace records and retry the query.
+            write(dir .. '/a.lua', 'local dep = require("\214\208\206\196")\nfunction repaired() return "\129\92" end\n')
             local idx = index.open(dir, { cache_path = file_cache, lister = 'walk', rebuild = true })
             idx:refresh_all(); assert(idx:save())
             local before = read(file_cache)
@@ -358,7 +380,7 @@ do
         end)
         spec.it('commits GBK repairs into the maintained symbol tables', function()
             if not gbk_or_skip() then return end
-            write('lazy_tail.lua', 'function lazy_tail()\n local s = "\129\92"\n return lazy_helper()\nend\nfunction lazy_helper() return 1 end\n')
+            write('lazy_tail.lua', 'local dep = require("\214\208\206\196")\nfunction lazy_tail()\n local s = "\129\92"\n return lazy_helper()\nend\nfunction lazy_helper() return 1 end\n')
             local idx, symbols = svc.get(project, opts)
             local generation = idx.generation
             local output = svc.explore(project, 'lazy_tail lazy_helper', opts)

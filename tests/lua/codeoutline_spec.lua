@@ -5229,6 +5229,129 @@ spec.describe('changed file impact', function()
     end)
 end)
 
+spec.describe('project search ranking', function()
+    local ranking = require('codeoutline.search_ranking')
+    local function config(root, value) write(root .. '/.codeoutline.json', value) end
+    local function files(root)
+        for i = 1, 3 do write(root .. '/generated/' .. i .. '.lua', 'function ranked_save() return ' .. i .. ' end') end
+        write(root .. '/src/main.lua', 'function ranked_save() return 99 end')
+        return { cache_path = root .. '/cache.idx', lister = 'walk' }
+    end
+    local function first(root, opts, query)
+        local output, info = svc.explore(root, query or 'ranked_save', opts)
+        local _, G = svc.resident(root)
+        return G.files[G.node_file[info.seeds[1]]].path, info, output
+    end
+    spec.it('prefers business definitions over configured directories without changing the index', function()
+        local root = tmp_root .. '/search_ranking'; local opts = files(root)
+        local path = first(root, opts); spec.equal(path, 'generated/1.lua')
+        local idx, G = svc.resident(root); local generation = idx.generation
+        config(root, '{"deprioritize":["generated/"]}')
+        local info, output; path, info, output = first(root, opts)
+        spec.equal(path, 'src/main.lua'); spec.equal(#info.seeds, 3)
+        spec.equal(info.query_stats.ranking.rules, 1); spec.equal(info.query_stats.ranking.matched_files, 3)
+        spec.equal(info.refresh.parsed, 0); spec.equal(idx.generation, generation)
+        spec.equal(G.node_count, 4); spec.nil_value(G.search_ranking)
+        for _, rec in pairs(idx.files) do spec.nil_value(rec.deprioritize); spec.nil_value(rec.search_ranking) end
+        config(root, '{"deprioritize":["src/"]}')
+        spec.equal(first(root, opts), 'generated/1.lua')
+        svc.forget(root)
+        spec.equal(first(root, opts), 'generated/1.lua'); svc.forget(root)
+    end)
+    spec.it('matches literal root-relative directory boundaries and normalizes redundant separators', function()
+        local root = tmp_root .. '/ranking_prefixes'
+        config(root, '{"deprioritize":["./generated\\\\","generated/./","space (v1)/","gen[1]/"]}')
+        local policy = ranking.policy(root)
+        spec.equal(policy.stats.rules, 3)
+        for _, path in ipairs({ 'generated/a.lua', 'generated/sub/b.lua', 'space (v1)/a.lua', 'gen[1]/x.lua' }) do
+            spec.equal(policy.penalty(path), 6, path)
+            spec.equal(policy.penalty(path), 6, 'cached penalty must not stack')
+        end
+        for _, path in ipairs({ 'generated_extra/a.lua', 'nested/generated/a.lua', 'space v1/a.lua', 'gen1/x.lua', 'Generated/a.lua' }) do
+            spec.equal(policy.penalty(path), 0, path)
+        end
+        spec.equal(policy.penalty('generated/a.lua', true), 0)
+    end)
+    spec.it('keeps legacy defaults when omitted and lets an explicit empty array disable directory penalties', function()
+        local root = tmp_root .. '/ranking_defaults'
+        write(root .. '/vendor/a.lua', 'function ranked_save() end')
+        write(root .. '/z_app.lua', 'function ranked_save() end')
+        local opts = { cache_path = root .. '/cache.idx', lister = 'walk' }
+        spec.equal(first(root, opts), 'z_app.lua')
+        config(root, '{"deprioritize":[]}')
+        local path, info = first(root, opts)
+        spec.equal(path, 'vendor/a.lua'); spec.equal(info.query_stats.ranking.rules, 0)
+        config(root, '{}'); spec.equal(first(root, opts), 'z_app.lua'); svc.forget(root)
+    end)
+    spec.it('retains explicit file, qualified-symbol and path-filter requests in deprioritized directories', function()
+        local root = tmp_root .. '/ranking_explicit'; local opts = files(root)
+        write(root .. '/generated/special.lua', 'function Generated.ranked_special() return 7 end')
+        config(root, '{"deprioritize":["generated/"]}')
+        local path, info, output = first(root, opts, 'Generated.ranked_special')
+        spec.equal(path, 'generated/special.lua'); spec.equal(info.query_stats.ranking.matched_files, 0)
+        output, info = svc.explore(root, 'generated/special.lua', opts)
+        spec.contains(output, 'Generated.ranked_special')
+        path, info = first(root, opts, 'path:generated/ ranked_save')
+        spec.equal(path, 'generated/1.lua'); spec.equal(#info.seeds, 3); svc.forget(root)
+    end)
+    spec.it('fills filter-only candidate windows from preferred files before generated matches', function()
+        local root = tmp_root .. '/ranking_window'
+        local lines = {}; for i = 1, 513 do lines[#lines + 1] = 'function generated_' .. i .. '() end' end
+        write(root .. '/a_generated/all.lua', table.concat(lines, '\n'))
+        write(root .. '/z_app.lua', 'function preferred_business() end')
+        config(root, '{"deprioritize":["a_generated/"]}')
+        local opts = { cache_path = root .. '/cache.idx', lister = 'walk', budget = 65536 }
+        local path, info = first(root, opts, 'lang:lua kind:function')
+        spec.equal(path, 'z_app.lua'); spec.truthy(info.seed_limit_reached)
+        local _, G = svc.resident(root); spec.equal(G.node_count, 514); svc.forget(root)
+    end)
+    spec.it('isolates policies between projects and refreshes paths after rename or deletion', function()
+        local a, b = tmp_root .. '/ranking_a', tmp_root .. '/ranking_b'
+        local oa, ob = files(a), files(b)
+        config(a, '{"deprioritize":["generated/"]}'); config(b, '{"deprioritize":["src/"]}')
+        spec.equal(first(a, oa), 'src/main.lua'); spec.equal(first(b, ob), 'generated/1.lua')
+        spec.equal(first(a, oa), 'src/main.lua')
+        assert(os.rename(a .. '/src/main.lua', a .. '/preferred.lua'))
+        spec.equal(first(a, oa), 'preferred.lua')
+        assert(os.remove(a .. '/preferred.lua')); spec.equal(first(a, oa), 'generated/1.lua')
+        svc.forget(a); svc.forget(b)
+    end)
+    spec.it('preserves Lua to C expansion, incoming Lua callers and file impact', function()
+        local root = tmp_root .. '/ranking_native'
+        write(root .. '/native/store.c', 'static int native_saved(lua_State *L) { return 0; }\nstatic const luaL_Reg api[] = {{"save", native_saved}, {NULL, NULL}};\nint luaopen_store(lua_State *L) { luaL_newlib(L, api); return 1; }')
+        write(root .. '/app.lua', 'local store = require("store")\nfunction RankedNativeCaller() store.save() end')
+        local opts = { cache_path = root .. '/cache.idx', lister = 'walk' }
+        local before_callers = svc.callers(root, 'native_saved', opts)
+        local before_impact = svc.affected(root, { 'native/store.c' }, opts)
+        config(root, '{"deprioritize":["native/"]}')
+        local output, info = svc.explore(root, 'RankedNativeCaller', opts)
+        spec.contains(output, 'native_saved'); spec.contains(output, 'native/store.c')
+        output, info = svc.callers(root, 'native_saved', opts)
+        spec.equal(output, before_callers); spec.contains(output, 'RankedNativeCaller (app.lua:')
+        output, info = svc.affected(root, { 'native/store.c' }, opts)
+        spec.equal(output, before_impact)
+        local found = false
+        for _, caller in ipairs(info.callers) do if caller.name == 'RankedNativeCaller' and caller.file == 'app.lua' then found = true end end
+        spec.truthy(found); svc.forget(root)
+    end)
+    spec.it('rejects invalid policy shapes, traversal, globs and excessive rules without changing resident symbols', function()
+        local root = tmp_root .. '/ranking_invalid'; local opts = files(root)
+        local _, G = svc.get(root, opts)
+        for _, value in ipairs({ 'false', '"generated/"', '{"path":"generated/"}', '[false]', '[1]', '[""]',
+            '["../generated/"]', '["a/../b/"]', '["/generated/"]', '["C:/generated/"]', '["**/generated/**"]',
+            '["."]', '["a\\u0000b/"]', '["a\\nb/"]', '["' .. string.rep('a', 1025) .. '"]' }) do
+            config(root, '{"deprioritize":' .. value .. '}')
+            local ok, err = pcall(svc.explore, root, 'ranked_save', opts)
+            spec.equal(ok, false, value); spec.contains(tostring(err), 'deprioritize')
+            spec.equal(G.node_count, 4)
+        end
+        local values = {}; for i = 1, 33 do values[i] = '"p' .. i .. '/"' end
+        config(root, '{"deprioritize":[' .. table.concat(values, ',') .. ']}')
+        spec.equal(pcall(svc.explore, root, 'ranked_save', opts), false)
+        config(root, '{}'); spec.equal(first(root, opts), 'generated/1.lua'); svc.forget(root)
+    end)
+end)
+
 return {
     __init = function()
         local failed = spec.finish()

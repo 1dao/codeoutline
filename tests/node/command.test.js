@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { root, defaultRuntime, version } from './helpers.js';
@@ -67,5 +67,31 @@ test('unified Lua CLI: commands, JSON output, failures and MCP startup', async (
             assert.notEqual(result.isError, true);
             assert.match(result.content[0].text, /return 7/);
         } finally { await client.close(); }
+    } finally { await rm(project, { recursive: true, force: true }); }
+});
+
+test('CLI search ranking reads project directories without hiding exact file queries', async () => {
+    const project = await mkdtemp(join(tmpdir(), 'codeoutline-ranking-cli-'));
+    const command = join(root, 'scripts/codeoutline/command.lua');
+    const run = (...args) => spawnSync(defaultRuntime, [command, 'LOG_STDERR=1', ...args], {
+        cwd: project, encoding: 'utf8', timeout: 15000, windowsHide: true,
+    });
+    const query = (text) => { const r = run('explore', `--query=${text}`); assert.equal(r.status, 0, r.stderr); return r.stdout; };
+    try {
+        await mkdir(join(project, 'generated'));
+        for (let i = 1; i <= 3; i++) await writeFile(join(project, 'generated', `${i}.lua`), `function ranked_save() return ${i} end\n`);
+        await writeFile(join(project, 'z_app.lua'), 'function ranked_save() return 99 end\n');
+        assert.doesNotMatch(query('ranked_save'), /## z_app.lua/);
+        await writeFile(join(project, '.codeoutline.json'), JSON.stringify({ deprioritize: ['generated/'] }));
+        const ranked = query('ranked_save');
+        assert.match(ranked, /## z_app.lua/);
+        assert.ok(ranked.indexOf('## z_app.lua') < ranked.indexOf('## generated/'));
+        assert.match(query('generated/1.lua'), /## generated\/1.lua \(outline\)/);
+        assert.match(query('generated/1.lua'), /ranked_save/);
+        await writeFile(join(project, '.codeoutline.json'), '{"deprioritize":[]}');
+        assert.doesNotMatch(query('ranked_save'), /## z_app.lua/);
+        await writeFile(join(project, '.codeoutline.json'), '{"deprioritize":["**/generated/**"]}');
+        const invalid = run('explore', '--query=ranked_save');
+        assert.notEqual(invalid.status, 0); assert.match(invalid.stderr, /deprioritize/);
     } finally { await rm(project, { recursive: true, force: true }); }
 });

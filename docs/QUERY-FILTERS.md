@@ -43,8 +43,10 @@ filters; they do not turn into project-wide listing queries. Filtering happens
 before target caps and same-name disambiguation. MCP and CLI reuse the same query
 string syntax as Lua service calls; no new protocol parameter is required.
 
-Generated-code ranking is a separate proposed improvement. These explicit
-filters do not automatically exclude or demote generated files.
+[Project search ranking](SEARCH-RANKING.md) can demote configured generated or
+third-party directories when choosing explore starting symbols. These explicit
+filters do not automatically exclude or demote generated files; dependency
+expansion remains unchanged by either feature.
 
 Query performance also reuses compact Lua export/local-member names to avoid
 resolving unrelated bound Lua calls during reverse traversal. Native targets

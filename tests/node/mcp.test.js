@@ -78,6 +78,30 @@ test('official SDK stdio: discovery, source, incremental refresh, rebuild and er
     } finally { await c.close(); await f.cleanup(); }
 });
 
+test('official SDK search ranking reloads config and preserves project coverage', { timeout: 30000 }, async () => {
+    const f = await fixture();
+    await mkdir(join(f.project, 'generated'));
+    for (let i = 1; i <= 3; i++) await writeFile(join(f.project, 'generated', `${i}.lua`), `function ranked_save() return ${i} end\n`);
+    await writeFile(join(f.project, 'z_app.lua'), 'function ranked_save() return 99 end\n');
+    const transport = new StdioClientTransport({ command: defaultRuntime, args: [main, 'STDIO=1', `PROJECT=${f.project}`], cwd: tmpdir(), stderr: 'pipe' });
+    transport.stderr?.resume();
+    const c = client();
+    const query = (text) => c.callTool({ name: 'codeoutline_explore', arguments: { query: text } });
+    try {
+        await c.connect(transport);
+        assert.doesNotMatch((await query('ranked_save')).content[0].text, /## z_app.lua/);
+        await writeFile(join(f.project, '.codeoutline.json'), JSON.stringify({ deprioritize: ['generated/'] }));
+        const ranked = await query('ranked_save');
+        assert.notEqual(ranked.isError, true);
+        assert.match(ranked.content[0].text, /## z_app.lua/);
+        assert.match((await query('path:generated/ ranked_save')).content[0].text, /## generated\/1.lua/);
+        const status = JSON.parse((await c.callTool({ name: 'codeoutline_status' })).content[0].text);
+        assert.equal(status.files, 5); assert.equal(status.refresh.parsed, 0);
+        await writeFile(join(f.project, '.codeoutline.json'), '{"deprioritize":[]}');
+        assert.doesNotMatch((await query('ranked_save')).content[0].text, /## z_app.lua/);
+    } finally { await c.close(); await f.cleanup(); }
+});
+
 test('official SDK type hierarchy: aliases, directions, validation and incremental edits', { timeout: 30000 }, async () => {
     const f = await fixture();
     await writeFile(join(f.project, 'api.ts'), 'export interface Root {}\n');

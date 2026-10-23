@@ -60,16 +60,6 @@ for w in ([[the a an and or of to in on for with from by is are was be how what 
     STOP[w] = true
 end
 
-local VENDORED = { '/3rd/', '^3rd/', '/third_party/', '^third_party/', '/thirdparty/',
-    '/vendor/', '^vendor/', '/node_modules/', '/external/', '^external/', '/deps/', '^deps/' }
-
-local function vendored(path)
-    for _, p in ipairs(VENDORED) do
-        if path:find(p) then return true end
-    end
-    return false
-end
-
 -- Split camelCase / snake_case into lowercase segments.
 local function segments(name)
     local out = {}
@@ -117,15 +107,12 @@ local function terms(query)
     return out
 end
 
--- Rank one candidate node for a query term.
-local function seed_score(G, id, exact)
-    local s = (KIND_WEIGHT[G.nodes[id].kind] or 1) + (exact and 20 or 0)
-    if vendored(G.files[G.node_file[id]].path) then s = s - 6 end
-    return s
-end
-
-local function find_seeds(G, query, filters)
+local function find_seeds(G, query, filters, ranking)
     local predicate = require('codeoutline.query_filters')
+    local function seed_score(id, exact, explicit)
+        local s = (KIND_WEIGHT[G.nodes[id].kind] or 1) + (exact and 20 or 0)
+        return s - ranking.penalty(G.files[G.node_file[id]].path, explicit)
+    end
     local cands = {}          -- id -> score
     local files = {}          -- file indices named in the query
     local considered = 0
@@ -148,7 +135,7 @@ local function find_seeds(G, query, filters)
             -- matching, which is where English words pick up noise), and rank
             -- below code-like terms when the query has any.
             for _, id in ipairs(G.by_name[t.text] or {}) do
-                consider(id, seed_score(G, id, true) - (has_code and 12 or 8))
+                consider(id, seed_score(id, true) - (has_code and 12 or 8))
             end
         elseif t.kind == 'file' then
             local want = t.text:gsub('\\', '/')
@@ -168,23 +155,23 @@ local function find_seeds(G, query, filters)
                 if i % 128 == 0 then control.check() end
                 local q = G.nodes[id].qualified:gsub('[:]+', '.')
                 if q == t.text or q:sub(-(#t.text + 1)) == '.' .. t.text then
-                    consider(id, seed_score(G, id, true) + 10)
+                    consider(id, seed_score(id, true, true) + 10)
                 elseif select(2, t.text:gsub('%.', '')) == 1
                     and G.files[G.node_file[id]].path:match('([^/]+)%.[^./]+$') == first then
                     -- module.func where the module is the file: Lua's `local M`
                     -- tables and Python modules are named by their file
-                    consider(id, seed_score(G, id, true) + 8)
+                    consider(id, seed_score(id, true, true) + 8)
                 end
             end
         else
             local exact = G.by_name[t.text]
             if exact then
                 -- a name defined in many places is generic; keep its best few
-                for _, id in ipairs(exact) do consider(id, seed_score(G, id, true) - math.min(#exact, 20) * 0.2) end
+                for _, id in ipairs(exact) do consider(id, seed_score(id, true) - math.min(#exact, 20) * 0.2) end
             else
                 local ci = G.by_lname[t.text:lower()]
                 if ci then
-                    for _, id in ipairs(ci) do consider(id, seed_score(G, id, true) - 2) end
+                    for _, id in ipairs(ci) do consider(id, seed_score(id, true) - 2) end
                 elseif #t.text >= 4 then
                     -- fuzzy: every query segment appears in the name's segments
                     local want = segments(t.text)
@@ -200,7 +187,7 @@ local function find_seeds(G, query, filters)
                         if ok then
                             local accepted = false
                             for _, id in ipairs(ids) do
-                                if consider(id, seed_score(G, id, false) - #name * 0.05) then accepted = true end
+                                if consider(id, seed_score(id, false) - #name * 0.05) then accepted = true end
                             end
                             if accepted then hits = hits + 1 end
                             if hits > 200 then break end
@@ -212,17 +199,23 @@ local function find_seeds(G, query, filters)
     end
     if query == '' then
         local count = 0
-        for _, f in ipairs(G.file_order) do
-            control.check()
-            local rec = G.files[f]
-            if predicate.file(filters, rec) then
-                for i, id in ipairs(G.id_of[f]) do
-                    if i % 256 == 0 then control.check() end
-                    if predicate.id(filters, G, id) then
-                        if count >= 512 then filters.seed_limit_reached = true; break end
-                        consider(id, seed_score(G, id, false)); count = count + 1
+        -- With a configured policy, select the candidate window from preferred
+        -- files first so an early generated directory cannot fill all 512 slots.
+        for pass = 1, ranking.configured and 2 or 1 do
+            for _, f in ipairs(G.file_order) do
+                control.check()
+                local rec = G.files[f]
+                if predicate.file(filters, rec) and (not ranking.configured
+                    or (ranking.penalty(rec.path) > 0) == (pass == 2)) then
+                    for i, id in ipairs(G.id_of[f]) do
+                        if i % 256 == 0 then control.check() end
+                        if predicate.id(filters, G, id) then
+                            if count >= 512 then filters.seed_limit_reached = true; break end
+                            consider(id, seed_score(id, false)); count = count + 1
+                        end
                     end
                 end
+                if filters.seed_limit_reached then break end
             end
             if filters.seed_limit_reached then break end
         end
@@ -342,10 +335,12 @@ function M.run(G, idx, query, opts)
     local query_opts = {}
     for key, value in pairs(opts) do query_opts[key] = value end
     query_opts.explain = true
+    local ranking = require('codeoutline.search_ranking').policy(G.root or idx.root)
     G = graph.query(G, query_opts)
+    G.stats.ranking = ranking.stats
     file_cache = {}
     local filters = require('codeoutline.query_filters').parse(query)
-    local ranked, named_files = find_seeds(G, filters.text, filters)
+    local ranked, named_files = find_seeds(G, filters.text, filters, ranking)
 
     -- Seeds: top-ranked, but at most 3 definitions per name so one generic
     -- name can't crowd out the others the query mentions.

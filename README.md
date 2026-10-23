@@ -258,6 +258,10 @@ Explore, callers and type-hierarchy accept [explicit query filters](docs/QUERY-F
 such as `lang:lua path:service/ connect`. They select starting symbols; dependency
 expansion still crosses files and languages, including Lua-to-C calls.
 
+[Project search ranking](docs/SEARCH-RANKING.md) lets `.codeoutline.json`
+deprioritize directory prefixes when explore chooses starting symbols. Files
+remain indexed, and dependency expansion keeps the same visibility.
+
 ```sh
 codeoutline serve --stdio [--project PATH] [--allow-root PATH ...]
 codeoutline serve --http [--host HOST] [--port PORT] [--project PATH] [--allow-root PATH ...]

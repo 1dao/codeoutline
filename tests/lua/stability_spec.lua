@@ -307,6 +307,55 @@ do
             spec.contains(svc.explore(project, 'abc', opts), '现在是 UTF-8')
             spec.equal(idx.files['gbk.lua'].encoding, 'utf-8')
         end)
+        spec.it('persists query encoding repairs without rewriting the base cache and retries failed publication', function()
+            if not gbk_or_skip() then return end
+            local function write(path, data) local f = assert(io.open(path, 'wb')); f:write(data); f:close() end
+            local dir, file_cache = root .. '/repair-journal', root .. '/repair-journal.idx'
+            assert(xutils.mkdir_p(dir))
+            write(dir .. '/a.lua', 'function repaired() return "\129\92" end\n')
+            local idx = index.open(dir, { cache_path = file_cache, lister = 'walk', rebuild = true })
+            idx:refresh_all(); assert(idx:save())
+            local before = read(file_cache)
+            local _, repaired = idx:query_source('a.lua'); spec.truthy(repaired)
+            local replace = xutils.replace_file
+            xutils.replace_file = function() return false, 'injected repair publication failure' end
+            local ok, saved, err = pcall(idx.save, idx)
+            xutils.replace_file = replace
+            spec.truthy(ok); spec.equal(saved, false); spec.contains(err, 'injected')
+            spec.truthy(idx:needs_save()); spec.equal(read(file_cache), before)
+            assert(idx:save()); spec.equal(idx:needs_save(), false)
+            spec.equal(read(file_cache), before, 'repair writes must not serialize the project')
+            local loaded = index.open(dir, { cache_path = file_cache, lister = 'walk' })
+            spec.truthy(loaded.cache_loaded); spec.equal(loaded.files['a.lua'].encoding, 'gbk')
+            local source, changed = loaded:query_source('a.lua'); spec.contains(source, 'function repaired'); spec.equal(changed, false)
+            write(dir .. '/new.lua', 'function later() end')
+            loaded:refresh_all(); assert(loaded:save())
+            local sidecar = io.open(file_cache .. '.repairs', 'rb'); if sidecar then sidecar:close() end
+            spec.nil_value(sidecar, 'normal save merges and removes repair overlay')
+            loaded = index.open(dir, { cache_path = file_cache, lister = 'walk' })
+            spec.equal(loaded.files['a.lua'].encoding, 'gbk'); spec.truthy(loaded.files['new.lua'])
+        end)
+        spec.it('ignores corrupt or mismatched encoding overlays without invalidating the base cache', function()
+            if not gbk_or_skip() then return end
+            local function write(path, data) local f = assert(io.open(path, 'wb')); f:write(data); f:close() end
+            local dir, file_cache = root .. '/repair-invalid', root .. '/repair-invalid.idx'
+            assert(xutils.mkdir_p(dir)); write(dir .. '/a.lua', 'function repaired() return "\129\92" end\n')
+            local idx = index.open(dir, { cache_path = file_cache, lister = 'walk', rebuild = true })
+            idx:refresh_all(); assert(idx:save()); idx:query_source('a.lua'); assert(idx:save())
+            local patch = read(file_cache .. '.repairs')
+            local repair = require('codeoutline.cache_repairs')
+            spec.nil_value(next(repair.load(file_cache, 'different-base', index.VERSION, paths.key(idx.root))))
+            write(file_cache .. '.repairs', 'broken')
+            local loaded = index.open(dir, { cache_path = file_cache, lister = 'walk' })
+            spec.truthy(loaded.cache_loaded); spec.nil_value(loaded.files['a.lua'].encoding)
+            write(file_cache .. '.repairs', patch)
+            local previous = repair.MAX_RECORDS; repair.MAX_RECORDS = 0
+            local ok, err = repair.save(file_cache, idx.cache_hash, index.VERSION, paths.key(idx.root), idx.repair_records)
+            repair.MAX_RECORDS = previous
+            spec.equal(ok, false); spec.contains(err, 'limit')
+            loaded = index.open(dir, { cache_path = file_cache, lister = 'walk' })
+            spec.truthy(loaded.cache_loaded); spec.equal(loaded.files['a.lua'].encoding, 'gbk')
+        end)
         spec.it('commits GBK repairs into the maintained symbol tables', function()
             if not gbk_or_skip() then return end
             write('lazy_tail.lua', 'function lazy_tail()\n local s = "\129\92"\n return lazy_helper()\nend\nfunction lazy_helper() return 1 end\n')

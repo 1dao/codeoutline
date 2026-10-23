@@ -137,7 +137,7 @@ function Index:load()
         local t = cmsgpack.unpack(payload)
         assert(t.version == M.VERSION and t.root == paths.key(self.root) and type(t.files) == 'table')
         local records = {}
-        for _, rec in ipairs(t.files) do
+        local function validate(rec, destination)
             control.check()
             assert(type(rec) == 'table' and type(rec.path) == 'string')
             assert(not rec.path:find('[\\:%z]') and rec.path:sub(1, 1) ~= '/')
@@ -163,8 +163,23 @@ function Index:load()
                 assert(recv == false or type(recv) == 'string')
             end
             for _, imp in ipairs(rec.imports) do assert(type(imp.path) == 'string') end
-            records[rec.path] = rec
+            destination[rec.path] = rec
         end
+        for _, rec in ipairs(t.files) do validate(rec, records) end
+        local patches = require('codeoutline.cache_repairs').load(self.cache_path, envelope.sha256, M.VERSION, paths.key(self.root))
+        local valid, applied = pcall(function()
+            local result = {}
+            for path, rec in pairs(patches) do
+                local base = assert(records[path])
+                assert(rec.crc == base.crc and rec.size == base.size and rec.language == base.language and rec.encoding == 'gbk')
+                validate(rec, result)
+            end
+            return result
+        end)
+        if not valid and control.is_interrupted(applied) then error(applied, 0) end
+        self.repair_records = valid and applied or {}
+        for path, rec in pairs(self.repair_records) do records[path] = rec end
+        self.cache_hash = envelope.sha256
         return records
     end)
     if not ok then
@@ -187,12 +202,21 @@ function Index:save()
     if not (cmsgpack and xcompress and xcompress.deflate and xutils.temp_file and xutils.replace_file) then
         return false, 'runtime requires cmsgpack, xcompress, temp_file and replace_file'
     end
+    if self.repair_only and self.cache_hash then
+        local ok, err = require('codeoutline.cache_repairs').save(self.cache_path, self.cache_hash,
+            M.VERSION, paths.key(self.root), self.repair_records)
+        if ok then
+            self.saved_generation, self.encoding_dirty, self.repair_only = self.generation, false, false
+        end
+        return ok, err
+    end
     local list = {}
     for _, rec in pairs(self.files) do list[#list + 1] = rec end
     table.sort(list, function(a, b) return a.path < b.path end)
     local payload = cmsgpack.pack({ version = M.VERSION, root = paths.key(self.root), files = list })
     local packed = xcompress.deflate(payload, M.CACHE_COMPRESSION_LEVEL)
-    local blob = cmsgpack.pack({ codec = 'deflate', size = #payload, sha256 = xutils.sha256_hex(packed), payload = packed })
+    local hash = xutils.sha256_hex(packed)
+    local blob = cmsgpack.pack({ codec = 'deflate', size = #payload, sha256 = hash, payload = packed })
     local d = self.cache_path:match('^(.*)/[^/]*$') or '.'
     local made, err = xutils.mkdir_p(d)
     if not made then return false, err end
@@ -210,6 +234,8 @@ function Index:save()
     if not published then os.remove(tmp); return false, err end
     self.saved_generation = self.generation
     self.encoding_dirty = false
+    self.cache_hash, self.repair_records, self.repair_only = hash, {}, false
+    os.remove(self.cache_path .. '.repairs') -- a stale sidecar cannot match the new hash
     return true
 end
 
@@ -218,6 +244,7 @@ end
 -- so an interrupted refresh leaves every file either old or new. A failed
 -- table update drops the tables; the next symbols() call rebuilds them.
 function Index:commit(rel, rec)
+    self.repair_only = false
     local old = self.files[rel]
     self.files[rel] = rec
     self.generation = self.generation + 1
@@ -274,7 +301,11 @@ function Index:query_source(rel)
             local parsed = assert(ci.parse(rel, src, parse_options(src)), 'cannot parse decoded source: ' .. rel)
             parsed.size, parsed.crc, parsed.mtime, parsed.checked = rec.size, rec.crc, rec.mtime, rec.checked
             parsed.encoding = encoding
+            local repair_only = not self:needs_save() or self.repair_only
             self:commit(rel, parsed)
+            self.repair_only = repair_only
+            self.repair_records = self.repair_records or {}
+            self.repair_records[rel] = parsed
             changed = true
             self.encoding_dirty = true
         else

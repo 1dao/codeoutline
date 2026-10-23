@@ -758,17 +758,24 @@ function M.query(symbols, opts)
         -- Lua modules can target Lua files or native files identified by
         -- luaopen_* (the same resident evidence used by foreign.modules).
         -- Other targets cannot be reached through Lua import/local bindings.
-        local lua_targets, checked_native = false, {}
+        local lua_targets, native_targets, checked_native = false, false, {}
+        local lua_names = {}
         for id in pairs(wanted) do
             local f = symbols.node_file[id]
             local rec = symbols.files[f]
-            if rec.language == 'lua' then lua_targets = true; break end
+            if rec.language == 'lua' then
+                lua_targets = true
+                local local_index = id - symbols.id_of[f][1] + 1
+                for name, n in pairs(rec.lua_exports or {}) do if n == local_index then lua_names[name] = true end end
+                for _, members in ipairs(rec.lua_locals or {}) do
+                    for name, n in pairs(members) do if n == local_index then lua_names[name] = true end end
+                end
+            end
             if C_FAMILY[rec.language] and not checked_native[f] then
                 checked_native[f] = true
                 for _, node in ipairs(rec.nodes) do
-                    if node.name:match('^luaopen_(.+)$') then lua_targets = true; break end
+                    if node.name:match('^luaopen_(.+)$') then lua_targets, native_targets = true, true; break end
                 end
-                if lua_targets then break end
             end
         end
         -- Hot loop over every reference: numeric loops, hoisted fields, and the
@@ -797,7 +804,8 @@ function M.query(symbols, opts)
                 for i = first, math.min(count, first + 4095) do
                     if (names[ref_names[i]] or aliases[ref_names[i]] or aliases[refs.recv[i]]
                         or alias_refs[i]
-                        or (refs.lua_binding and refs.lua_binding[i] ~= '')) and froms[i] > 0 then
+                        or (refs.lua_binding and refs.lua_binding[i] ~= '' and
+                            (native_targets or lua_names[ref_names[i]]))) and froms[i] > 0 then
                         for _, dst in ipairs(targets(f, i, wanted) or {}) do
                             if wanted[dst] then
                                 push3(incoming, dst, symbols.id_of[f][froms[i]], refs.line[i], refs.kind[i])

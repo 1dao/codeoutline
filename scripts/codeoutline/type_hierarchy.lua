@@ -8,6 +8,7 @@ local languages = { csharp = true, java = true, kotlin = true, typescript = true
 
 function M.validate(query, opts)
     local budget = require('codeoutline.explore').validate(query, opts)
+    assert(require('codeoutline.query_filters').parse(query).text ~= '', 'type hierarchy requires an exact type name in addition to filters')
     opts = opts or {}
     for _, item in ipairs({ { 'depth', 8, 32 }, { 'max_nodes', 200, 2000 } }) do
         local value = opts[item[1]]
@@ -154,9 +155,10 @@ local function run(G, idx, query, opts, retry)
         return out
     end
     local ordered = {}
-    for i, id in ipairs(G.by_qualified[query] or G.by_name[query] or {}) do
+    local filters = require('codeoutline.query_filters').parse(query)
+    for i, id in ipairs(G.by_qualified[filters.text] or G.by_name[filters.text] or {}) do
         if i % 256 == 0 then control.check() end
-        if supported(id) and not G.nodes[id].decl then
+        if supported(id) and not G.nodes[id].decl and require('codeoutline.query_filters').id(filters, G, id) then
             if #ordered >= cap then result.node_limit_reached = true; break end
             ordered[#ordered + 1] = id
         end

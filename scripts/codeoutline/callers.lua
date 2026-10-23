@@ -6,6 +6,7 @@ local M = {}
 
 function M.validate(query, opts)
     require('codeoutline.explore').validate(query, opts)
+    assert(require('codeoutline.query_filters').parse(query).text ~= '', 'callers requires an exact symbol name in addition to filters')
     opts = opts or {}
     for _, item in ipairs({ { 'depth', 3, 8 }, { 'max_nodes', 200, 2000 } }) do
         local value = opts[item[1]]
@@ -26,9 +27,12 @@ function M.run(symbols, idx, query, opts)
     local function describe(id)
         return { id = id, name = Q.nodes[id].qualified, file = Q.files[Q.node_file[id]].path, line = Q.nodes[id].line }
     end
-    local candidates = symbols.by_qualified[query] or symbols.by_name[query] or {}
+    local filters = require('codeoutline.query_filters').parse(query)
+    local candidates = symbols.by_qualified[filters.text] or symbols.by_name[filters.text] or {}
     local ordered = {}
-    for _, id in ipairs(candidates) do ordered[#ordered + 1] = id end
+    for _, id in ipairs(candidates) do
+        if require('codeoutline.query_filters').id(filters, symbols, id) then ordered[#ordered + 1] = id end
+    end
     table.sort(ordered, function(a, b) return graph.before(Q, a, b) end)
     local frontier, seen, next_hop = {}, {}, {}
     for _, id in ipairs(ordered) do

@@ -249,6 +249,10 @@ Only query-owned configuration and bounded path caches are added; no include map
 
 ## Command line
 
+Explore, callers and type-hierarchy accept [explicit query filters](docs/QUERY-FILTERS.md)
+such as `lang:lua path:service/ connect`. They select starting symbols; dependency
+expansion still crosses files and languages, including Lua-to-C calls.
+
 ```sh
 codeoutline serve --stdio [--project PATH] [--allow-root PATH ...]
 codeoutline serve --http [--host HOST] [--port PORT] [--project PATH] [--allow-root PATH ...]

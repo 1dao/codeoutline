@@ -26,7 +26,7 @@ M.tools = array({
             max_nodes = { type = 'integer', minimum = 1, maximum = 2000, default = 200 },
             budget = { type = 'integer', minimum = 256, maximum = 262144, default = 16000 } },
             required = array({ 'query' }), additionalProperties = false } },
-    { name = 'codeoutline_explore', description = 'Query symbols, line-numbered source, call paths and neighbors. Refreshes automatically.',
+    { name = 'codeoutline_explore', description = 'Query symbols, line-numbered source, call paths and neighbors. Optional lang:/kind:/path:/name: filters select starting symbols only; dependencies may cross languages and files. Refreshes automatically.',
         inputSchema = { type = 'object', properties = { projectPath = project,
             query = { type = 'string', minLength = 1, maxLength = 4096 },
             budget = { type = 'integer', minimum = 256, maximum = 262144, default = 16000 } },

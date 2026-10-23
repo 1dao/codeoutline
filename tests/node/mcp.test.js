@@ -33,10 +33,15 @@ test('official SDK stdio: discovery, source, incremental refresh, rebuild and er
         assert.equal((await c.listTools()).tools.length, 5);
         const query = (query) => c.callTool({ name: 'codeoutline_explore', arguments: { query } });
         assert.match((await query('greet')).content[0].text, /你好世界/);
+        assert.match((await query('lang:lua path:sample.lua greet')).content[0].text, /你好世界/);
+        assert.match((await query('lang:python greet')).content[0].text, /No symbols matched/);
+        await assert.rejects(query('lang:unknown greet'), /unsupported query language/);
         await writeFile(join(f.project, 'caller.lua'), 'function caller() greet() end\nfunction upper() caller() end\n');
         const callers = await c.callTool({ name: 'codeoutline_callers', arguments: { query: 'greet', depth: 2 } });
         assert.notEqual(callers.isError, true);
         assert.match(callers.content[0].text, /Depth 2: upper/);
+        const filteredCallers = await c.callTool({ name: 'codeoutline_callers', arguments: { query: 'path:sample.lua lang:lua greet', depth: 2 } });
+        assert.match(filteredCallers.content[0].text, /Depth 2: upper/);
         await assert.rejects(c.callTool({ name: 'codeoutline_callers', arguments: { query: 'greet', depth: 0 } }), /depth/);
         await rm(join(f.project, 'caller.lua'));
         const status = JSON.parse((await c.callTool({ name: 'codeoutline_status' })).content[0].text);

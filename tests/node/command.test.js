@@ -25,6 +25,8 @@ test('unified Lua CLI: commands, JSON output, failures and MCP startup', async (
         assert.equal(JSON.parse(success('status')).files, 1);
         assert.equal(JSON.parse(success('rebuild')).cacheLoaded, false);
         assert.match(success('explore', '--query=hello_world'), /return 7/);
+        assert.match(success('explore', '--query=lang:lua path:"demo.lua" hello_world'), /return 7/);
+        assert.match(success('explore', '--query=lang:python hello_world'), /No symbols matched/);
         await writeFile(join(project, 'caller.lua'), 'function invoke() hello_world() end\n');
         assert.match(success('callers', '--query=hello_world', '--depth=2'), /Depth 1: invoke/);
         assert.notEqual(run('callers', '--query=hello_world', '--depth=0').status, 0);

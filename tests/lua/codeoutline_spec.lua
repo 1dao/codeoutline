@@ -4894,6 +4894,62 @@ fun blocked(s: Any) { register(s::saved) } }]]
     end)
 end)
 
+spec.describe('explicit query seed filters', function()
+    spec.it('parses quoted values, aliases and unknown prefixes without treating them as filters', function()
+        local filters = require('codeoutline.query_filters')
+        local parsed = filters.parse('lang:js language:py kind:function path:"Apps/My Code" name:SAVE strange:value run')
+        spec.equal(parsed.text, 'strange:value run')
+        spec.equal(parsed.languages[1], 'javascript'); spec.equal(parsed.languages[2], 'python')
+        spec.truthy(filters.node(parsed, { language = 'python', path = 'apps/my code/a.py' }, { kind = 'function', qualified = 'store.save' }))
+        spec.equal(filters.node(parsed, { language = 'lua', path = 'apps/my code/a.lua' }, { kind = 'function', qualified = 'store.save' }), false)
+        for _, query in ipairs({ 'lang:unknown run', 'path:', 'name:"unterminated', 'name:"x"tail' }) do
+            spec.equal(pcall(explore.validate, query), false, query)
+        end
+    end)
+    spec.it('filters explore seeds and callers targets while retaining Lua to C relationships', function()
+        local root = tmp_root .. '/query_filters_foreign'
+        write(root .. '/native.c', [[static int native_saved(lua_State *L) { return 0; }
+static const luaL_Reg funcs[] = {{"run", native_saved}, {NULL, NULL}};
+int luaopen_native(lua_State *L) { luaL_newlib(L, funcs); return 1; }]])
+        write(root .. '/use.lua', 'local api = require("native")\nfunction NativeFilterCaller() api.run() end')
+        write(root .. '/other.py', 'def NativeFilterCaller():\n    pass\n')
+        local opts = { cache_path = root .. '/cache.idx', lister = 'walk', budget = 65536 }
+        local idx, G = svc.get(root, opts)
+        local output, info = svc.explore(root, 'lang:lua path:use.lua kind:function NativeFilterCaller', opts)
+        spec.equal(#info.seeds, 1); spec.equal(G.files[G.node_file[info.seeds[1]]].language, 'lua')
+        spec.contains(output, 'native_saved'); spec.contains(output, 'native.c')
+        output, info = svc.callers(root, 'lang:c path:native.c native_saved', opts)
+        spec.equal(#info.targets, 1)
+        local found = false; for _, caller in ipairs(info.callers) do if caller.file == 'use.lua' then found = true end end
+        spec.truthy(found, 'a C seed must retain incoming Lua callers')
+        output, info = svc.callers(root, 'lang:python native_saved', opts); spec.equal(#info.targets, 0)
+        svc.forget(root)
+    end)
+    spec.it('filters before seed caps and leaves type ancestry outside the selected path visible', function()
+        local root = tmp_root .. '/query_filters_types'
+        write(root .. '/base.ts', 'export interface Root {}')
+        write(root .. '/child.ts', "import {Root} from './base'; export class Child implements Root {}")
+        write(root .. '/other.cs', 'class Child {}')
+        local opts = { cache_path = root .. '/cache.idx', lister = 'walk' }
+        local _, info = svc.type_hierarchy(root, 'lang:ts path:child.ts Child', opts)
+        spec.equal(#info.targets, 1); spec.equal(#info.ancestors, 1); spec.equal(info.ancestors[1].file, 'base.ts')
+        local _, filtered = svc.explore(root, 'lang:ts name:Child', opts)
+        spec.equal(#filtered.seeds, 1)
+        svc.forget(root)
+    end)
+    spec.it('reports bounded filter-only selection and supports quoted file paths', function()
+        local root = tmp_root .. '/query_filters_limits'
+        local source = {}; for i = 1, 514 do source[i] = 'function item' .. i .. '() {}' end
+        write(root .. '/with space/app.ts', table.concat(source, '\n'))
+        local opts = { cache_path = root .. '/cache.idx', lister = 'walk' }
+        local output, info = svc.explore(root, 'lang:ts path:"with space" kind:function', opts)
+        spec.truthy(info.seed_limit_reached); spec.contains(output, '512 matching candidates')
+        spec.equal(pcall(svc.callers, root, 'lang:ts', opts), false)
+        spec.equal(pcall(svc.type_hierarchy, root, 'lang:ts', opts), false)
+        svc.forget(root)
+    end)
+end)
+
 return {
     __init = function()
         local failed = spec.finish()

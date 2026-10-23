@@ -27,6 +27,7 @@ function M.validate(query, opts)
     assert(type(query) == 'string' and query:find('%S') and #query <= 4096 and not query:find('%z'),
         'query must contain 1-4096 bytes of non-empty text without NUL')
     assert(text.valid(query) == query, 'query must be valid UTF-8')
+    require('codeoutline.query_filters').parse(query)
     assert(opts == nil or type(opts) == 'table', 'options must be a table')
     local budget = M.DEFAULT_BUDGET
     if opts and opts.budget ~= nil then budget = opts.budget end
@@ -123,14 +124,17 @@ local function seed_score(G, id, exact)
     return s
 end
 
-local function find_seeds(G, query)
+local function find_seeds(G, query, filters)
+    local predicate = require('codeoutline.query_filters')
     local cands = {}          -- id -> score
     local files = {}          -- file indices named in the query
     local considered = 0
     local function consider(id, s)
         considered = considered + 1
         if considered % 128 == 0 then control.check() end
+        if not predicate.id(filters, G, id) then return end
         if not cands[id] or cands[id] < s then cands[id] = s end
+        return true
     end
     local list_terms = terms(query)
     local has_code = false
@@ -151,7 +155,11 @@ local function find_seeds(G, query)
             for i, f in ipairs(G.file_order) do
                 if i % 128 == 0 then control.check() end
                 local rec = G.files[f]
-                if rec.path == want or rec.path:sub(-(#want + 1)) == '/' .. want then files[#files + 1] = f end
+                if (rec.path == want or rec.path:sub(-(#want + 1)) == '/' .. want) and predicate.file(filters, rec) then
+                    for _, node in ipairs(rec.nodes) do
+                        if predicate.node(filters, rec, node) then files[#files + 1] = f; break end
+                    end
+                end
             end
         elseif t.kind == 'qualified' then
             local last = t.text:match('([%w_]+)$')
@@ -190,13 +198,33 @@ local function find_seeds(G, query)
                             if not lname:find(w, 1, true) then ok = false; break end
                         end
                         if ok then
-                            for _, id in ipairs(ids) do consider(id, seed_score(G, id, false) - #name * 0.05) end
-                            hits = hits + 1
+                            local accepted = false
+                            for _, id in ipairs(ids) do
+                                if consider(id, seed_score(G, id, false) - #name * 0.05) then accepted = true end
+                            end
+                            if accepted then hits = hits + 1 end
                             if hits > 200 then break end
                         end
                     end
                 end
             end
+        end
+    end
+    if query == '' then
+        local count = 0
+        for _, f in ipairs(G.file_order) do
+            control.check()
+            local rec = G.files[f]
+            if predicate.file(filters, rec) then
+                for i, id in ipairs(G.id_of[f]) do
+                    if i % 256 == 0 then control.check() end
+                    if predicate.id(filters, G, id) then
+                        if count >= 512 then filters.seed_limit_reached = true; break end
+                        consider(id, seed_score(G, id, false)); count = count + 1
+                    end
+                end
+            end
+            if filters.seed_limit_reached then break end
         end
     end
     local list = {}
@@ -316,7 +344,8 @@ function M.run(G, idx, query, opts)
     query_opts.explain = true
     G = graph.query(G, query_opts)
     file_cache = {}
-    local ranked, named_files = find_seeds(G, query)
+    local filters = require('codeoutline.query_filters').parse(query)
+    local ranked, named_files = find_seeds(G, filters.text, filters)
 
     -- Seeds: top-ranked, but at most 3 definitions per name so one generic
     -- name can't crowd out the others the query mentions.
@@ -490,7 +519,7 @@ function M.run(G, idx, query, opts)
         if items.outline then
             local ol = {}
             for _, node in ipairs(rec.nodes) do
-                if not node.parent and node.kind ~= 'macro' then
+                if not node.parent and node.kind ~= 'macro' and require('codeoutline.query_filters').node(filters, rec, node) then
                     ol[#ol + 1] = string.format('%d\t%s %s', node.line, node.kind, require('codeoutline.navigation').detail(G, f, node).sig or node.name)
                 end
                 if #ol >= 60 then ol[#ol + 1] = '\t...'; break end
@@ -581,9 +610,11 @@ function M.run(G, idx, query, opts)
     if breakpoint_cut then
         table.insert(parts, 1, 'Call-path breakpoint explanations omitted due to site/evidence/output limits.')
     end
+    if filters.seed_limit_reached then table.insert(parts, 1, 'Seed selection stopped after 512 matching candidates; narrow the query filters.') end
     local result, truncated = text.limit(table.concat(parts, '\n'), budget, omitted or #pointers > 0)
     return result, { seeds = seeds, spine = spine, shown = shown, flows = flows, truncated = truncated,
         relationships_incomplete = G.incomplete or false, query_stats = G.stats,
+        seed_limit_reached = filters.seed_limit_reached or false,
         evidence = G.report.entries, evidence_truncated = evidence_cut or G.report.truncated,
         path_search_limited = path_limited, evidence_scope = G.report.scope,
         path_breakpoints = breakpoints.entries, path_breakpoints_truncated = breakpoint_cut }

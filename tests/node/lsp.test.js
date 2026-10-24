@@ -734,6 +734,26 @@ test('LSP shares Go implicit implementations and promoted methods across draft e
     assert.equal(restored.length, 1); assert.equal(fileURLToPath(restored[0].uri), methods);
 });
 
+test('LSP resolves channel range elements from multiple return values within one second', { timeout: 30000 }, async (t) => {
+    const client = await start(t);
+    const target = join(client.project, 'api.go'), use = join(client.project, 'server.go');
+    await writeFile(target, 'package demo\ntype NewChannel interface { Accept() (int, <-chan *Request, error) }\ntype Request struct {}\nfunc (*Request) Reply(ok bool, payload []byte) error { return nil }\n');
+    const source = 'package demo\nfunc Handle(c NewChannel) {\n _, reqs, err := c.Accept()\n for req := range reqs { _ = req.Reply(false, nil) }\n}\n';
+    await writeFile(use, source);
+    await initialize(client, [client.project]); await indexed(client);
+    const uri = pathToFileURL(use).href, timings = [];
+    for (let i = 0; i < 7; i++) {
+        const before = Date.now();
+        const result = await client.request('textDocument/definition', { textDocument: { uri },
+            position: { line: 3, character: source.split('\n')[3].indexOf('Reply') + 1 } });
+        timings.push(Date.now() - before);
+        assert.equal(result.length, 1); assert.equal(fileURLToPath(result[0].uri), target);
+        assert.equal(result[0].range.start.line, 3);
+    }
+    assert.ok(Math.max(...timings) < 1000, `range definition timings: ${timings}`);
+    t.diagnostic(`range definition round trips: ${timings.join(',')}ms`);
+});
+
 test('LSP exit without shutdown fails and truncated frames fail on EOF', { timeout: 30000 }, async (t) => {
     for (const mode of ['exit', 'partial']) {
         const client = await start(t);

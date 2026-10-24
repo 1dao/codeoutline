@@ -20,8 +20,15 @@ parallel persistent method index or native-runtime change is required.
 - Struct fields and shallower declarations block deeper promotions. Same-depth
   conflicts, including repeated paths to the same method, are not guessed through.
 - Named parameters, method receivers, explicitly typed variables and simple
-  composite/new initializers supply receiver evidence. Unknown factories, chains,
-  local shadowing and unsupported parameter syntax are barriers.
+  composite/new initializers supply receiver evidence. Direct functions and methods
+  with indexed, ordinary result declarations also supply types, including individual
+  slots in multiple-result assignments. Types retain their declaring package.
+- `range` declarations infer channel elements, slice/array indices and elements,
+  and map keys/values, including named collection types and simple local aliases.
+  Loop variables are scoped to the loop body. Send-only channels, mismatched result
+  counts, unresolved factories, chains, local shadowing and unsupported syntax
+  remain barriers. Dependency source must already be indexed in a supported local
+  module; this does not download dependencies or read the global module cache.
 - Private method identity includes the declaring package, not just its written name.
   Package names alone never unify types from different directories/modules.
 

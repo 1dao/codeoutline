@@ -156,7 +156,9 @@ function M.collect(r, T)
         if kinds[n.kind] then
             local name_at = n.ti
             if T:text(name_at) == 'type' then name_at = name_at + 1 end
-            d.generic = T:text(name_at + 1) == '[' or nil
+            local bracket = name_at + 1
+            d.generic = T:text(bracket) == '[' and T.m[bracket] and T.m[bracket] > bracket + 2
+                and T.k[bracket + 1] == 'id' or nil
             local after = name_at + 1
             if d.generic then after = (T.m[after] or after) + 1 end
             d.alias = T:text(after) == '=' or nil
@@ -247,12 +249,26 @@ function M.collect(r, T)
         local entry = data.bindings[#data.bindings]
         if entry and entry.name == T:text(name_at) then entry.at = scope == 0 and 0 or T.e[ending] end
     end
-    local function initializer(a, b)
+    local function initializer(a, b, depth)
+        depth = (depth or 0) + 1
+        if depth > 16 then return nil end
+        if T:text(a) == '(' and T.m[a] == b then return initializer(a + 1, b - 1, depth) end
+        if a == b and T.k[a] == 'id' then
+            return { kind = 'binding_value', name = T:text(a), at = T.s[a] - 1 }
+        end
         local address = T:text(a) == '&'
         if address then a = a + 1 end
         if T:text(a) == 'new' and T:text(a + 1) == '(' and T.m[a + 1] == b then
             local ty = type_expr(T, a + 2, b - 1)
             return ty and { kind = 'pointer', child = ty, builtin_new = true, at = T.s[a] - 1 } or nil
+        end
+        if not address then
+            local open = T:text(a + 1) == '(' and a + 1
+                or T:text(a + 1) == '.' and T.k[a + 2] == 'id' and T:text(a + 3) == '(' and a + 3
+            if T.k[a] == 'id' and open and T.m[open] == b then
+                return { kind = 'call_result', name = T:text(open - 1), recv = open == a + 3 and T:text(a) or nil,
+                    at = T.s[a] - 1, result = 1, arity = 1 }
+            end
         end
         local open = a
         while open <= b and T:text(open) ~= '{' do open = open + 1 end
@@ -260,14 +276,29 @@ function M.collect(r, T)
         local ty = type_expr(T, a, open - 1)
         return ty and (address and { kind = 'pointer', child = ty } or ty) or nil
     end
+    local function initializers(a, b, count)
+        local values, start, i = {}, a, a
+        while i <= b + 1 do
+            if i == b + 1 or T:text(i) == ',' then
+                values[#values + 1] = initializer(start, i - 1) or false; start = i + 1
+            elseif T.m[i] and T.m[i] > i then i = T.m[i] end
+            i = i + 1
+        end
+        if #values == 1 and values[1] and values[1].kind == 'call_result' then
+            local call = values[1]; values = {}
+            for index = 1, count do values[index] = { kind = call.kind, name = call.name, recv = call.recv,
+                at = call.at, result = index, arity = count } end
+        elseif #values ~= count then return {} end
+        return values
+    end
     local function variable(first, finish)
         local after = first + 1
         while T:text(after) == ',' and T.k[after + 1] == 'id' do after = after + 2 end
         local equal = after
         while equal <= finish and T:text(equal) ~= '=' do equal = equal + 1 end
         local ty = type_expr(T, after, equal - 1)
-        if not ty and after == equal then ty = initializer(equal + 1, finish) end
-        for x = first, after - 1, 2 do declaration(x, finish, ty) end
+        local values = not ty and after == equal and initializers(equal + 1, finish, (after - first + 1) / 2) or {}
+        for x = first, after - 1, 2 do declaration(x, finish, ty or values[(x - first) / 2 + 1]) end
     end
     for i = 1, T.n do
         if i % 4096 == 0 then control.check() end
@@ -311,8 +342,21 @@ function M.collect(r, T)
         elseif T:text(i) == ':=' and T.k[i - 1] == 'id' then
             local first, finish = i - 1, statement_end(T, i + 1, T.n)
             while T:text(first - 1) == ',' and T.k[first - 2] == 'id' do first = first - 2 end
-            local ty = first == i - 1 and initializer(i + 1, finish) or nil
-            for x = first, i - 1, 2 do declaration(x, finish, ty) end
+            if T:text(i + 1) == 'range' and T:text(first - 1) == 'for' then
+                local open = i + 2
+                while open <= T.n and T:text(open) ~= '{' and T:text(open) ~= ';' do
+                    if T.m[open] and T.m[open] > open then open = T.m[open] end
+                    open = open + 1
+                end
+                local value = T:text(open) == '{' and T.m[open] and initializer(i + 2, open - 1)
+                if T:text(open) == '{' and T.m[open] then
+                    for x = first, i - 1, 2 do binding(T:text(x), value and { kind = 'range_value', child = value,
+                        result = (x - first) / 2 + 1, arity = (i - first + 1) / 2 }, x, T.s[open] - 1, T.e[T.m[open]]) end
+                else for x = first, i - 1, 2 do declaration(x, finish) end end
+            else
+                local values = initializers(i + 1, finish, (i - first + 1) / 2)
+                for x = first, i - 1, 2 do declaration(x, finish, values[(x - first) / 2 + 1]) end
+            end
         end
     end
     table.sort(functions, function(a, b) return a.first < b.first end)
@@ -329,7 +373,8 @@ function M.collect(r, T)
             ref.binding = 'go:?'; data.evidence[index] = ref.binding; r.has_bindings = true
         elseif ref.recv then
             ref.binding = 'go:recv:' .. (T.s[ref.tok] - 1); r.has_bindings = true
-            if T:text(ref.tok - 3) == '.' or T:text(ref.tok - 3) == ')' or T:text(ref.tok - 3) == ']' then ref.binding = 'go:?' end
+            if T.el[ref.tok - 3] == T.l[ref.tok - 2] and (T:text(ref.tok - 3) == '.'
+                or T:text(ref.tok - 3) == ')' or T:text(ref.tok - 3) == ']') then ref.binding = 'go:?' end
             data.evidence[index] = ref.binding
         elseif ref.kind == 'call' then
             ref.binding = 'go:call:' .. (T.s[ref.tok] - 1)
@@ -601,7 +646,64 @@ function M.context(G, ctx, report)
         return result
     end
     C.method_set = set
-    function C.receiver(f, name, at)
+    local value_type
+    value_type = function(f, ty, path, depth)
+        path, depth = path or {}, (depth or 0) + 1
+        if not ty or depth > M.MAX_DEPTH or expired() then return nil end
+        if ty.kind == 'binding_value' then
+            local entry = C.bound(f, ty.name, ty.at)
+            if not entry or entry.generic or path[entry] then return nil end
+            path[entry] = true
+            local result, origin = value_type(f, entry.type, path, depth)
+            path[entry] = nil; return result, origin
+        elseif ty.kind == 'call_result' then
+            local ids
+            if ty.recv then
+                local receiver = C.receiver(f, ty.recv, ty.at, path, depth)
+                if receiver == false or receiver and receiver.type_expr then return nil end
+                if receiver then
+                    ids = {}; for _, member in ipairs(C.members(receiver, f, ty.name)) do
+                        if member.kind == 'method' then ids[#ids + 1] = member.id end
+                    end
+                else ids = modules.resolve(G, f, ty.name, ty.recv, ctx) end
+            elseif not C.bound(f, ty.name, ty.at) and not shadowed(f, ty.name, ty.at) then
+                ids = modules.resolve(G, f, ty.name, nil, ctx)
+            end
+            if not ids or #ids ~= 1 then return nil end
+            local d, origin = info(ids[1]), G.node_file[ids[1]]
+            if not d or d.generic or not d.signature or #d.signature.results ~= ty.arity then return nil end
+            return value_type(origin, d.signature.results[ty.result], path, depth)
+        elseif ty.kind == 'range_value' then
+            local collection, origin = value_type(f, ty.child, path, depth)
+            local visited = {}
+            for _ = 1, M.MAX_DEPTH do
+                if not collection then return nil end
+                if collection.kind ~= 'name' then break end
+                local ids, known = named(origin, collection.name, collection.at)
+                if #ids == 0 and not known and collection.name == 'string' then
+                    if ty.arity > 2 then return nil end
+                    return { kind = 'builtin', name = ty.result == 1 and 'int' or 'int32' }, origin
+                end
+                if #ids ~= 1 or visited[ids[1]] then return nil end
+                local d = info(ids[1]); visited[ids[1]] = true
+                if not d or d.generic then return nil end
+                collection, origin = d.underlying, G.node_file[ids[1]]
+            end
+            if not collection then return nil end
+            if collection.kind == 'pointer' and collection.child.kind == 'array' then collection = collection.child end
+            if collection.kind == 'channel' then
+                if collection.extra == 'send' or ty.arity ~= 1 then return nil end
+                return collection.child, origin
+            elseif collection.kind == 'slice' or collection.kind == 'array' or collection.kind == 'map' then
+                if ty.arity > 2 then return nil end
+                return ty.result == 1 and (collection.kind == 'map' and collection.key or { kind = 'builtin', name = 'int' })
+                    or collection.child, origin
+            end
+            return nil
+        end
+        return ty, f
+    end
+    function C.receiver(f, name, at, path, depth)
         local entry = C.bound(f, name, at)
         if entry == false then return false end
         if not entry and shadowed(f, name, at) then return false end
@@ -614,8 +716,11 @@ function M.context(G, ctx, report)
                 if shadowed then return false end
             end
         else ty = { kind = 'name', name = name, at = at } end
+        local origin
+        ty, origin = value_type(f, ty, path, depth)
+        if not ty then return false end
         local pointer = ty.kind == 'pointer'
-        local id = resolve_type(f, pointer and ty.child or ty)
+        local id = resolve_type(origin, pointer and ty.child or ty)
         if not id then
             if not entry and modules.aliases(G, f, ctx)[name] then return nil end
             return false

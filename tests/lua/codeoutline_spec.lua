@@ -5950,6 +5950,115 @@ func (Box) Run() {}
             spec.equal(C.satisfies(type_id(G, 'Box'), type_id(G, name), true), false, name)
         end
     end)
+    spec.it('follows method result slots through channel ranges in the declaring package', function()
+        local G = build({ ['app/server.go'] = [[package app
+import gossh "crypto/ssh"
+func Handle(newChan gossh.NewChannel) {
+    channel, reqs, err := newChan.Accept()
+    for req := range reqs { req.Reply(false, nil) }
+}
+]], ['crypto/ssh/channel.go'] = [[package ssh
+type NewChannel interface { Accept() (Channel, <-chan *Request, error) }
+type Channel interface {}
+type Request struct {}
+func (r *Request) Reply(ok bool, payload []byte) error { return nil }
+]], ['app/other.go'] = [[package app
+type Request struct {}
+func (r *Request) Reply(ok bool, payload []byte) error { return nil }
+]] })
+        spec.equal(edge_names(G, type_id(G, 'Handle')), 'NewChannel.Accept,Request.Reply')
+        local Q = graph.query(G); local id = type_id(G, 'Handle')
+        for i = 1, #Q.out[id], graph.EDGE do
+            local target = Q.out[id][i]
+            if G.nodes[target].name == 'Reply' then spec.equal(G.files[G.node_file[target]].path, 'crypto/ssh/channel.go') end
+        end
+    end)
+    spec.it('derives range keys and values from slices, arrays, maps and named collections', function()
+        local G = build({ ['a.go'] = [[package p
+type Item struct {}
+func (*Item) Run() {}
+type Items []*Item
+type Alias = Items
+type Key struct {}
+func (Key) KeyRun() {}
+func Slice(items []*Item) { for _, item := range items { item.Run() } }
+func Array(items *[3]*Item) { for _, item := range items { item.Run() } }
+func Mapping(items map[Key]*Item) { for key, item := range items { key.KeyRun(); item.Run() } }
+func Named(items Alias) { for _, item := range items { item.Run() } }
+func Indices(items []*Item) { for index := range items { index.Run() } }
+]] })
+        for _, name in ipairs({ 'Slice', 'Array', 'Named' }) do spec.equal(edge_names(G, type_id(G, name)), 'Item.Run', name) end
+        spec.equal(edge_names(G, type_id(G, 'Mapping')), 'Item.Run,Key.KeyRun')
+        spec.equal(edge_names(G, type_id(G, 'Indices')), '')
+    end)
+    spec.it('follows direct factory results and aliases while keeping loop bindings scoped', function()
+        local G = build({ ['a.go'] = [[package p
+type Item struct {}
+func (*Item) Run() {}
+type Other struct {}
+func (Other) Run() {}
+func Items() <-chan *Item { return nil }
+func Pair() (int, *Item) { return 0, nil }
+func Use(item Other) {
+    items := Items()
+    copy := items
+    for item := range copy { item.Run() }
+    item.Run()
+    _, value := Pair()
+    value.Run()
+    var _, another = Pair()
+    another.Run()
+    for direct := range Items() { direct.Run() }
+    first, second := &Item{}, &Other{}
+    first.Run(); second.Run()
+}
+]] })
+        spec.equal(edge_names(G, type_id(G, 'Use')), 'Item.Run,Item.Run,Item.Run,Item.Run,Item.Run,Items,Items,Other.Run,Other.Run,Pair,Pair')
+    end)
+    spec.it('blocks unresolved, send-only, wrong-arity and shadowed range sources', function()
+        local G = build({ ['a.go'] = [[package p
+type Item struct {}
+func (*Item) Run() {}
+func Items() <-chan *Item { return nil }
+func Generic[T any]() <-chan *Item { return nil }
+func Missing() { items := unknown(); for item := range items { item.Run() } }
+func Send(items chan<- *Item) { for item := range items { item.Run() } }
+func Arity(items <-chan *Item) { for _, item := range items { item.Run() } }
+func Wrong() { _, items := Items(); for item := range items { item.Run() } }
+func Shadow(Items func() <-chan *Item) { items := Items(); for item := range items { item.Run() } }
+func Unsupported() { items := Generic[int](); for item := range items { item.Run() } }
+func Local(items <-chan *Item) { { items := unknown(); for item := range items { item.Run() } } }
+]] })
+        for _, name in ipairs({ 'Missing', 'Send', 'Arity', 'Shadow', 'Local' }) do spec.equal(edge_names(G, type_id(G, name)), '', name) end
+        spec.equal(edge_names(G, type_id(G, 'Wrong')), 'Items')
+        -- Generic calls remain deliberately unresolved by the return-type path.
+        local _, Q = edge_names(G, type_id(G, 'Unsupported'))
+        for i = 1, #Q.out[type_id(G, 'Unsupported')], graph.EDGE do
+            spec.truthy(G.nodes[Q.out[type_id(G, 'Unsupported')][i]].name ~= 'Run')
+        end
+    end)
+    spec.it('resolves package factories and promoted result methods without confusing builtin indices', function()
+        local G = build({ ['app/a.go'] = [[package app
+import api "lib"
+type int struct {}
+func (int) Run() {}
+func Packages() { items := api.Items(); for item := range items { item.Run() } }
+func Promoted(c api.Wrapper) { items := c.Items(); for item := range items { item.Run() } }
+func Index(items []*api.Item) { for index := range items { index.Run() } }
+func String(text string) { for _, char := range text { char.Run() } }
+]], ['lib/a.go'] = [[package lib
+type Item struct {}
+func (*Item) Run() {}
+type Base struct {}
+func (Base) Items() <-chan *Item { return nil }
+type Wrapper struct { Base }
+func Items() <-chan *Item { return nil }
+]] })
+        spec.equal(edge_names(G, type_id(G, 'Packages')), 'Item.Run,Items')
+        spec.equal(edge_names(G, type_id(G, 'Promoted')), 'Base.Items,Item.Run')
+        spec.equal(edge_names(G, type_id(G, 'Index')), '')
+        spec.equal(edge_names(G, type_id(G, 'String')), '')
+    end)
     spec.it('checks function types and blocks shadowed builtins or local callables', function()
         local G, C = build({ ['a.go'] = [[package p
 type I interface { Apply(func(int) error) }

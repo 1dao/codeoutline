@@ -622,6 +622,48 @@ func (GoOther) Read(int) string { return "" }
         navigation.close('go-method-draft')
         result = request('r.Read', 'lsp_implementation'); spec.equal(#result, 1)
     end)
+    spec.it('navigates Go range variables through imported multi-result methods and draft return changes', function()
+        local prefix = 'go-range-results/'
+        assert(xutils.mkdir_p(nav_root .. '/' .. prefix .. 'ssh'))
+        nav_write(prefix .. 'go.mod', 'module example.test/range\ngo 1.22\n')
+        local api = [[package ssh
+type NewChannel interface { Accept() (Channel, <-chan *Request, error) }
+type Channel interface {}
+type Request struct {}
+func (*Request) Reply(ok bool, payload []byte) error { return nil }
+type Other struct {}
+func (*Other) Reply(ok bool, payload []byte) error { return nil }
+]]
+        nav_write(prefix .. 'ssh/channel.go', api)
+        local source = [[package main
+import gossh "example.test/range/ssh"
+func Handle(newChan gossh.NewChannel) {
+    channel, reqs, err := newChan.Accept()
+    for req := range reqs { _ = req.Reply(false, nil) }
+}
+]]
+        nav_write(prefix .. 'server.go', source)
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local doc = docs.read(nav_root .. '/' .. prefix .. 'server.go')
+        local position = doc:position(assert(source:find('req.Reply', 1, true)) + 3)
+        local function definition(session)
+            return nav({ method = 'lsp_definition', session = session, uri = doc.uri, position = position })
+        end
+        local result = definition()
+        spec.equal(#result, 1); spec.equal(result[1].uri, nav_uri(prefix .. 'ssh/channel.go'))
+        spec.equal(result[1].range.start.line, 4)
+        local completion = require('codeoutline.completion').complete({ root = nav_root, uri = doc.uri,
+            position = doc:position(assert(source:find('req.Reply', 1, true)) + 3) })
+        local found = false; for _, item in ipairs(completion.items) do if item.label == 'Reply' then found = true end end
+        spec.truthy(found)
+        local target = nav_uri(prefix .. 'ssh/channel.go')
+        navigation.sync({ session = 'go-range-draft', open = { [target] = 1 }, changed = {
+            [target] = { language = 'go', version = 1, source = api:gsub('<%-chan %*Request', '<-chan *Other') } } })
+        result = definition('go-range-draft')
+        spec.equal(#result, 1); spec.equal(result[1].range.start.line, 6)
+        navigation.close('go-range-draft')
+        result = definition(); spec.equal(#result, 1); spec.equal(result[1].range.start.line, 4)
+    end)
     spec.it('warms navigation caches without bypassing source validation or dependency limits', function()
         nav_write('WarmTarget.lua', 'local M = {}\nfunction M.warm_save() end\nreturn M\n')
         local source = "local api = dofile('WarmTarget.lua')\napi.warm_save()\n"

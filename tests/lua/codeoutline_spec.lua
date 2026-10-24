@@ -1642,6 +1642,190 @@ void function_pointer(Callback a) { a->save(); }
     end)
 end)
 
+spec.describe('query-owned C/C++ call-result receivers', function()
+    local receivers = require('codeoutline.cpp_receivers')
+    local function build(files)
+        local records = {}
+        for path, source in pairs(files) do records[path] = ci.parse(path, source, { ordinary_bindings = true }) end
+        return graph.build({ files = records })
+    end
+    local function targets(G, name)
+        local Q, result = graph.query(G), {}
+        for i = 1, #Q.out[G.by_name[name][1]], graph.EDGE do result[#result + 1] = G.nodes[Q.out[G.by_name[name][1]][i]].qualified end
+        table.sort(result); return table.concat(result, ','), Q
+    end
+    spec.it('narrows pointer, value, reference and chained method results to their declared class', function()
+        local G = build({ ['a.cpp'] = [[struct Manager {
+ void Run() {}
+ Manager* Next();
+};
+struct Other { void Run() {} };
+Manager* Factory();
+Manager Value();
+Manager& Reference();
+void Use() { Factory()->Run(); Value().Run(); Reference().Run(); Factory()->Next()->Run(); }
+]] })
+        spec.equal(targets(G, 'Use'), 'Factory,Factory,Manager::Next,Manager::Run,Manager::Run,Manager::Run,Manager::Run,Reference,Value')
+    end)
+    spec.it('respects namespace and include visibility for function return types', function()
+        local G = build({ ['chosen.hpp'] = 'namespace chosen { struct Manager { void Run() {} }; Manager* Factory(); }',
+            ['wrong.hpp'] = 'namespace wrong { struct Manager { void Run() {} }; Manager* Factory(); }',
+            ['use.cpp'] = '#include "chosen.hpp"\nvoid Use() { chosen::Factory()->Run(); }' })
+        spec.equal(targets(G, 'Use'), 'chosen::Factory,chosen::Manager::Run')
+    end)
+    spec.it('follows C structure tags and ordinary typedefs to fields', function()
+        local source = [[struct Record { int value; };
+typedef struct Record Record;
+struct Other { int value; };
+Record* Factory(void);
+Record Value(void);
+void Use(void) { int a = Factory()->value; int b = Value().value; }
+]]
+        local G = build({ ['a.c'] = source }); local ctx = {}
+        ctx.ordinary = require('codeoutline.ordinary_bindings').context(G, ctx)
+        local C = receivers.context(G, ctx)
+        for _, fragment in ipairs({ 'Factory()->value', 'Value().value' }) do
+            local at = assert(source:find(fragment, 1, true)) + #fragment - #'value' - 1
+            local ids = C.resolve(1, G.by_name.Use[1], 'value', 'cxx:expr:' .. at)
+            spec.equal(#ids, 1); spec.equal(G.nodes[ids[1]].qualified, 'Record.value')
+        end
+    end)
+    spec.it('requires all visible overload return types to agree and preserves pointer levels', function()
+        local G = build({ ['a.cpp'] = [[struct A { void Run() {} };
+struct B { void Run() {} };
+A* Ambiguous(int);
+B* Ambiguous(char);
+A* Agreed(int);
+A* Agreed(char);
+A** Double();
+auto Unknown();
+void Bad() { Ambiguous(1)->Run(); Double()->Run(); Unknown()->Run(); }
+void Good() { Agreed(1)->Run(); }
+]] })
+        local bad = targets(G, 'Bad'); spec.truthy(not bad:find('::Run', 1, true))
+        spec.contains(targets(G, 'Good'), 'A::Run')
+    end)
+    spec.it('keeps shadowed function pointers and unsupported expressions from same-name fallback', function()
+        local G = build({ ['a.cpp'] = [[struct Manager { void Run() {} };
+Manager* Factory();
+template<class T> Manager* Generic();
+void Shadow(Manager* (*Factory)()) { Factory()->Run(); }
+void Unsupported(Manager* item, Manager** items) { items[0]->Run(); static_cast<Manager*>(item)->Run(); Generic<int>()->Run(); }
+]] })
+        local shadow = targets(G, 'Shadow'); spec.truthy(not shadow:find('::Run', 1, true))
+        local unsupported = targets(G, 'Unsupported'); spec.truthy(not unsupported:find('::Run', 1, true))
+    end)
+    spec.it('selects const methods for const returned objects and supports trailing return types', function()
+        local G = build({ ['a.cpp'] = [[struct Manager {
+ void Run() {}
+ void Run() const {}
+};
+const Manager* ConstFactory();
+auto Trailing() -> Manager*;
+void UseConst() { ConstFactory()->Run(); }
+void UseTrailing() { Trailing()->Run(); }
+]] })
+        local text, Q = targets(G, 'UseConst'); spec.equal(text, 'ConstFactory,Manager::Run')
+        for i = 1, #Q.out[G.by_name.UseConst[1]], graph.EDGE do
+            local n = G.nodes[Q.out[G.by_name.UseConst[1]][i]]
+            if n.name == 'Run' then spec.equal(n.line, 3) end
+        end
+        spec.contains(targets(G, 'UseTrailing'), 'Manager::Run')
+    end)
+    spec.it('bounds source evidence and propagates cancellation', function()
+        local G = build({ ['api.hpp'] = 'struct Manager { void Run() {} }; Manager* Factory();',
+            ['use.cpp'] = '#include "api.hpp"\nvoid Use() { Factory()->Run(); }' })
+        for _, field in ipairs({ 'MAX_FILES', 'MAX_BYTES', 'MAX_TIME_MS' }) do
+            local old = receivers[field]; receivers[field] = field == 'MAX_TIME_MS' and -1 or 1
+            local ok, err = pcall(function()
+                local text, Q = targets(G, 'Use'); spec.truthy(not text:find('::Run', 1, true)); spec.truthy(Q.incomplete)
+            end)
+            receivers[field] = old; assert(ok, err)
+        end
+        local control = require('codeoutline.control'); local stopped = control.cancelled()
+        control.callback = function() error(stopped, 0) end
+        local ok, err = pcall(targets, G, 'Use'); control.callback = nil
+        spec.equal(ok, false); spec.equal(err, stopped)
+    end)
+    spec.it('keeps return evidence out of saved indexes and refreshes changed declarations', function()
+        local root = tmp_root .. '/cpp_return_refresh'
+        write(root .. '/api.hpp', 'struct A { void Run() {} }; struct B { void Run() {} };\nA* Factory();')
+        write(root .. '/use.cpp', '#include "api.hpp"\nvoid Use() { Factory()->Run(); }')
+        local options = { cache_path = root .. '/cache.idx', lister = 'walk' }
+        local idx, G = svc.get(root, options)
+        local before = xutils.json_pack(idx.files)
+        spec.contains(targets(G, 'Use'), 'A::Run'); spec.equal(xutils.json_pack(idx.files), before)
+        for _, rec in pairs(idx.files) do spec.nil_value(rec.cpp_receivers); spec.nil_value(rec.cpp_declaration_tokens) end
+        idx:save(); svc.forget(root); idx, G = svc.get(root, options); spec.truthy(idx.cache_loaded)
+        spec.contains(targets(G, 'Use'), 'A::Run')
+        write(root .. '/api.hpp', 'struct A { void Run() {} }; struct B { void Run() {} };\nB* Factory();')
+        idx, G = svc.get(root, options); spec.contains(targets(G, 'Use'), 'B::Run')
+        svc.forget(root)
+    end)
+    spec.it('upgrades lightweight alias evidence before full bindings and still reads macro summaries', function()
+        local root = tmp_root .. '/cpp_alias_summary'
+        write(root .. '/a.hpp', '#define READY 1\nnamespace n { struct A { void Run() {} }; }\nusing Alias = n::A;\nAlias* Factory();\n')
+        local idx, G = svc.get(root, { cache_path = root .. '/cache.idx', lister = 'walk' })
+        local f = G.file_index['a.hpp']
+        local storage = { entries = {}, order = {}, bytes = 0 }
+        local C = require('codeoutline.ordinary_bindings').context(G, {}, nil, { cache = storage })
+        local aliases = C.cpp_aliases(f)
+        spec.equal(#aliases, 1); spec.equal(aliases[1].name, 'Alias')
+        spec.truthy(storage.entries[G.files[f].nodes].data.cpp_aliases_only)
+        spec.truthy(#C.macros(f) > 0)
+        local detail = C.data(f)
+        spec.truthy(detail.cpp_receivers); spec.nil_value(detail.cpp_aliases_only)
+        spec.equal(C.cpp_aliases(f), detail.cpp_aliases)
+        spec.equal(#storage.order, 1); spec.truthy(storage.bytes <= 8388608)
+        write(root .. '/a.hpp', '#define READY 0\nnamespace n { struct B { void Run() {} }; }\nusing Alias = n::B;\nAlias* Factory();\n')
+        local fresh = require('codeoutline.ordinary_bindings').context(G, {}, nil, { cache = storage })
+        local ok, err = pcall(fresh.cpp_aliases, f)
+        spec.equal(ok, false); spec.contains(err, 'source changed')
+        svc.forget(root)
+    end)
+    spec.it('preserves const qualification when continuing through returned-object fields', function()
+        local G = build({ ['a.cpp'] = [[struct Leaf { void Run() {} };
+struct Holder { Leaf child; Leaf* pointer; };
+const Holder* Factory();
+void ValueChild() { Factory()->child.Run(); }
+void PointerChild() { Factory()->pointer->Run(); }
+]] })
+        local text = targets(G, 'ValueChild'); spec.truthy(not text:find('Leaf::Run', 1, true))
+        spec.contains(targets(G, 'PointerChild'), 'Leaf::Run')
+    end)
+    spec.it('includes class using-overloads when proving an intermediate return type', function()
+        local G = build({ ['a.cpp'] = [[struct A { void Run() {} };
+struct B { void Run() {} };
+struct Base { B* Next(char); };
+struct Provider : Base { using Base::Next; A* Next(int); };
+Provider* Factory();
+void Use() { Factory()->Next(1)->Run(); }
+]] })
+        local text = targets(G, 'Use'); spec.truthy(not text:find('::Run', 1, true))
+    end)
+    spec.it('retains imported namespace directives while skipping unrelated alias headers', function()
+        local G = build({ ['types.hpp'] = 'namespace api { struct Manager { void Run() {} }; }',
+            ['using.hpp'] = '#include "types.hpp"\nusing namespace api;',
+            ['use.cpp'] = '#include "using.hpp"\nManager* Factory();\nvoid Use() { Factory()->Run(); }' })
+        spec.truthy(G.files[G.file_index['using.hpp']].cpp_using_directives)
+        spec.contains(targets(G, 'Use'), 'api::Manager::Run')
+    end)
+    spec.it('limits failed nested-class lookup to the enclosing class source', function()
+        local source = '#include "api.hpp"\n#include "aliases.hpp"\nstruct Maker { void Use() { Global::Get()->Run(); } };'
+        local G = build({ ['api.hpp'] = 'struct Global { static Global* Get(); void Run() {} };',
+            ['aliases.hpp'] = 'using Irrelevant = Global;', ['use.cpp'] = source })
+        local ctx, read = {}, {}
+        ctx.ordinary = require('codeoutline.ordinary_bindings').context(G, ctx)
+        local aliases = ctx.ordinary.cpp_aliases
+        ctx.ordinary.cpp_aliases = function(f) read[G.files[f].path] = true; return aliases(f) end
+        local f = G.file_index['use.cpp']
+        local at = assert(source:find('->Run', 1, true)) + 1
+        local ids = receivers.context(G, ctx).resolve(f, G.by_qualified['Maker::Use'][1], 'Run', 'cxx:expr:' .. at)
+        spec.equal(#ids, 1); spec.equal(G.nodes[ids[1]].qualified, 'Global::Run')
+        spec.nil_value(read['aliases.hpp'])
+    end)
+end)
+
 spec.describe('C++ namespace and using lookup', function()
     local function build(files)
         local records = {}

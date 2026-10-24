@@ -63,15 +63,51 @@ function M.context(G, ctx, source, options)
         C.stats.files, C.stats.bytes = #order, storage.bytes
         return entry.data
     end
+    local function remember(rec, raw, data, weight)
+        local key = rec.nodes
+        if cache[key] then
+            storage.bytes = storage.bytes - cache[key].weight; cache[key] = nil
+            for i, old in ipairs(order) do if old == key then table.remove(order, i); break end end
+        end
+        while #order > 0 and (#order >= max_files or storage.bytes + weight > max_bytes) do
+            local old = table.remove(order, 1); storage.bytes = storage.bytes - cache[old].weight; cache[old] = nil
+        end
+        if weight <= max_bytes then
+            local checksum = xcompress and xcompress.crc32 and xcompress.crc32(raw) or xutils.sha256_hex(raw)
+            cache[key] = { data = data, weight = weight, checksum = checksum, size = #raw, language = rec.language }
+            order[#order + 1] = key; storage.bytes = storage.bytes + weight; validated[key] = true
+        end
+        C.stats.parses, C.stats.files, C.stats.bytes = C.stats.parses + 1, #order, storage.bytes
+        return data
+    end
+    function C.cpp_aliases(f)
+        local rec = G.files[f]
+        if rec.ordinary_bindings or not G.root and not source then return rec.cpp_aliases or {} end
+        local cached = cached_data(rec)
+        if cached then return cached.cpp_aliases or {} end
+        local raw = read_source(f)
+        cached = cached_data(rec, raw)
+        if cached then return cached.cpp_aliases or {} end
+        local parsed = assert(require('codeoutline.parse').parse(rec.path, raw,
+            { ranges = false, omit_signatures = true, cpp_aliases_only = true, language = rec.language }))
+        assert(#parsed.nodes == #rec.nodes, 'source changed; refresh index before alias query: ' .. rec.path)
+        for i, n in ipairs(parsed.nodes) do
+            assert(n.qualified == rec.nodes[i].qualified and n.line == rec.nodes[i].line,
+                'source changed; refresh index before alias query: ' .. rec.path)
+        end
+        local data = remember(rec, raw, { cpp_aliases = parsed.cpp_aliases, cpp_aliases_only = true },
+            #raw + #(parsed.cpp_aliases or {}) * 256)
+        return data.cpp_aliases or {}
+    end
     function C.macros(f)
         local rec = G.files[f]
         if rec.cpp_macros then return rec.cpp_macros end
         local cached = cached_data(rec)
-        if cached then return cached.cpp_macros end
+        if cached and not cached.cpp_aliases_only then return cached.cpp_macros end
         if not G.root and not source then return nil end
         local raw = read_source(f)
         cached = cached_data(rec, raw)
-        if cached then return cached.cpp_macros end
+        if cached and not cached.cpp_aliases_only then return cached.cpp_macros end
         -- Macro visibility needs directive events, not a second syntax tree,
         -- receiver bindings or implementation evidence for the whole header.
         return require('codeoutline.cpp_macros').summary(rec, raw)
@@ -79,13 +115,12 @@ function M.context(G, ctx, source, options)
     function C.data(f)
         local rec = G.files[f]
         if rec.ordinary_bindings then return rec end -- explicit in-memory parse
-        local key, cached = rec.nodes, cached_data(rec)
-        if cached then return cached end
+        local cached = cached_data(rec)
+        if cached and not cached.cpp_aliases_only then return cached end
         if not G.root and not source then return rec end
         local raw = read_source(f)
         cached = cached_data(rec, raw)
-        if cached then return cached end
-        local checksum = xcompress and xcompress.crc32 and xcompress.crc32(raw) or xutils.sha256_hex(raw)
+        if cached and not cached.cpp_aliases_only then return cached end
         local parsed = assert(require('codeoutline.parse').parse(rec.path, raw,
             { ranges = false, ordinary_bindings = true, language = rec.language }))
         local function check(ok) assert(ok, 'source changed; refresh index before binding query: ' .. rec.path) end
@@ -104,6 +139,7 @@ function M.context(G, ctx, source, options)
             csharp_scopes = parsed.csharp_scopes, csharp_parameters = parsed.csharp_parameters, csharp_access = parsed.csharp_access }
         data.implementation_evidence = parsed.implementation_evidence
         data.go_methods = parsed.go_methods
+        data.cpp_receivers = parsed.cpp_receivers
         data.cpp_macros = parsed.cpp_macros
         data.automatic_events = parsed.automatic_events
         data.lua_callback_loops = parsed.lua_callback_loops
@@ -116,22 +152,10 @@ function M.context(G, ctx, source, options)
             + #(parsed.cpp_macros or {}) * 256
             + (parsed.go_methods and (#parsed.nodes * 384 + #parsed.go_methods.bindings * 256
                 + (parsed.go_methods.receiver_weight or 0)) or 0)
+            + (parsed.cpp_receivers and parsed.cpp_receivers.weight or 0)
             + #(parsed.automatic_events or {}) * 512
             + (parsed.lua_callback_loops and parsed.lua_callback_loops.weight or 0)
-        if cache[key] then
-            storage.bytes = storage.bytes - cache[key].weight; cache[key] = nil
-            for i, old in ipairs(order) do if old == key then table.remove(order, i); break end end
-        end
-        while #order > 0 and (#order >= max_files or storage.bytes + weight > max_bytes) do
-            local old = table.remove(order, 1); storage.bytes = storage.bytes - cache[old].weight; cache[old] = nil
-        end
-        if weight <= max_bytes then
-            cache[key] = { data = data, weight = weight, checksum = checksum, size = #raw, language = rec.language }
-            order[#order + 1] = key; storage.bytes = storage.bytes + weight
-            validated[key] = true
-        end
-        C.stats.parses, C.stats.files, C.stats.bytes = C.stats.parses + 1, #order, storage.bytes
-        return data
+        return remember(rec, raw, data, weight)
     end
     function C.evidence(f, i)
         local rec = G.files[f]
@@ -150,6 +174,12 @@ function M.context(G, ctx, source, options)
         if js(rec) and kind ~= 'ref' and (kind ~= 'call' or value ~= '?') then return value end
         if js(rec) and kind ~= 'ref' and not next(alias_hints(f)) then return value end
         local recv = rec.refs.recv[i]
+        if (rec.language == 'c' or rec.language == 'cpp') and kind == 'member_call' and not recv then
+            local data = require('codeoutline.cpp_receivers').context(G, ctx).data(f)
+            if not data then return value end
+            return data.evidence[i] or value
+        end
+        if rec.language == 'c' and kind == 'member_call' then return evidence(C.data(f), i) or value end
         if rec.language == 'python' and (recv == 'self' or recv == 'cls') then return value end
         if rec.language == 'cpp' and recv == 'this' then return value end
         if rec.language == 'rust' and require('codeoutline.rust_packages').owner(G, f, ctx) then

@@ -318,8 +318,11 @@ local function cursor(doc, offset, V, f, include_inactive)
         while (T:text(first - 1) == '.' or T:text(first - 1) == '::') and T.k[first - 2] == 'id' do first = first - 2 end
         local name = require('codeoutline.csharp_bindings').name(T.src:sub(T.s[first], T.e[t]))
         evidence = name and 'cs:name:' .. name .. '\0' .. (T.s[first] - 1)
-    elseif rec.language == 'cpp' and (not recv or T:text(t - 1) == '::') then
-        evidence = require('codeoutline.cpp_types').evidence(T, t)
+    elseif C_FAMILY[rec.language] then
+        evidence = require('codeoutline.cpp_receivers').evidence(T, t)
+        if not evidence and rec.language == 'cpp' and (not recv or T:text(t - 1) == '::') then
+            evidence = require('codeoutline.cpp_types').evidence(T, t)
+        end
     end
     return { from = from, name = T:text(t), kind = kind, recv = recv, first = T.s[t] - 1, last = T.e[t], evidence = evidence }
 end
@@ -1190,7 +1193,7 @@ function handlers.lsp_definition(req)
             if hit then result[#result + 1] = { uri = target_doc.uri, range = target_doc:range(hit.name_start, hit.name_end) } end
         end
         return result, info.truncated or V.js_context.include_incomplete or V.js_context.workspace_incomplete
-            or V.js_context.go_incomplete or V.js_context.go_methods_incomplete or V.js_context.rust_incomplete
+            or V.js_context.go_incomplete or V.js_context.go_methods_incomplete or V.js_context.cpp_receivers_incomplete or V.js_context.rust_incomplete
     end
     if c.decl and is_decl(V.nodes[targets[1]]) then
         -- From a declaration, go to its definitions.
@@ -1202,7 +1205,7 @@ function handlers.lsp_definition(req)
     end
     local result = {}
     for _, id in ipairs(targets) do result[#result + 1] = (location(V, id)) end
-    return result, V.js_context.include_incomplete or V.js_context.workspace_incomplete or V.js_context.go_incomplete or V.js_context.go_methods_incomplete or V.js_context.rust_incomplete
+    return result, V.js_context.include_incomplete or V.js_context.workspace_incomplete or V.js_context.go_incomplete or V.js_context.go_methods_incomplete or V.js_context.cpp_receivers_incomplete or V.js_context.rust_incomplete
 end
 
 -- Follow unmatched delimiters up to the cursor. Commas in nested calls,
@@ -1390,13 +1393,13 @@ function handlers.lsp_outgoing(req)
             end
         end
     end
-    return result, V.js_context.include_incomplete or V.js_context.workspace_incomplete or V.js_context.go_incomplete or V.js_context.go_methods_incomplete or V.js_context.rust_incomplete
+    return result, V.js_context.include_incomplete or V.js_context.workspace_incomplete or V.js_context.go_incomplete or V.js_context.go_methods_incomplete or V.js_context.cpp_receivers_incomplete or V.js_context.rust_incomplete
 end
 
 function handlers.lsp_references(req)
     local V, _, c, targets = at(req)
     if not V then return {} end
-    if #targets == 0 then return {}, V.js_context.workspace_incomplete or V.js_context.go_incomplete or V.js_context.go_methods_incomplete or V.js_context.rust_incomplete end
+    if #targets == 0 then return {}, V.js_context.workspace_incomplete or V.js_context.go_incomplete or V.js_context.go_methods_incomplete or V.js_context.cpp_receivers_incomplete or V.js_context.rust_incomplete end
     local set = {}
     for _, id in ipairs(targets) do
         if not REFERENCE[V.nodes[id].kind] then

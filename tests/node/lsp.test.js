@@ -774,6 +774,32 @@ test('LSP navigates methods on Go call results within one second', { timeout: 30
     t.diagnostic(`call-result definition round trips: ${timings.join(',')}ms`);
 });
 
+test('LSP narrows C and C++ call-result members within one second', { timeout: 30000 }, async (t) => {
+    const client = await start(t);
+    const header = join(client.project, 'api.hpp'), use = join(client.project, 'use.cpp');
+    await writeFile(header, 'struct Manager { void Run() {} };\nstruct Other { void Run() {} };\nManager* Factory();\n');
+    const source = '#include "api.hpp"\nvoid Use() { Factory()->Run(); }\n';
+    await writeFile(use, source);
+    const cHeader = join(client.project, 'c_api.h'), cUse = join(client.project, 'use.c');
+    await writeFile(cHeader, 'struct Record { int value; };\nstruct COther { int value; };\nstruct Record* CFactory(void);\n');
+    const cSource = '#include "c_api.h"\nvoid CUse(void) { int n = CFactory()->value; }\n';
+    await writeFile(cUse, cSource);
+    await initialize(client, [client.project]); await indexed(client);
+    const timings = [];
+    for (const [path, target, text, symbol] of [[use, header, source, 'Run'], [cUse, cHeader, cSource, 'value']]) {
+        for (let i = 0; i < 7; i++) {
+            const before = Date.now();
+            const result = await client.request('textDocument/definition', { textDocument: { uri: pathToFileURL(path).href },
+                position: { line: 1, character: text.split('\n')[1].indexOf(symbol) + 1 } });
+            timings.push(Date.now() - before);
+            assert.equal(result.length, 1); assert.equal(fileURLToPath(result[0].uri), target);
+            assert.equal(result[0].range.start.line, 0);
+        }
+    }
+    assert.ok(Math.max(...timings) < 1000, `C/C++ call-result timings: ${timings}`);
+    t.diagnostic(`C/C++ call-result definition round trips: ${timings.join(',')}ms`);
+});
+
 test('LSP exit without shutdown fails and truncated frames fail on EOF', { timeout: 30000 }, async (t) => {
     for (const mode of ['exit', 'partial']) {
         const client = await start(t);

@@ -842,8 +842,23 @@ end
 
 function Completion:entries(target)
     if not target then return {} end
-    if target.go_blocked then return {} end
+    if target.go_blocked or target.cxx_blocked then return {} end
     if target.go_receiver then return require('codeoutline.go_methods').context(self.V, self.V.js_context).members(target.go_receiver, self.f) end
+    if target.cxx_receiver then
+        local receivers = require('codeoutline.cpp_receivers').context(self.V, self.V.js_context)
+        local out, names = {}, {}
+        for _, entry in ipairs(self:members({ target.cxx_receiver.id })) do
+            if self:expired() then break end
+            if not names[entry.name] then
+                names[entry.name] = true
+                for _, id in ipairs(receivers.members(target.cxx_receiver, entry.name, target.cxx_op)) do
+                    out[#out + 1] = { name = self.V.nodes[id].name, kind = self.V.nodes[id].kind,
+                        node = self.V.nodes[id], file = self.V.node_file[id] }
+                end
+            end
+        end
+        return out
+    end
     if target.rust_module then return require('codeoutline.rust_resolution').members(self.V, target.rust_module, self.V.js_context) end
     if target.cpp_namespace then
         local bindings, result = require('codeoutline.cpp_types'), {}
@@ -996,6 +1011,16 @@ function M.complete(req)
                 local receiver = methods.context(V, V.js_context).expression_receiver(f, expression)
                 target = receiver and { go_receiver = receiver } or { go_blocked = true }
             end
+        elseif self.language == 'c' or self.language == 'cpp' then
+            local receivers = require('codeoutline.cpp_receivers')
+            local expression, _, _, call = receivers.expression(T, op - 1)
+            if call then
+                local source = self.fn and V.id_of[f][self.fn]
+                local receiver = receivers.context(V, V.js_context).receiver(f, expression, source)
+                local valid = receiver and (text_of(T, op) == '->' and receiver.pointer == 1
+                    or text_of(T, op) == '.' and receiver.pointer == 0)
+                target = valid and { cxx_receiver = receiver, cxx_op = text_of(T, op) } or { cxx_blocked = true }
+            end
         end
         target = target or chain and self:chain(chain)
         entries = self:entries(target)
@@ -1102,7 +1127,8 @@ function M.complete(req)
         end
     end
     return { items = items, incomplete = self.incomplete or V.js_context.include_incomplete
-        or V.js_context.workspace_incomplete or V.js_context.go_incomplete or V.js_context.go_methods_incomplete or V.js_context.rust_incomplete }
+        or V.js_context.workspace_incomplete or V.js_context.go_incomplete or V.js_context.go_methods_incomplete
+        or V.js_context.cpp_receivers_incomplete or V.js_context.rust_incomplete }
 end
 
 navigation.register('lsp_completion', function(req)

@@ -205,6 +205,7 @@ local function cpp_decl(T, r, i, j, parent)
     local first = T:text(i)
     if first == 'typedef' then return c.declaration(T, r, i, j, parent) end
     if first == 'using' then
+        if T:text(i + 1) == 'namespace' then r.cpp_using_directives = true end
         if T.k[i + 1] == 'id' and is(T, i + 2, '=') then
             common.add_node(r, T, { kind = 'typedef', name = T:text(i + 1), ni = i + 1, parent = parent, ti = i, tj = j, sig = common.sig(T, i, j) })
         else r.cpp_imports = true end

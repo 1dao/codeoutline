@@ -111,6 +111,7 @@ function M.evidence(T, t)
 end
 
 function M.aliases(G, f, ctx)
+    if ctx and ctx.ordinary and ctx.ordinary.cpp_aliases then return ctx.ordinary.cpp_aliases(f) end
     return (ctx and ctx.ordinary and ctx.ordinary.data(f) or G.files[f]).cpp_aliases or {}
 end
 
@@ -146,6 +147,17 @@ function M.resolve(G, f, written, opts)
             lists[file] = list
         end
         return lists[file]
+    end
+    local directive_lists = {}
+    local function directive_files(file)
+        if not directive_lists[file] then
+            local list = { file }
+            for _, g in ipairs(files(file)) do
+                if g ~= file and (G.files[g].cpp_using_directives or opts.aliases) then list[#list + 1] = g end
+            end
+            directive_lists[file] = list
+        end
+        return directive_lists[file]
     end
     local function add(ids, more)
         local seen = {}; for _, id in ipairs(ids) do seen[id] = true end
@@ -190,7 +202,25 @@ function M.resolve(G, f, written, opts)
                 end
             end
         end
-        for _, g in ipairs(files(file)) do
+        -- A visible class declaration cannot be changed by an alias elsewhere.
+        -- Class-scope using declarations can only occur in that class's source;
+        -- do not fully inspect every transitive header to look up A::member.
+        local class_only = #ids > 0
+        for _, id in ipairs(ids) do if not classes[G.nodes[id].kind] then class_only = false; break end end
+        if class_only then return ids, true end
+        local alias_files, seen_files = {}, {}
+        local owner = qualified:match('^(.*)::[^:]+$')
+        while owner and #alias_files == 0 do
+            for _, id in ipairs(G.by_name[owner:match('([^:]+)$')] or {}) do
+                local n, g = G.nodes[id], G.node_file[id]
+                if classes[n.kind] and n.qualified == owner and visible(file, g) and not seen_files[g] then
+                    seen_files[g] = true; alias_files[#alias_files + 1] = g
+                end
+            end
+            owner = owner:match('^(.*)::[^:]+$')
+        end
+        if #alias_files == 0 then alias_files = files(file) end
+        for _, g in ipairs(alias_files) do
             control.check()
             for _, alias in ipairs(aliases(g)) do
                 if alias.kind and alias.kind ~= 'directive' and not alias.local_alias
@@ -269,7 +299,7 @@ function M.resolve(G, f, written, opts)
             end
             -- using-directives contribute candidates only in their lexical
             -- scope. Imported headers contribute namespace/file scope, never locals.
-            for _, g in ipairs(files(file)) do
+            for _, g in ipairs(directive_files(file)) do
                 for _, alias in ipairs(aliases(g)) do
                     if alias.kind == 'directive' and alias.scope == (scope or '')
                         and not (g == f and alias.at == opts.exclude)

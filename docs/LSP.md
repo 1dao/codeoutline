@@ -184,6 +184,11 @@ overlay never writes to the resident tables.
   are ordered and stop at the first existing header. Explicit paths suppress
   whole-project suffix guesses, even when the selected header is outside the index.
   See the README for directory rules, limits and a multi-project example.
+- C/C++ member navigation and completion can follow ordinary declared function
+  results, such as `get_manager()->run()` and C `get_record()->value`. The same
+  evidence resolves agent call edges. Namespaces and includes constrain lookup;
+  conflicting return types and unsupported expressions do not fall back to
+  unrelated same-name members. See [supported cases and bounds](CPP-RECEIVERS.md).
 - C/C++ macro calls can navigate to possible macro definitions when build flags
   or unconfigured include paths are ambiguous, including object-like proxy macros.
   Alternative headers are evaluated independently within the existing query limits;

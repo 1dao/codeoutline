@@ -26,6 +26,7 @@ function M.new(path, language, opts)
     return { path = path, language = language, nodes = {}, refs = {}, imports = {},
         ranges = not opts or opts.ranges ~= false, collect_dispatch = opts and opts.dispatch,
         dispatch_only = opts and opts.dispatch_only, collect_static_dispatch = opts and opts.static_dispatch,
+        cpp_aliases_only = opts and opts.cpp_aliases_only,
         ordinary_bindings = opts and opts.ordinary_bindings,
         collect_foreign = opts and opts.foreign, omit_signatures = opts and opts.omit_signatures }
 end
@@ -42,6 +43,10 @@ end
 -- ti/tj: token range the node covers (used for ref attribution, then dropped).
 -- ni/nj: declaration name tokens; range_end overrides a synthetic block end.
 function M.add_node(r, T, f)
+    if r.ordinary_bindings and (r.language == 'c' or r.language == 'cpp') then
+        r.cpp_declaration_tokens = r.cpp_declaration_tokens or {}
+        r.cpp_declaration_tokens[#r.nodes + 1] = f.ni or f.ti
+    end
     local parent = f.parent and r.nodes[f.parent]
     local sep = f.sep or '.'
     f.qualified = parent and (parent.qualified .. sep .. f.name) or ((r.prefix and (r.prefix .. sep) or '') .. f.name)
@@ -63,6 +68,7 @@ end
 -- Record every call site in token range [a, b].
 local MEMBER = { ['.'] = true, ['->'] = true, ['::'] = true, ['?.'] = true }
 function M.add_calls(r, T, a, b)
+    if r.cpp_aliases_only then return end
     local skip = r.skip_calls
     local member = r.member_ops or MEMBER    -- Lua adds ':' (obj:method())
     for _, x in ipairs(T:calls(a, b)) do
@@ -88,6 +94,7 @@ end
 local BEFORE = { [','] = true, ['('] = true, ['='] = true, ['{'] = true, ['&'] = true }
 local AFTER = { [','] = true, [')'] = true, ['}'] = true, [';'] = true }
 function M.add_value_refs(r, T, a, b)
+    if r.cpp_aliases_only then return end
     local seen = {}
     for _, x in ipairs(T:idents(a, b)) do
         local p, q = x - 1, x + 1
@@ -134,6 +141,11 @@ end
 
 -- Drop parser-internal fields so the result is plain data.
 function M.finish(r, T)
+    if r.cpp_aliases_only then
+        require('codeoutline.cpp_types').collect(r, T)
+        r.cpp_aliases_only = nil
+        return r
+    end
     if T then require('codeoutline.function_values').collect(r, T) end
     if T and r.collect_foreign and (r.language == 'c' or r.language == 'cpp') then
         require('codeoutline.foreign').collect(r, T)
@@ -154,6 +166,7 @@ function M.finish(r, T)
         require('codeoutline.cpp_macros').collect(r, T)
         require('codeoutline.python_bindings').collect(r, T)
         require('codeoutline.cpp_bindings').collect(r, T)
+        require('codeoutline.cpp_receivers').collect(r, T)
         if r.language == 'csharp' then require('codeoutline.csharp_bindings').collect(r, T) end
         require('codeoutline.implementations').collect(r, T)
         require('codeoutline.automatic_events').collect(r, T)

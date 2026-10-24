@@ -363,6 +363,10 @@ local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired, accept,
         strategy = 'python binding'
         exact = require('codeoutline.python_bindings').resolve(G, f, evidence, js_context)
     end
+    if exact == nil and C_FAMILY[G.files[f].language] and evidence and evidence:match('^cxx:expr:') then
+        strategy = 'c/c++ call-result receiver'
+        exact, binding_reason = require('codeoutline.cpp_receivers').context(G, js_context).resolve(f, src_id, name, evidence)
+    end
     if exact == nil and G.files[f].language == 'cpp' then
         strategy = evidence and evidence:match('^cpp:name:') and 'c++ namespace/import' or 'c++ declared receiver'
         exact, binding_reason = require('codeoutline.cpp_bindings').resolve(G, f, src_id, name, evidence, deps, js_context, accept)
@@ -671,7 +675,8 @@ function M.query(symbols, opts)
         local found, reason, macro_state = resolve_ref(symbols, f, ids[refs.from[i]], refs.name[i], refs.kind[i],
             refs.recv[i] or nil, direct, paired, nil, evidence, js_context, refs.line[i])
         if macros.incomplete then Q.incomplete = true end
-        if js_context.workspace_incomplete or js_context.go_incomplete or js_context.go_methods_incomplete or js_context.rust_incomplete then Q.incomplete = true end
+        if js_context.workspace_incomplete or js_context.go_incomplete or js_context.go_methods_incomplete
+            or js_context.cpp_receivers_incomplete or js_context.rust_incomplete then Q.incomplete = true end
         if report and explain and (refs.kind[i] == 'call' or refs.kind[i] == 'member_call') then
             if (not found or #found == 0) and explain == true then
                 report:add({ source = ids[refs.from[i]], line = refs.line[i], call = refs.name[i], reason = reason or 'unresolved reference',
@@ -831,7 +836,8 @@ function M.query(symbols, opts)
         -- selective name test first. Checkpoints run per file and per chunk.
         local files = symbols.files
         local candidates = js_context.ordinary.candidates(wanted)
-        if js_context.workspace_incomplete or js_context.go_incomplete or js_context.go_methods_incomplete then Q.incomplete = true end
+        if js_context.workspace_incomplete or js_context.go_incomplete or js_context.go_methods_incomplete
+            or js_context.cpp_receivers_incomplete then Q.incomplete = true end
         for _, f in ipairs(symbols.file_order) do
             control.check()
             local language = files[f].language

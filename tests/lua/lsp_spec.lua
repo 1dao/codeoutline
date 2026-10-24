@@ -697,6 +697,49 @@ func (*Other) IsChild() bool { return true }
         navigation.close('go-chain-draft')
         result = definition(); spec.equal(#result, 1); spec.equal(result[1].range.start.line, 3)
     end)
+    spec.it('shares C++ factory-result types across definitions, completion and draft changes', function()
+        local prefix = 'cpp-call-results/'
+        assert(xutils.mkdir_p(nav_root .. '/' .. prefix))
+        local api = [[namespace picked {
+struct Manager { void Run() {} int state; };
+struct Other { void Run() {} };
+Manager* Factory();
+}
+]]
+        nav_write(prefix .. 'api.hpp', api)
+        local source = '#include "api.hpp"\nvoid Use() { picked::Factory()->Run(); }\n'
+        nav_write(prefix .. 'use.cpp', source)
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local doc = docs.read(nav_root .. '/' .. prefix .. 'use.cpp')
+        local position = doc:position(assert(source:find('->Run', 1, true)) + 2)
+        local function definition(session)
+            return nav({ method = 'lsp_definition', session = session, uri = doc.uri, position = position })
+        end
+        local result = definition()
+        spec.equal(#result, 1); spec.equal(result[1].uri, nav_uri(prefix .. 'api.hpp')); spec.equal(result[1].range.start.line, 1)
+        local completion = require('codeoutline.completion').complete({ root = nav_root, uri = doc.uri, position = position })
+        local labels = {}; for _, item in ipairs(completion.items) do labels[item.label] = true end
+        spec.truthy(labels.Run); spec.truthy(labels.state)
+        local target = nav_uri(prefix .. 'api.hpp')
+        navigation.sync({ session = 'cpp-result-draft', open = { [target] = 1 }, changed = {
+            [target] = { language = 'cpp', version = 1, source = api:gsub('Manager%* Factory', 'Other* Factory') } } })
+        result = definition('cpp-result-draft')
+        spec.equal(#result, 1); spec.equal(result[1].range.start.line, 2)
+        navigation.close('cpp-result-draft')
+        result = definition(); spec.equal(#result, 1); spec.equal(result[1].range.start.line, 1)
+    end)
+    spec.it('narrows C returned-structure fields without changing unrelated same-name declarations', function()
+        local prefix = 'c-call-results/'
+        assert(xutils.mkdir_p(nav_root .. '/' .. prefix))
+        nav_write(prefix .. 'api.h', 'struct Record { int value; };\nstruct Other { int value; };\nstruct Record* Factory(void);\n')
+        local source = '#include "api.h"\nvoid Use(void) { int n = Factory()->value; }\n'
+        nav_write(prefix .. 'use.c', source)
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local doc = docs.read(nav_root .. '/' .. prefix .. 'use.c')
+        local result = nav({ method = 'lsp_definition', uri = doc.uri,
+            position = doc:position(assert(source:find('->value', 1, true)) + 2) })
+        spec.equal(#result, 1); spec.equal(result[1].uri, nav_uri(prefix .. 'api.h')); spec.equal(result[1].range.start.line, 0)
+    end)
     spec.it('warms navigation caches without bypassing source validation or dependency limits', function()
         nav_write('WarmTarget.lua', 'local M = {}\nfunction M.warm_save() end\nreturn M\n')
         local source = "local api = dofile('WarmTarget.lua')\napi.warm_save()\n"

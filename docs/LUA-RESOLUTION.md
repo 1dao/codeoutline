@@ -22,6 +22,34 @@ Supported forms include `local lib = require('pkg.lib')`, parenthesis-free
 calls use the returned member map. Plain quoted literal paths and Lua long-string
 literals are accepted; escaped quoted strings are currently not decoded.
 
+A returned object can also come from a cache or factory. Unconditional members
+attached after its last possible replacement are known exports, for example:
+
+```lua
+local M = rawget(_G, 'router')
+if type(M) ~= 'table' then M = {} end
+function M.set_log_prefix(prefix) end
+return M
+```
+
+Conditional member definitions are not definite exports. Replacing the object
+discards older members; later conditional member writes invalidate that member.
+
+One member can be extracted directly from a static loader result:
+
+```lua
+local to_bool = dofile('misc.lua').to_bool
+local convert = require('misc').to_bool
+to_bool(true)
+convert(false)
+```
+
+Both the selected member and subsequent calls resolve to the exported function,
+including renamed local bindings. Selecting the value records a reference, not
+an execution edge. Parameter/local shadowing and reassignment block stale aliases.
+Further selectors, member calls in the initializer, operators and dynamic paths
+are not treated as the extracted function itself.
+
 `dofile` paths are normalized for `./` and `../` and interpreted relative to the
 project root by default, not relative to the caller's source file. Configure the
 program's working directory in project-root `.codeoutline.json` when needed:
@@ -50,7 +78,7 @@ reassignment suppress unrelated name guesses. Conditional or multiple top-level
 returns are not treated as a definite module contract. Resolution does not
 evaluate source, follow arbitrary Lua metatables, infer dynamic exports, propagate arbitrary
 variable aliases, or model control flow and mutations across function calls.
-Multiple assignment/destructuring-style bindings and chained module expressions
+Multiple assignment/destructuring-style bindings and deeper module expressions
 are outside the supported binding forms. Missing edges do not prove that code
 cannot run.
 

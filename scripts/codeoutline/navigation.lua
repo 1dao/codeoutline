@@ -1095,6 +1095,8 @@ function handlers.lsp_definition(req)
         local _, definitions = require('codeoutline.cpp_macros').resolve(V, f, c.name, line, V.js_context)
         if definitions and #definitions > 0 then targets = definitions end
     end
+    -- Selecting a loader's member asks for that value, not the imported file.
+    if #targets == 0 and c and c.evidence and c.evidence:match('^lua%-value:') then return {} end
     local importer = false
     if c and not c.decl then
         -- `require`/`dofile` themselves name the file they load, not a same-named project function.

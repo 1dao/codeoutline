@@ -3084,6 +3084,55 @@ spec.describe('Lua module return bindings', function()
         spec.equal(edges_from(G, 'run'), 'actual@scripts/lib.lua close@scripts/lib.lua')
         spec.equal(#graph.query(G).inn[G.by_name.actual[1]], 3)
     end)
+    spec.it('exports unconditional members attached after cached module initialization', function()
+        local G = build({
+            ['router.lua'] = "local M = rawget(_G, 'router')\nif type(M) ~= 'table' then M = {} end\n"
+                .. 'function M.set_log_prefix(prefix) return M end\nreturn M',
+            ['other.lua'] = 'local M = {}\nfunction M.set_log_prefix() end\nreturn M',
+            ['main.lua'] = "local router = dofile('router.lua')\nfunction run() router.set_log_prefix('MAIN') end",
+        })
+        spec.equal(edges_from(G, 'run'), 'set_log_prefix@router.lua')
+        local shadowed = ci.parse('shadowed.lua', 'local M = factory()\nfunction M.save() end\n'
+            .. 'do local M = {} function M.save() end M.save = other end\nreturn M')
+        spec.equal(shadowed.nodes[shadowed.lua_exports.save].line, 2, 'an inner local table does not replace the returned object')
+        for _, source in ipairs({
+            'local M = factory()\nfunction M.save() end\nM = other\nreturn M',
+            'local M = factory()\nif flag then function M.save() end end\nreturn M',
+            'local M = factory()\nfunction M.save() end\nif flag then M.save = other end\nreturn M',
+            'local M = factory()\nfunction M.save() end\nif flag then M = other end\nreturn M',
+        }) do
+            spec.equal(next(ci.parse('invalid.lua', source).lua_exports), nil)
+        end
+    end)
+    spec.it('binds extracted loader members and renamed calls without guessing call results', function()
+        local G = build({
+            ['misc.lua'] = 'local M = {}\nfunction M.to_bool() end\nreturn M',
+            ['wrong.lua'] = 'function to_bool() end',
+            ['main.lua'] = "local to_bool = dofile('misc.lua').to_bool\n"
+                .. "local convert = require('misc').to_bool\n"
+                .. 'function run() to_bool() end\nfunction renamed() convert() end\n'
+                .. 'function shadow(to_bool) to_bool() end\n'
+                .. "function replaced() local to_bool = dofile('misc.lua').to_bool; to_bool = other; to_bool() end\n"
+                .. "function called() local to_bool = dofile('misc.lua').to_bool(); to_bool() end\n"
+                .. "function chain() local to_bool = dofile('misc.lua').to_bool.nested; to_bool() end\n"
+                .. "function custom(dofile) local to_bool = dofile('misc.lua').to_bool; to_bool() end\n",
+        })
+        spec.equal(edges_from(G, 'run'), 'to_bool@misc.lua')
+        spec.equal(edges_from(G, 'renamed'), 'to_bool@misc.lua')
+        for _, name in ipairs({ 'shadow', 'called', 'chain', 'custom' }) do
+            -- called() executes the exported function in its initializer; it
+            -- must not treat the function's unknown result as another alias.
+            spec.equal(edges_from(G, name), '', name)
+        end
+        local Q = graph.query(G)
+        local replaced = Q.out[G.by_name.replaced[1]]
+        spec.equal(#replaced, 3); spec.equal(replaced[3], 'ref', 'the initializer references a function but the reassigned call is blocked')
+        local target
+        for _, id in ipairs(G.by_name.to_bool) do
+            if G.files[G.node_file[id]].path == 'misc.lua' then target = id; break end
+        end
+        spec.equal(#Q.inn[assert(target)], 9)
+    end)
     spec.it('does not infer dynamic paths, loadfile tables or shadowed loaders and receivers', function()
         local G = build({
             ['a.lua'] = 'local M = {}\nfunction M.save() end\nreturn M',

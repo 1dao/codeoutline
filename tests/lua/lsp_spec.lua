@@ -1425,6 +1425,46 @@ int luaopen_native_test(lua_State *L) { luaL_setfuncs(L, methods, 0); luaL_newli
         spec.equal(#found, 1); spec.equal(found[1].range.start.line, 2)
         navigation.close('lua-module')
     end)
+    spec.it('navigates cached module members and extracted dofile values through cache reload and drafts', function()
+        local module = "local M = rawget(_G, 'router')\nif type(M) ~= 'table' then M = {} end\n"
+            .. 'function M.set_log_prefix(prefix) return M end\nreturn M\n'
+        nav_write('CachedRouter.lua', module)
+        nav_write('ExtractedMisc.lua', 'local M = {}\nfunction M.to_bool(value) return value end\nreturn M\n')
+        nav_write('WrongExtracted.lua', 'function to_bool() end\nfunction set_log_prefix() end\n')
+        local source = "local router = dofile('CachedRouter.lua')\n"
+            .. "local to_bool = dofile('ExtractedMisc.lua').to_bool\n"
+            .. "local convert = require('ExtractedMisc').to_bool\n"
+            .. "router.set_log_prefix('MAIN')\nlocal enabled = to_bool(true)\nlocal also = convert(false)\n"
+        nav_write('ExtractedClient.lua', source)
+        local options = { cache_path = nav_root .. '/cache.idx', lister = 'walk' }
+        service.refresh(nav_root, options); service.resident(nav_root):save(); service.forget(nav_root)
+        service.refresh(nav_root, options)
+        local doc = docs.read(nav_root .. '/ExtractedClient.lua')
+        local function definition(fragment, skip)
+            return nav({ method = 'lsp_definition', session = 'extracted-values', uri = doc.uri,
+                position = doc:position(assert(source:find(fragment, 1, true)) - 1 + (skip or 0)) })
+        end
+        local router = definition('router.set_log_prefix', 7)
+        spec.equal(#router, 1); spec.equal(router[1].uri, nav_uri('CachedRouter.lua'))
+        spec.equal(range_text('CachedRouter.lua', router[1].range), 'set_log_prefix')
+        for _, item in ipairs({ { ').to_bool', 2 }, { 'to_bool(true)', 0 }, { 'convert(false)', 0 } }) do
+            local found = definition(item[1], item[2])
+            spec.equal(#found, 1); spec.equal(found[1].uri, nav_uri('ExtractedMisc.lua'))
+            spec.equal(range_text('ExtractedMisc.lua', found[1].range), 'to_bool')
+        end
+        local refs = nav({ method = 'lsp_references', session = 'extracted-values', uri = nav_uri('ExtractedMisc.lua'),
+            position = { line = 1, character = 12 }, includeDeclaration = false })
+        spec.equal(#refs, 4, 'both imported values and both calls refer to the exported function')
+        local uri = nav_uri('ExtractedMisc.lua')
+        navigation.sync({ session = 'extracted-values', open = { [uri] = 1 }, changed = {
+            [uri] = { version = 1, language = 'lua', source = '\nlocal M = {}\nfunction M.to_bool(value) return value end\nreturn M\n' } } })
+        spec.equal(definition('to_bool(true)')[1].range.start.line, 2)
+        navigation.sync({ session = 'extracted-values', open = { [uri] = 2 }, changed = {
+            [uri] = { version = 2, language = 'lua', source = 'return {}\n' } } })
+        spec.equal(#definition('to_bool(true)'), 0)
+        spec.equal(#definition(').to_bool', 2), 0)
+        navigation.close('extracted-values')
+    end)
     spec.it('resolves g_exports aliases as bare globals', function()
         local module = 'do\n\tlocal function design_list(player) return player end\n'
             .. '\tg_exports.phantom_get_design_list = design_list\n'

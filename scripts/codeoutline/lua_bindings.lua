@@ -27,6 +27,11 @@ local function literal(T, i)
     return s:sub(2, -2)
 end
 
+local function value_end(T, i)
+    local tail = T:text(i)
+    return (T.k[i] ~= 'op' or tail == ';' or tail == ',') and tail ~= 'and' and tail ~= 'or'
+end
+
 -- Shared lexical table-member lookup for normal references and query-only
 -- configured callback aliases. Results are local parser node indices.
 function M.local_members(nodes, scopes, name, token, scope, finish)
@@ -42,11 +47,14 @@ end
 
 function M.collect(r, T, bm)
     r.lua_imports, r.lua_exports, r.lua_locals = {}, {}, {}
-    local scopes, stack, params, bindings = {}, {}, {}, {}
+    local scopes, stack, params, bindings, function_scopes = {}, {}, {}, {}, {}
     for i = 1, T.n do
         if stack[#stack] and bm[stack[#stack]] == i then stack[#stack] = nil end
         scopes[i] = stack[#stack] or 0
-        if bm[i] and bm[i] > i then stack[#stack + 1] = i end
+        if bm[i] and bm[i] > i then
+            function_scopes[i] = T:text(i) == 'function' or function_scopes[scopes[i]]
+            stack[#stack + 1] = i
+        end
         if T:text(i) == 'function' and T.k[i] == 'kw' then
             local p = i + 1
             while p < (bm[i] or i) and T:text(p) ~= '(' do p = p + 1 end
@@ -55,6 +63,13 @@ function M.collect(r, T, bm)
     end
     local function add(name, token, scope, hint, imported)
         bindings[name] = bindings[name] or {}
+        -- Reassignment/parameter shadowing must not revive a global name
+        -- after a loader value was bound under this lexical name.
+        if hint == '?' and not imported and T:text(token + 2) ~= 'function' then
+            for _, b in ipairs(bindings[name]) do
+                if b.imported and b.token < token and b.a <= token and b.b >= token then imported = true end
+            end
+        end
         bindings[name][#bindings[name] + 1] = { token = token, a = scope, b = bm[scope] or T.n, hint = hint, imported = imported }
     end
     for i = 1, T.n do
@@ -75,18 +90,23 @@ function M.collect(r, T, bm)
                     local close = T:text(call + 1) == '(' and T.m[call + 1] or arg
                     if close and ((close == arg) or (close == arg + 1)
                         or (close > arg and T:text(arg + 1) == ',')) and path then
-                        -- A concatenation/operation after the loader is not its return value.
-                        local tail = T:text(close + 1)
-                        if tail ~= '..' and tail ~= '.' and tail ~= ':' and tail ~= 'or' and tail ~= 'and'
-                            and tail ~= '(' and tail ~= '[' and tail ~= '+' and tail ~= '-' and tail ~= '*' and tail ~= '/' then
+                        local member = T:text(close + 1) == '.' and T.k[close + 2] == 'id' and close + 2
+                        -- One selected member is a value alias. Calls, nested
+                        -- selectors and operations produce a different value.
+                        if value_end(T, (member or close) + 1) then
                             local shadowed = false
                             for _, b in ipairs(bindings[base] or {}) do
                                 if b.token < call and b.a <= call and b.b >= call then shadowed = true end
                             end
                             if not shadowed then
-                                r.lua_imports[#r.lua_imports + 1] = { path = path, kind = kind }
-                                hint = 'lua:' .. #r.lua_imports
+                                r.lua_imports[#r.lua_imports + 1] = { path = path, kind = kind,
+                                    member = member and T:text(member) or nil }
+                                hint = (member and 'lua-value:' or 'lua:') .. #r.lua_imports
                                 if kind == 'loadfile' then hint = '?' end
+                                if member and kind ~= 'loadfile' then
+                                    r.refs[#r.refs + 1] = { tok = member, name = T:text(member), kind = 'ref',
+                                        line = T:line(member), lua_binding = hint }
+                                end
                             end
                         end
                     end
@@ -108,13 +128,16 @@ function M.collect(r, T, bm)
         end
     end
     for _, ref in ipairs(r.refs) do
-        do
+        if not ref.lua_binding then
             local best
             for _, b in ipairs(bindings[ref.recv or ref.name] or {}) do
                 if b.token <= ref.tok and b.a <= ref.tok and b.b >= ref.tok
                     and (not best or b.a > best.a or (b.a == best.a and b.token > best.token)) then best = b end
             end
-            if best and (ref.recv or best.imported) then ref.lua_binding = ref.recv and best.hint or '?' end
+            if best and (ref.recv or best.imported) then
+                local value = best.hint:match('^lua%-value:')
+                ref.lua_binding = value and (not ref.recv and best.hint or '?') or (ref.recv and best.hint or '?')
+            end
             if ref.recv and (T:text(ref.tok - 3) == '.' or T:text(ref.tok - 3) == ':') then ref.lua_binding = '?' end
         end
     end
@@ -201,42 +224,72 @@ function M.collect(r, T, bm)
         end
         return
     end
-    local owner, table_start
+    local owner, table_start, first = nil, nil, 1
+    local function shadowed_owner(token)
+        for _, b in ipairs(bindings[owner] or {}) do
+            if b.a ~= 0 and b.token <= token and b.b >= token
+                and (params[b.token] or T:text(b.token - 1) == 'local'
+                    or T:text(b.token - 1) == 'function' and T:text(b.token - 2) == 'local') then return true end
+        end
+        return false
+    end
     if T.k[ret + 1] == 'id' and (ret + 1 == T.n or T:text(ret + 2) == ';') then
         owner = T:text(ret + 1)
-        for i = 1, ret - 1 do
-            if T:text(i) == owner and T:text(i + 1) == '=' and T:text(i + 2) == '{' and scopes[i] == 0 then table_start = i + 2 end
+        -- A returned object need not originate in a literal table: cached or
+        -- factory-provided objects can receive definite members afterwards.
+        -- Any possible replacement outside a function invalidates older fields.
+        for _, b in ipairs(bindings[owner] or {}) do
+            if b.token < ret and not function_scopes[b.a] and not shadowed_owner(b.token) then
+                first = b.token + 1
+                table_start = b.a == 0 and T:text(b.token + 1) == '=' and T:text(b.token + 2) == '{'
+                    and b.token + 2 or nil
+            end
         end
     elseif T:text(ret + 1) == '{' and T.m[ret + 1] then
         table_start = ret + 1
+        first = table_start
         owner = r.path:match('([^/\\]+)%.lua$') or r.path
     else return end
+    local writes = {}
+    local finish = table_start == ret + 1 and T.m[table_start] or ret
     if owner then
-        if not table_start or not T.m[table_start] then return end
-        for i = table_start + 1, ret - 1 do
-            if scopes[i] == 0 and T:text(i) == owner and T:text(i + 1) == '=' then r.lua_exports = {}; return end
-        end
+        if table_start and not T.m[table_start] then return end
         r.lua_owner = owner
         for index, n in ipairs(r.nodes) do
-            if not n.parent and n.ti >= table_start and (n.qualified == owner .. '.' .. n.name or n.qualified == owner .. ':' .. n.name)
-                and (n.kind == 'function' or n.kind == 'method') then r.lua_exports[n.name] = index end
+            if not n.parent and n.ti >= first and n.ti < finish and not function_scopes[scopes[n.ti]]
+                and (n.qualified == owner .. '.' .. n.name or n.qualified == owner .. ':' .. n.name)
+                and (n.kind == 'function' or n.kind == 'method') and not shadowed_owner(n.ti) then
+                writes[n.name] = n.ti
+                r.lua_exports[n.name] = scopes[n.ti] == 0 and index or nil
+            end
         end
     end
     if table_start then
         local i, close = table_start + 1, T.m[table_start]
         while i < close do
             if T.k[i] == 'id' and T:text(i + 1) == '=' and T.k[i + 2] == 'id'
-                and (T:text(i + 3) == ',' or T:text(i + 3) == ';' or i + 3 == close) then alias(r.lua_exports, T:text(i), T:text(i + 2)) end
+                and (T:text(i + 3) == ',' or T:text(i + 3) == ';' or i + 3 == close) then
+                local key = T:text(i)
+                if not writes[key] or writes[key] < i then
+                    alias(r.lua_exports, key, T:text(i + 2)); writes[key] = i
+                end
+            end
             if T.m[i] and T.m[i] > i then i = T.m[i]
             elseif bm[i] and bm[i] > i then i = bm[i] end
             i = i + 1
         end
     end
-    for i = 1, ret - 1 do
-        if scopes[i] == 0 and T:text(i) == owner and T:text(i + 1) == '.' and T.k[i + 2] == 'id'
-            and T:text(i + 3) == '=' and T:text(i + 4) ~= 'function' then
-            r.lua_exports[T:text(i + 2)] = nil
-            if T.k[i + 4] == 'id' and (T.l[i + 5] ~= T.l[i + 4] or T:text(i + 5) == ';') then alias(r.lua_exports, T:text(i + 2), T:text(i + 4)) end
+    for i = first, ret - 1 do
+        if not function_scopes[scopes[i]] and T:text(i) == owner and T:text(i + 1) == '.' and T.k[i + 2] == 'id'
+            and T:text(i + 3) == '=' and not shadowed_owner(i) then
+            local key = T:text(i + 2)
+            if not writes[key] or writes[key] < i then
+                r.lua_exports[key], writes[key] = nil, i
+                if scopes[i] == 0 and T.k[i + 4] == 'id'
+                    and (T.l[i + 5] ~= T.l[i + 4] or T:text(i + 5) == ';') then
+                    alias(r.lua_exports, key, T:text(i + 4))
+                end
+            end
         end
     end
 end
@@ -415,9 +468,11 @@ function M.resolve(G, f, name, hint, ctx, recv)
         local n = ((G.files[f].lua_locals or {})[local_index] or {})[name]
         return n and { G.id_of[f][n] } or {}
     end
-    local index = tonumber(hint:match('^lua:(%d+)$'))
+    local value = tonumber(hint:match('^lua%-value:(%d+)$'))
+    local index = value or tonumber(hint:match('^lua:(%d+)$'))
     local imp = index and (G.files[f].lua_imports or {})[index]
     if not imp then return nil end
+    if value then name = imp.member end
     local result = {}
     for _, target in ipairs(M.modules(G, imp, ctx)) do
         local rec = G.files[target]

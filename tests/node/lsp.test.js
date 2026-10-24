@@ -113,6 +113,30 @@ const indexed = async (client) => {
     assert.ok(client.notifications.some((msg) => msg.params?.value?.kind === 'end'), client.logs());
 };
 
+test('LSP resolves cached Lua modules and extracted loader members without unrelated fallbacks', { timeout: 30000 }, async (t) => {
+    const client = await start(t);
+    await writeFile(join(client.project, 'router.lua'), "local M = rawget(_G, 'router')\n"
+        + "if type(M) ~= 'table' then M = {} end\nfunction M.set_log_prefix(prefix) end\nreturn M\n");
+    await writeFile(join(client.project, 'misc.lua'), 'local M = {}\nfunction M.to_bool(value) return value end\nreturn M\n');
+    await writeFile(join(client.project, 'wrong.lua'), 'function set_log_prefix() end\nfunction to_bool() end\n');
+    const text = "local router = dofile('router.lua')\nlocal to_bool = dofile('misc.lua').to_bool\n"
+        + "router.set_log_prefix('MAIN')\nlocal enabled = to_bool(true)\n";
+    await writeFile(join(client.project, 'app.lua'), text);
+    await initialize(client, [client.project]); await indexed(client);
+    const uri = pathToFileURL(join(client.project, 'app.lua')).href;
+    client.notify('textDocument/didOpen', { textDocument: { uri, languageId: 'lua', version: 1, text } });
+    const definition = (line, character) => client.request('textDocument/definition', { textDocument: { uri }, position: { line, character } });
+    for (const [line, character, target, targetLine] of [[2, 9, 'router.lua', 2], [1, 42, 'misc.lua', 1], [3, 19, 'misc.lua', 1]]) {
+        const result = await definition(line, character);
+        assert.equal(result.length, 1);
+        assert.equal(fileURLToPath(result[0].uri), join(client.project, target));
+        assert.equal(result[0].range.start.line, targetLine);
+    }
+    client.notify('textDocument/didChange', { textDocument: { uri, version: 2 }, contentChanges: [{ text: text.replace('.to_bool', '.to_boo') }] });
+    assert.deepEqual(await definition(3, 19), []);
+    assert.deepEqual(await definition(1, 42), []);
+});
+
 test('LSP coroutine queries retain ordered draft snapshots while RPCs are pending', { timeout: 30000 }, async (t) => {
     const client = await start(t);
     await initialize(client, [client.project]);

@@ -827,6 +827,10 @@ function M.query(symbols, opts)
                 end
             end
             local refs = files[f].refs
+            local lua_values = {}
+            for index, imp in ipairs(files[f].lua_imports or {}) do
+                if imp.member and (native_targets or lua_names[imp.member]) then lua_values['lua-value:' .. index] = true end
+            end
             local ref_names, froms = refs.name, refs.from
             local count = #ref_names
             for first = 1, count, 4096 do
@@ -836,7 +840,7 @@ function M.query(symbols, opts)
                         or aliases[ref_names[i]] or aliases[refs.recv[i]]
                         or alias_refs[i]
                         or (refs.lua_binding and refs.lua_binding[i] ~= '' and
-                            (native_targets or lua_names[ref_names[i]]))) and froms[i] > 0 then
+                            (native_targets or lua_names[ref_names[i]] or lua_values[refs.lua_binding[i]]))) and froms[i] > 0 then
                         for _, dst in ipairs(targets(f, i, wanted) or {}) do
                             if wanted[dst] then
                                 push3(incoming, dst, symbols.id_of[f][froms[i]], refs.line[i], refs.kind[i])

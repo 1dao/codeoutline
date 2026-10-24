@@ -23,10 +23,15 @@ parallel persistent method index or native-runtime change is required.
   composite/new initializers supply receiver evidence. Direct functions and methods
   with indexed, ordinary result declarations also supply types, including individual
   slots in multiple-result assignments. Types retain their declaring package.
+- Methods on direct call results, including `GetManager().IsChild()`, imported
+  factories, parenthesized receivers and bounded method-call chains, reuse the
+  same declared result types for navigation, agent edges and completion. Returned
+  values are not implicitly addressable: calling a pointer method on a returned
+  value requires an actual pointer result or an addressable local variable.
 - `range` declarations infer channel elements, slice/array indices and elements,
   and map keys/values, including named collection types and simple local aliases.
   Loop variables are scoped to the loop body. Send-only channels, mismatched result
-  counts, unresolved factories, chains, local shadowing and unsupported syntax
+  counts, unresolved factories, field/index/assertion chains, local shadowing and unsupported syntax
   remain barriers. Dependency source must already be indexed in a supported local
   module; this does not download dependencies or read the global module cache.
 - Private method identity includes the declaring package, not just its written name.

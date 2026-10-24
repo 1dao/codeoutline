@@ -132,9 +132,36 @@ local function function_body(T, close, last)
     end
 end
 
+-- Only identifiers, direct calls and parenthesized versions have a proven
+-- receiver path here. Fields, indexing, assertions and generic calls stay unknown.
+local function expression(T, last, depth)
+    depth = (depth or 0) + 1
+    if depth > 16 then return nil end
+    if T.k[last] == 'id' and T:text(last - 1) ~= '.' then
+        return { kind = 'binding_value', name = T:text(last), at = T.s[last] - 1 }, last, 1
+    end
+    if T:text(last) ~= ')' or not T.m[last] then return nil end
+    local open = T.m[last]
+    if T.k[open - 1] == 'id' then
+        local name_at, first, count = open - 1, open - 1, 1
+        local call = { kind = 'call_result', name = T:text(name_at), at = T.s[name_at] - 1, result = 1, arity = 1 }
+        if T:text(name_at - 1) == '.' then
+            local receiver, start, size = expression(T, name_at - 2, depth)
+            if not receiver then return nil end
+            first, count = start, count + size
+            if receiver.kind == 'binding_value' then call.recv = receiver.name
+            else call.receiver = receiver end
+        end
+        return call, first, count
+    end
+    local value, first, count = expression(T, last - 1, depth)
+    if first == open + 1 then return value, open, count end
+end
+M.expression = expression
+
 function M.collect(r, T)
     if r.language ~= 'go' then return end
-    local data = { nodes = {}, bindings = {}, shadows = {}, evidence = {} }
+    local data = { nodes = {}, bindings = {}, shadows = {}, evidence = {}, receivers = {}, receiver_weight = 0 }
     r.go_methods = data
     local children, scopes, stack, functions, named_functions = {}, {}, {}, {}, {}
     for i = 1, T.n do
@@ -263,12 +290,8 @@ function M.collect(r, T)
             return ty and { kind = 'pointer', child = ty, builtin_new = true, at = T.s[a] - 1 } or nil
         end
         if not address then
-            local open = T:text(a + 1) == '(' and a + 1
-                or T:text(a + 1) == '.' and T.k[a + 2] == 'id' and T:text(a + 3) == '(' and a + 3
-            if T.k[a] == 'id' and open and T.m[open] == b then
-                return { kind = 'call_result', name = T:text(open - 1), recv = open == a + 3 and T:text(a) or nil,
-                    at = T.s[a] - 1, result = 1, arity = 1 }
-            end
+            local value, first = expression(T, b)
+            if first == a then return value end
         end
         local open = a
         while open <= b and T:text(open) ~= '{' do open = open + 1 end
@@ -287,7 +310,7 @@ function M.collect(r, T)
         if #values == 1 and values[1] and values[1].kind == 'call_result' then
             local call = values[1]; values = {}
             for index = 1, count do values[index] = { kind = call.kind, name = call.name, recv = call.recv,
-                at = call.at, result = index, arity = count } end
+                receiver = call.receiver, at = call.at, result = index, arity = count } end
         elseif #values ~= count then return {} end
         return values
     end
@@ -369,8 +392,14 @@ function M.collect(r, T)
         return hi > 0 and at <= functions[hi].last
     end
     for index, ref in ipairs(r.refs) do
-        if generic_at(T.s[ref.tok] - 1) then
+        local at = T.s[ref.tok] - 1
+        local receiver, _, size
+        if T:text(ref.tok - 1) == '.' then receiver, _, size = expression(T, ref.tok - 2) end
+        if generic_at(at) then
             ref.binding = 'go:?'; data.evidence[index] = ref.binding; r.has_bindings = true
+        elseif receiver and receiver.kind ~= 'binding_value' then
+            data.receivers[at] = receiver; data.receiver_weight = data.receiver_weight + size * 192
+            ref.binding = 'go:expr:' .. at; data.evidence[index] = ref.binding; r.has_bindings = true
         elseif ref.recv then
             ref.binding = 'go:recv:' .. (T.s[ref.tok] - 1); r.has_bindings = true
             if T.el[ref.tok - 3] == T.l[ref.tok - 2] and (T:text(ref.tok - 3) == '.'
@@ -658,8 +687,10 @@ function M.context(G, ctx, report)
             path[entry] = nil; return result, origin
         elseif ty.kind == 'call_result' then
             local ids
-            if ty.recv then
-                local receiver = C.receiver(f, ty.recv, ty.at, path, depth)
+            if ty.receiver or ty.recv then
+                local receiver
+                if ty.receiver then receiver = C.expression_receiver(f, ty.receiver, path, depth)
+                else receiver = C.receiver(f, ty.recv, ty.at, path, depth) end
                 if receiver == false or receiver and receiver.type_expr then return nil end
                 if receiver then
                     ids = {}; for _, member in ipairs(C.members(receiver, f, ty.name)) do
@@ -702,6 +733,13 @@ function M.context(G, ctx, report)
             return nil
         end
         return ty, f
+    end
+    function C.expression_receiver(f, expression, path, depth)
+        local ty, origin = value_type(f, expression, path, depth)
+        if not ty then return false end
+        local pointer = ty.kind == 'pointer'
+        local id = resolve_type(origin, pointer and ty.child or ty)
+        return id and { id = id, pointer = pointer, addressable = false, type_expr = false } or false
     end
     function C.receiver(f, name, at, path, depth)
         local entry = C.bound(f, name, at)
@@ -748,6 +786,16 @@ function M.context(G, ctx, report)
     end
     function C.resolve(f, name, recv, evidence)
         if evidence == 'go:?' then return {}, 'unsupported Go receiver chain' end
+        local expression_at = evidence and tonumber(evidence:match('^go:expr:(%d+)$'))
+        if expression_at then
+            local d = C.data(f)
+            local expression = d and d.receivers[expression_at]
+            local receiver = expression and C.expression_receiver(f, expression)
+            if not receiver then return {}, 'unknown Go receiver expression' end
+            local result = {}
+            for _, entry in ipairs(C.members(receiver, f, name)) do if entry.id then result[#result + 1] = entry.id end end
+            return result, 'Go call-result method set'
+        end
         if not recv then
             local at = evidence and tonumber(evidence:match('^go:call:(%d+)$'))
             if at and C.bound(f, name, at) ~= nil then return {}, 'unresolved local Go callable' end

@@ -114,7 +114,8 @@ function M.context(G, ctx, source, options)
             + #(parsed.csharp_parameters or {}) * 128 + #parsed.nodes * (parsed.implementation_evidence and 256 or 0)
             + #(parsed.rust_imports or {}) * 256 + #(parsed.rust_public or {}) * 32
             + #(parsed.cpp_macros or {}) * 256
-            + (parsed.go_methods and (#parsed.nodes * 384 + #parsed.go_methods.bindings * 256) or 0)
+            + (parsed.go_methods and (#parsed.nodes * 384 + #parsed.go_methods.bindings * 256
+                + (parsed.go_methods.receiver_weight or 0)) or 0)
             + #(parsed.automatic_events or {}) * 512
             + (parsed.lua_callback_loops and parsed.lua_callback_loops.weight or 0)
         if cache[key] then

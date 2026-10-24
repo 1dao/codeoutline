@@ -190,7 +190,10 @@ end
 -- Targets of one occurrence of name in file f, enclosed by node index from.
 local function resolve_site(V, f, from, name, kind, recv, evidence, offset, index, cursor_line)
     if index then evidence = V.js_context.ordinary.evidence(f, index) end
-    if V.files[f].language == 'go' and recv and offset and evidence ~= 'go:?' then evidence = 'go:recv:' .. offset end
+    if V.files[f].language == 'go' and offset and evidence ~= 'go:?' and not (evidence and evidence:match('^go:expr:')) then
+        if recv then evidence = 'go:recv:' .. offset
+        elseif kind == 'member_call' or kind == 'member_symbol' then evidence = 'go:expr:' .. offset end
+    end
     local src = from > 0 and V.id_of[f][from] or nil
     local direct, paired = deps(V, f)
     local rkind, accept = kind, nil

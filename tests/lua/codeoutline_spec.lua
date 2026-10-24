@@ -6059,6 +6059,73 @@ func Items() <-chan *Item { return nil }
         spec.equal(edge_names(G, type_id(G, 'Index')), '')
         spec.equal(edge_names(G, type_id(G, 'String')), '')
     end)
+    spec.it('follows direct and chained call receivers using declared return types', function()
+        local G = build({ ['p/types.go'] = [[package p
+type Manager struct {}
+func GetManager() *Manager { return nil }
+func (*Manager) IsChild() bool { return false }
+func (*Manager) Next() *Manager { return nil }
+func (*Manager) Pair() (int, *Manager) { return 0, nil }
+]], ['p/use.go'] = [[package p
+func Direct() { if GetManager().IsChild() {} }
+func Chain() { GetManager().Next().IsChild(); (GetManager()).IsChild() }
+func Assign() { _, m := GetManager().Pair(); m.IsChild() }
+]] })
+        spec.equal(edge_names(G, type_id(G, 'Direct')), 'GetManager,Manager.IsChild')
+        spec.equal(edge_names(G, type_id(G, 'Chain')), 'GetManager,GetManager,Manager.IsChild,Manager.IsChild,Manager.Next')
+        spec.equal(edge_names(G, type_id(G, 'Assign')), 'GetManager,Manager.IsChild,Manager.Pair')
+    end)
+    spec.it('keeps call-result method sets non-addressable and package-specific', function()
+        local G = build({ ['lib/a.go'] = [[package lib
+type Manager struct {}
+func GetManager() *Manager { return nil }
+func Value() Manager { return Manager{} }
+func (*Manager) PointerOnly() {}
+func (Manager) ValueOnly() {}
+]], ['app/a.go'] = [[package app
+import api "lib"
+type Manager struct {}
+func (*Manager) PointerOnly() {}
+func Use() { api.GetManager().PointerOnly(); api.Value().ValueOnly(); api.Value().PointerOnly() }
+]] })
+        spec.equal(edge_names(G, type_id(G, 'Use')), 'GetManager,Manager.PointerOnly,Manager.ValueOnly,Value,Value')
+        local Q, id = graph.query(G), type_id(G, 'Use')
+        for i = 1, #Q.out[id], graph.EDGE do
+            spec.equal(G.files[G.node_file[Q.out[id][i]]].path, 'lib/a.go')
+        end
+    end)
+    spec.it('blocks shadowed, generic, ambiguous and unsupported receiver chains', function()
+        local G = build({ ['a.go'] = [[package p
+type Manager struct {}
+func (*Manager) IsChild() bool { return false }
+func GetManager() *Manager { return nil }
+func Many() (*Manager, error) { return nil, nil }
+func Shadow(GetManager func() *Manager) { GetManager().IsChild() }
+func Tuple() { Many().IsChild() }
+func Field(m Manager) { m.Field().IsChild() }
+func Indexed(items []func() *Manager) { items[0]().IsChild() }
+func Assertion(m any) { m.(*Manager).IsChild() }
+func Generic[T any]() *Manager { return nil }
+func Unresolved() { Generic[int]().IsChild(); unknown().IsChild() }
+]] })
+        for _, name in ipairs({ 'Shadow', 'Field', 'Indexed', 'Assertion' }) do spec.equal(edge_names(G, type_id(G, name)), '', name) end
+        spec.equal(edge_names(G, type_id(G, 'Tuple')), 'Many')
+        local Q, id = graph.query(G), type_id(G, 'Unresolved')
+        for i = 1, #Q.out[id], graph.EDGE do spec.truthy(G.nodes[Q.out[id][i]].name ~= 'IsChild') end
+    end)
+    spec.it('bounds receiver-expression depth and leaves compact indexes unchanged', function()
+        local source = [[package p
+type Manager struct {}
+func GetManager() *Manager { return nil }
+func (*Manager) Next() *Manager { return nil }
+func (*Manager) IsChild() bool { return false }
+func Deep() { ]] .. 'GetManager()' .. string.rep('.Next()', 40) .. '.IsChild() }'
+        local G = build({ ['a.go'] = source })
+        local Q, id = graph.query(G), type_id(G, 'Deep')
+        for i = 1, #Q.out[id], graph.EDGE do spec.truthy(G.nodes[Q.out[id][i]].name ~= 'IsChild') end
+        local compact = ci.parse('a.go', source, { ranges = false })
+        spec.nil_value(compact.go_methods); spec.nil_value(compact.refs.binding)
+    end)
     spec.it('checks function types and blocks shadowed builtins or local callables', function()
         local G, C = build({ ['a.go'] = [[package p
 type I interface { Apply(func(int) error) }

@@ -988,7 +988,16 @@ function M.complete(req)
     local entries = {}
     if is_member then
         local chain = receiver_chain(T, op, member)
-        local target = chain and self:chain(chain)
+        local target
+        if self.language == 'go' then
+            local methods = require('codeoutline.go_methods')
+            local expression = methods.expression(T, op - 1)
+            if expression and expression.kind ~= 'binding_value' then
+                local receiver = methods.context(V, V.js_context).expression_receiver(f, expression)
+                target = receiver and { go_receiver = receiver } or { go_blocked = true }
+            end
+        end
+        target = target or chain and self:chain(chain)
         entries = self:entries(target)
         if self.language == 'lua' and text_of(T, op) == ':' then
             local methods = {}

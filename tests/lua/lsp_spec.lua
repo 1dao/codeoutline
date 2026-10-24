@@ -664,6 +664,39 @@ func Handle(newChan gossh.NewChannel) {
         navigation.close('go-range-draft')
         result = definition(); spec.equal(#result, 1); spec.equal(result[1].range.start.line, 4)
     end)
+    spec.it('shares Go call-result receivers across navigation, completion and draft changes', function()
+        local prefix = 'go-call-chains/'
+        assert(xutils.mkdir_p(nav_root .. '/' .. prefix))
+        local api = [[package chains
+type Manager struct {}
+func GetManager() *Manager { return nil }
+func (*Manager) IsChild() bool { return false }
+type Other struct {}
+func (*Other) IsChild() bool { return true }
+]]
+        nav_write(prefix .. 'manager.go', api)
+        local source = 'package chains\nfunc NewServer() { if GetManager().IsChild() {} }\n'
+        nav_write(prefix .. 'server.go', source)
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local doc = docs.read(nav_root .. '/' .. prefix .. 'server.go')
+        local position = doc:position(assert(source:find('.IsChild', 1, true)) + 1)
+        local function definition(session)
+            return nav({ method = 'lsp_definition', session = session, uri = doc.uri, position = position })
+        end
+        local result = definition()
+        spec.equal(#result, 1); spec.equal(result[1].uri, nav_uri(prefix .. 'manager.go'))
+        spec.equal(result[1].range.start.line, 3)
+        local completion = require('codeoutline.completion').complete({ root = nav_root, uri = doc.uri, position = position })
+        local found = false; for _, item in ipairs(completion.items) do if item.label == 'IsChild' then found = true end end
+        spec.truthy(found)
+        local target = nav_uri(prefix .. 'manager.go')
+        navigation.sync({ session = 'go-chain-draft', open = { [target] = 1 }, changed = {
+            [target] = { language = 'go', version = 1, source = api:gsub('GetManager%(%) %*Manager', 'GetManager() *Other') } } })
+        result = definition('go-chain-draft')
+        spec.equal(#result, 1); spec.equal(result[1].range.start.line, 5)
+        navigation.close('go-chain-draft')
+        result = definition(); spec.equal(#result, 1); spec.equal(result[1].range.start.line, 3)
+    end)
     spec.it('warms navigation caches without bypassing source validation or dependency limits', function()
         nav_write('WarmTarget.lua', 'local M = {}\nfunction M.warm_save() end\nreturn M\n')
         local source = "local api = dofile('WarmTarget.lua')\napi.warm_save()\n"

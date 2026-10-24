@@ -754,6 +754,26 @@ test('LSP resolves channel range elements from multiple return values within one
     t.diagnostic(`range definition round trips: ${timings.join(',')}ms`);
 });
 
+test('LSP navigates methods on Go call results within one second', { timeout: 30000 }, async (t) => {
+    const client = await start(t);
+    const target = join(client.project, 'manager.go'), use = join(client.project, 'server.go');
+    await writeFile(target, 'package demo\ntype Manager struct {}\nfunc GetManager() *Manager { return nil }\nfunc (*Manager) IsChild() bool { return false }\n');
+    const source = 'package demo\nfunc NewServer() { if GetManager().IsChild() {} }\n';
+    await writeFile(use, source);
+    await initialize(client, [client.project]); await indexed(client);
+    const uri = pathToFileURL(use).href, timings = [];
+    for (let i = 0; i < 7; i++) {
+        const before = Date.now();
+        const result = await client.request('textDocument/definition', { textDocument: { uri },
+            position: { line: 1, character: source.split('\n')[1].indexOf('IsChild') + 1 } });
+        timings.push(Date.now() - before);
+        assert.equal(result.length, 1); assert.equal(fileURLToPath(result[0].uri), target);
+        assert.equal(result[0].range.start.line, 3);
+    }
+    assert.ok(Math.max(...timings) < 1000, `call-result timings: ${timings}`);
+    t.diagnostic(`call-result definition round trips: ${timings.join(',')}ms`);
+});
+
 test('LSP exit without shutdown fails and truncated frames fail on EOF', { timeout: 30000 }, async (t) => {
     for (const mode of ['exit', 'partial']) {
         const client = await start(t);

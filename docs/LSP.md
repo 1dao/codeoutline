@@ -31,6 +31,25 @@ query-local. Cursor lookups reuse the full-parse token cache, so background
 definition requests for parameters in large headers do not reparse that header
 at every position. Neither tokens nor detailed binding evidence are serialized.
 
+Opening a document schedules best-effort navigation warming after 150 ms of idle
+time; edits settle for 500 ms. Only the latest requested file is queued, and
+foreground worker requests cancel active warming before capturing their drafts.
+Closed documents, auxiliary-only sessions and sources above 1 MiB are skipped.
+Warming reuses the normal caches for the current file and up to three direct
+dependencies (at most 2 MiB of explicitly warmed source). Dependency work stops
+after a 500 ms soft budget; cold symbol-table preparation may take longer and
+the complete idle job has a 5-second cooperative deadline. No definition results
+are cached or added to the persistent index.
+
+The VS Code/Cursor adapter reports active/visible editor changes through the
+`codeoutline/visibleDocument` notification with `{ textDocument: { uri, version } }`.
+The document must already be open and its version must still match. LSP itself
+has no standard active-tab notification. Zed extension API 0.7.0 has no equivalent
+editor callback, so Zed uses `didOpen` and document-symbol requests as warming
+opportunities; switching an already-open tab alone is not guaranteed to notify
+the server. Rapid and repeated hints are coalesced. Warming is opportunistic:
+an immediate foreground request still works through ordinary on-demand lookup.
+
 ## Launch
 
 From an installation, the editor runs `codeoutline lsp --stdio`. On Windows, npm

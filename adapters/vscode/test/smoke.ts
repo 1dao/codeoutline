@@ -27,6 +27,12 @@ export async function run(): Promise<void> {
     let locations = await eventually(definitions, value => value?.some(loc => loc.uri.toString() === target.toString()));
     assert.equal(locations.length, 1);
     assert.equal(locations[0].range.start.line, 0);
+    // Re-select an already-open document after an idle warming opportunity.
+    await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(target));
+    await vscode.window.showTextDocument(document);
+    await new Promise(resolve => setTimeout(resolve, 400));
+    locations = await eventually(definitions, value => value?.some(loc => loc.uri.toString() === target.toString()));
+    assert.equal(locations.length, 1);
     const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>('vscode.executeDocumentSymbolProvider', uri);
     assert.ok(symbols.some(symbol => symbol.name === 'sender'));
     const hover = await vscode.commands.executeCommand<vscode.Hover[]>(
@@ -91,6 +97,16 @@ export async function run(): Promise<void> {
     locations = await eventually(definitions, value => value?.[0]?.range.start.line === 2);
     assert.equal(locations[0].range.start.line, 2);
     const config = vscode.workspace.getConfiguration('codeoutline');
+    await config.update('mode', 'auxiliary', vscode.ConfigurationTarget.Workspace);
+    await new Promise(resolve => setTimeout(resolve, 300));
+    await api.ready();
+    assert.deepEqual(await definitions(), [], 'auxiliary mode does not register navigation');
+    assert.deepEqual(await vscode.commands.executeCommand('vscode.executeImplementationProvider', uri,
+        new vscode.Position(2, 10)), [], 'auxiliary mode also disables implementation navigation');
+    await config.update('mode', 'navigation', vscode.ConfigurationTarget.Workspace);
+    await new Promise(resolve => setTimeout(resolve, 300));
+    await api.ready();
+    await eventually(definitions, value => value?.length === 1);
     await config.update('features', { definition: false }, vscode.ConfigurationTarget.Workspace);
     await new Promise(resolve => setTimeout(resolve, 300));
     await api.ready();

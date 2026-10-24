@@ -3,7 +3,7 @@ local paths = require('codeoutline.path')
 local text = require('codeoutline.text')
 local M = { MAX_HEADER = 16384, MAX_MESSAGE = 4194304, MAX_ROOTS = 16,
     MAX_DOCUMENTS = 128, MAX_DRAFT_BYTES = 33554432, MAX_PENDING = 64,
-    MAX_QUERY = 4096, MAX_SYMBOLS = 200, POLL_MS = 1000 }
+    MAX_QUERY = 4096, MAX_SYMBOLS = 200, POLL_MS = 1000, WARM_DELAY_MS = 150 }
 local null = xutils.json_null
 local function array(t) return setmetatable(t or {}, xutils.json_array_mt) end
 local function object(t) return type(t) == 'table' and getmetatable(t) ~= xutils.json_array_mt end
@@ -97,6 +97,7 @@ function M.new(config, emit, submit, cancel, stop, await_worker)
         synced = {}, features = {} }
     local progress, server_pending, next_id, next_poll = {}, {}, 0, 0
     local navigation_flights, navigation_epoch = {}, 0
+    local warm_pending, warm_active, warm_done, warm_pump, focused_uri
     local handlers = {}
     local function error_response(id, code, message)
         emit({ jsonrpc = '2.0', id = id == nil and null or id, error = { code = code, message = message } })
@@ -169,6 +170,32 @@ function M.new(config, emit, submit, cancel, stop, await_worker)
         local path = documents.path(uri)
         return path and server_path(path)
     end
+    local function cancel_warm()
+        local job = warm_active
+        if not job then return end
+        warm_active = nil
+        cancel(job.id)
+        for uri, version in pairs(job.sent or {}) do
+            if self.synced[uri] == version then self.synced[uri] = nil end
+        end
+    end
+    local function schedule_warm(uri, focused, delay)
+        local enabled = false
+        for name, value in pairs(self.features) do
+            if value and name ~= 'documentSymbol' and name ~= 'workspaceSymbol' then enabled = true; break end
+        end
+        if not enabled then return end
+        if focused then focused_uri = uri end
+        if focused_uri and self.documents[focused_uri] and focused_uri ~= uri then return end
+        local doc = self.documents[uri]
+        if not doc then return end
+        for _, job in pairs({ warm_done, warm_active, warm_pending }) do
+            if job.uri == uri and job.version == doc.version and job.epoch == navigation_epoch then return end
+        end
+        if warm_active then cancel_warm() end
+        warm_pending = { uri = uri, version = doc.version, epoch = navigation_epoch,
+            due = xtimer.now_ms() + (delay or M.WARM_DELAY_MS) }
+    end
     local function scan(root, hints)
         local existing = self.scans[root]
         if existing then
@@ -195,7 +222,9 @@ function M.new(config, emit, submit, cancel, stop, await_worker)
         if not id then self.scans[root] = nil; self:end_index(root, err) end
     end
     function self:poll()
-        if self.state ~= 'ready' or xtimer.now_ms() < next_poll then return end
+        if self.state ~= 'ready' then return end
+        if warm_pump then warm_pump() end
+        if warm_active or next(self.pending) or xtimer.now_ms() < next_poll then return end
         next_poll = xtimer.now_ms() + M.POLL_MS
         for _, root in ipairs(self.roots) do scan(root) end
     end
@@ -257,9 +286,10 @@ function M.new(config, emit, submit, cancel, stop, await_worker)
     function self:close()
         if self.state == 'closed' then return end
         self.state = 'closed'
+        warm_pending = nil; cancel_warm()
         for id in pairs(self.pending) do cancel_pending(id) end
         for _, job in pairs(self.scans) do cancel(job.id) end
-        if next(self.synced) then submit({ method = 'lsp_close', session = self.session }, function() end) end
+        if next(self.synced) or self.worker_session then submit({ method = 'lsp_close', session = self.session }, function() end) end
         self.scans, self.documents, self.ready = {}, {}, {}
         progress, server_pending = {}, {}
     end
@@ -321,6 +351,7 @@ function M.new(config, emit, submit, cancel, stop, await_worker)
         assert(self.document_count < M.MAX_DOCUMENTS and self.document_bytes + #doc.source <= M.MAX_DRAFT_BYTES, 'open document limit reached')
         self.documents[td.uri] = doc
         self.document_count, self.document_bytes = self.document_count + 1, self.document_bytes + #doc.source
+        schedule_warm(td.uri)
     end
     handlers['textDocument/didChange'] = function(_, params)
         local td = assert(params.textDocument, 'textDocument required')
@@ -336,9 +367,13 @@ function M.new(config, emit, submit, cancel, stop, await_worker)
         assert(self.document_bytes - #doc.source + #updated.source <= M.MAX_DRAFT_BYTES, 'open document limit reached')
         self.documents[td.uri] = updated
         self.document_bytes = self.document_bytes - #doc.source + #updated.source
+        schedule_warm(td.uri, false, 500)
     end
     handlers['textDocument/didClose'] = function(_, params)
         local uri = params.textDocument.uri
+        if warm_pending and warm_pending.uri == uri then warm_pending = nil end
+        if warm_active and warm_active.uri == uri then cancel_warm() end
+        if focused_uri == uri then focused_uri = nil end
         local doc = self.documents[uri]
         if doc then
             self.document_count, self.document_bytes = self.document_count - 1, self.document_bytes - #doc.source
@@ -367,6 +402,14 @@ function M.new(config, emit, submit, cancel, stop, await_worker)
         assert(id ~= nil, 'symbol query must be a request')
         local doc = document(params)
         reply(id, doc and M.document_symbols(doc, self.hierarchical) or array())
+        schedule_warm(params.textDocument.uri)
+    end
+    handlers['codeoutline/visibleDocument'] = function(id, params)
+        assert(id == nil, 'visibleDocument must be a notification')
+        local td = params.textDocument
+        assert(object(td) and type(td.uri) == 'string', 'document URI required')
+        local doc = self.documents[td.uri]
+        if doc and (td.version == nil or td.version == doc.version) then schedule_warm(td.uri, true) end
     end
     -- Callback transports remain usable by embedders/tests. Production LSP
     -- supplies an RPC transport; both expose the same yielding interface.
@@ -384,6 +427,8 @@ function M.new(config, emit, submit, cancel, stop, await_worker)
     end
     -- Each query owns a coroutine; cancelled/replaced requests discard replies.
     local function request(id, req, started, key)
+        cancel_warm()
+        if warm_pending and req.uri == server_uri(warm_pending.uri) then warm_pending = nil end
         local count = 0
         for _ in pairs(self.pending) do count = count + 1 end
         assert(count < M.MAX_PENDING, 'too many pending requests')
@@ -465,14 +510,14 @@ function M.new(config, emit, submit, cancel, stop, await_worker)
     end
     -- Navigation runs in the worker against the session's drafts: every request
     -- carries the open set and the text of versions the worker has not seen.
-    local function navigate(id, req, finish, key)
-        assert(id ~= nil, 'navigation must be a request')
+    local function drafts(req, only)
+        self.worker_session = true
         local open, changed, sent = {}, {}, {}
         for uri, doc in pairs(self.documents) do
             if doc.path and root_for(server_path(doc.path)) then
                 local key = server_uri(uri)
                 open[key] = doc.version
-                if self.synced[uri] ~= doc.version then
+                if self.synced[uri] ~= doc.version and (not only or uri == only) then
                     changed[key] = { source = doc.source, version = doc.version, language = doc.language }
                     sent[uri] = doc.version
                 end
@@ -480,6 +525,39 @@ function M.new(config, emit, submit, cancel, stop, await_worker)
         end
         req.session, req.open, req.changed = self.session, open, changed
         req.includePaths = self.include_paths
+        return sent
+    end
+    warm_pump = function()
+        if not warm_pending or warm_active or next(self.pending) or next(self.scans)
+            or xtimer.now_ms() < warm_pending.due then return end
+        local uri = warm_pending.uri
+        local doc = self.documents[uri]
+        local root = doc and doc.path and root_for(server_path(doc.path))
+        if not root then warm_pending = nil; return end
+        if not self.ready[root] then return end
+        warm_pending = nil
+        if #doc.source > 1048576 then return end
+        local req = { method = 'lsp_warm', root = root, uri = server_uri(uri) }
+        local job = { uri = uri, version = doc.version, epoch = navigation_epoch, sent = drafts(req, uri) }
+        warm_active = job
+        local id = submit(req, function(ok)
+            if warm_active ~= job then return end
+            job.failed = not ok
+            if not ok then cancel_warm()
+            else
+                for changed, version in pairs(job.sent) do self.synced[changed] = version end
+                warm_done, warm_active, job.sent = job, nil, nil
+            end
+        end)
+        job.id = id
+        if id and not job.failed then
+            for changed, version in pairs(job.sent or {}) do self.synced[changed] = version end
+        elseif warm_active == job then warm_active = nil end
+    end
+    local function navigate(id, req, finish, key)
+        assert(id ~= nil, 'navigation must be a request')
+        cancel_warm()
+        local sent = drafts(req)
         local value, ok = request(id, req, function()
             -- Record submission before yielding so subsequent requests send only
             -- newer drafts. The worker applies drafts even to cancelled jobs.

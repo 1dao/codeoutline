@@ -54,6 +54,11 @@ project definition rules are read live by the server. Multiple workspace roots
 share one client/server process and each root keeps its own rules. Local file
 documents are supported; unsaved changes are synchronized in full.
 
+In navigation-enabled sessions, opening or selecting a supported file also hints
+the server to warm its navigation caches in idle time. Fast tab changes are
+coalesced by the server, and foreground queries cancel idle work. The client
+sends only the URI and document version; parsing and cache management remain in Lua.
+
 **CodeOutline: Restart Language Server** reloads server code after changes.
 **CodeOutline: Show Language Server Log** opens the output channel; use
 `codeoutline.trace.server` for protocol tracing. Opening an untrusted workspace

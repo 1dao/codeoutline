@@ -77,6 +77,7 @@ local function run(id, req, reply)
         local synced, err = pcall(navigation.sync, req)
         if not synced then io.stderr:write('[codeoutline lsp] ', tostring(err), '\n') end
     end
+    if req.method == 'lsp_warm' then req.deadline = math.min(req.deadline, xtimer.now_ms() + 5000) end
     control.callback = function()
         if shared:get('shutdown') or shared:get('cancel:' .. id) then error(control.cancelled(), 0) end
         if xtimer.now_ms() > req.deadline then error(control.deadline(), 0) end

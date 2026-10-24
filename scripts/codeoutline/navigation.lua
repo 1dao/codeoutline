@@ -74,7 +74,7 @@ end
 -- files. Overlay files and nodes take ids after every resident one; masked
 -- resident nodes drop out of name lists, which keep path and node order.
 -- Nothing is written to the resident tables.
-local function view(session, root, include_paths)
+local function view(session, root, include_paths, only)
     local idx = service.resident(root)
     local G = idx:symbols()
     local V = setmetatable({ root = root, idx = idx, drafts = {}, disk = {}, dep_cache = {}, new_files = {},
@@ -148,7 +148,7 @@ local function view(session, root, include_paths)
     local drafts = {}
     for _, doc in pairs(sessions[session] or {}) do drafts[#drafts + 1] = doc end
     table.sort(drafts, function(a, b) return a.uri < b.uri end)
-    for _, doc in ipairs(drafts) do V.add(doc) end
+    for _, doc in ipairs(drafts) do if not only or doc.uri == only then V.add(doc) end end
     return V
 end
 
@@ -1064,6 +1064,48 @@ local function at(req)
 end
 
 local handlers = {}
+
+-- Best-effort idle work: share the exact caches used by navigation, rather
+-- than retaining answers that could outlive a document/configuration change.
+function handlers.lsp_warm(req)
+    local doc = request_doc(req)
+    if not doc or #doc.source > M.MAX_FILE_BYTES then return { files = 0 } end
+    local V = view(req.session, req.root, req.includePaths, req.uri)
+    local f = V.add(doc)
+    if not f then return { files = 0 } end
+    local started, files, bytes = xtimer.now_ms(), 0, 0
+    local function warm(target)
+        control.check()
+        local draft = V.drafts[target]
+        if not draft then
+            local path = paths.key(V.idx:abs(V.files[target].path))
+            for _, candidate in pairs(sessions[req.session] or {}) do
+                if candidate.path and paths.key(candidate.path) == path then draft = candidate; break end
+            end
+        end
+        local size = draft and #draft.source or V.files[target].size or 0
+        if files >= 4 or size > M.MAX_FILE_BYTES or bytes + size > 2 * M.MAX_FILE_BYTES
+            or xtimer.now_ms() - started >= 500 then return false end
+        if draft then V.add(draft) end
+        local rec = M.full(V, target)
+        if not rec then return false end
+        files, bytes = files + 1, bytes + size
+        local lang = rec.language
+        if lang == 'cpp' or lang == 'csharp' or lang == 'python' or lang == 'javascript'
+            or lang == 'typescript' or lang == 'arkts' then V.js_context.ordinary.data(target) end
+        return true
+    end
+    warm(f)
+    local direct = graph.dependencies(V, f, V.js_context, true)
+    local candidates = {}
+    for target in pairs(direct) do if target ~= f then candidates[#candidates + 1] = target end end
+    table.sort(candidates, function(a, b) return V.files[a].path < V.files[b].path end)
+    for _, target in ipairs(candidates) do
+        if files >= 4 or xtimer.now_ms() - started >= 500 then break end
+        warm(target)
+    end
+    return { files = files }
+end
 
 function handlers.lsp_implementation(req)
     local V, _, _, targets = at(req)

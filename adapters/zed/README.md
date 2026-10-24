@@ -3,6 +3,11 @@
 A thin Zed client: it locates and launches `codeoutline lsp --stdio`. Indexing,
 protocol handling and resolution stay in the Lua server.
 
+The server warms navigation caches in idle time after `didOpen` and document-symbol
+requests. Zed extension API 0.7.0 does not expose active-editor changes, so switching
+between already-open tabs alone is not guaranteed to trigger additional warming.
+Normal navigation remains available when warming has not completed.
+
 Requires Zed with LSP call hierarchy support (1.19.2 or later) for the call
 hierarchy commands.
 

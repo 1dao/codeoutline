@@ -2,15 +2,29 @@ import * as vscode from 'vscode';
 import { LanguageClient, LanguageClientOptions, ServerOptions } from 'vscode-languageclient/node';
 import { missingServerHint, resolveServer } from './server';
 
-const featureNames = ['documentSymbol', 'workspaceSymbol', 'definition', 'hover', 'references', 'callHierarchy', 'completion', 'signatureHelp'] as const;
+const featureNames = ['documentSymbol', 'workspaceSymbol', 'definition', 'implementation', 'hover', 'references', 'callHierarchy', 'completion', 'signatureHelp'] as const;
 let client: LanguageClient | undefined;
 let output: vscode.OutputChannel;
 let pending: Promise<void> = Promise.resolve();
 let disposed = false;
+let warmLanguages = new Set<string>();
+
+function notifyVisibleDocument(): void {
+    const active = client;
+    const editor = vscode.window.activeTextEditor;
+    if (!active?.isRunning() || !editor || editor.document.uri.scheme !== 'file'
+        || !warmLanguages.has(editor.document.languageId)) return;
+    void active.sendNotification('codeoutline/visibleDocument', {
+        textDocument: { uri: editor.document.uri.toString(), version: editor.document.version }
+    }).catch((error: unknown) => {
+        if (client === active && !disposed) output.appendLine('CodeOutline visibility notification failed: ' + String(error));
+    });
+}
 
 async function restart(): Promise<void> {
     const previous = client;
     client = undefined;
+    warmLanguages.clear();
     if (previous) await previous.dispose();
     const config = vscode.workspace.getConfiguration('codeoutline');
     if (disposed || !vscode.workspace.isTrusted || !vscode.workspace.workspaceFolders?.length
@@ -40,6 +54,12 @@ async function restart(): Promise<void> {
     client = next;
     try {
         await next.start();
+        if (!disposed && client === next) {
+            if (Object.entries(features).some(([name, enabled]) => enabled && name !== 'documentSymbol' && name !== 'workspaceSymbol')) {
+                warmLanguages = new Set(languages);
+            }
+            notifyVisibleDocument();
+        }
         output.appendLine('CodeOutline is ready. Mode: ' + config.get<string>('mode', 'auxiliary'));
     } catch (error) {
         client = undefined;
@@ -68,6 +88,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ read
     context.subscriptions.push(
         vscode.commands.registerCommand('codeoutline.restart', scheduleRestart),
         vscode.commands.registerCommand('codeoutline.showLog', () => output.show()),
+        vscode.window.onDidChangeActiveTextEditor(notifyVisibleDocument),
+        vscode.window.onDidChangeVisibleTextEditors(notifyVisibleDocument),
         vscode.workspace.onDidChangeConfiguration(event => {
             if (event.affectsConfiguration('codeoutline')) void scheduleRestart();
         }),
@@ -78,6 +100,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ read
 
 export async function deactivate(): Promise<void> {
     disposed = true;
+    warmLanguages.clear();
     await pending;
     if (client) await client.dispose();
     client = undefined;

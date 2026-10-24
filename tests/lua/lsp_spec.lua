@@ -561,6 +561,48 @@ end
 
 spec.describe('LSP navigation', function()
     service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+    spec.it('warms navigation caches without bypassing source validation or dependency limits', function()
+        nav_write('WarmTarget.lua', 'local M = {}\nfunction M.warm_save() end\nreturn M\n')
+        local source = "local api = dofile('WarmTarget.lua')\napi.warm_save()\n"
+        nav_write('WarmClient.lua', source)
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local uri = nav_uri('WarmClient.lua')
+        local ignored = nav_uri('WarmIgnored.lua')
+        navigation.sync({ session = 'warm-cache', open = { [uri] = 1, [ignored] = 1 }, changed = {
+            [uri] = { version = 1, language = 'lua', source = source },
+            [ignored] = { version = 1, language = 'lua', source = 'function unrelated_warm_document() end' } } })
+        local original, parses, idle = parse.parse_tokens, 0, true
+        parse.parse_tokens = function(path, ...)
+            if idle then spec.truthy(not path:match('WarmIgnored'), 'idle warming must not parse unrelated open drafts') end
+            if path:match('Warm[CT]') then parses = parses + 1 end
+            return original(path, ...)
+        end
+        local ok, err = pcall(function()
+            local warmed = nav({ method = 'lsp_warm', session = 'warm-cache', uri = uri })
+            idle = false
+            spec.equal(warmed.files, 2)
+            local before = parses
+            local result = nav({ method = 'lsp_definition', session = 'warm-cache', uri = uri,
+                position = { line = 1, character = 6 } })
+            spec.equal(#result, 1); spec.equal(result[1].uri, nav_uri('WarmTarget.lua'))
+            spec.equal(parses, before, 'the first definition must reuse the warmed source and target')
+            nav_write('WarmTarget.lua', '\nlocal M = {}\nfunction M.warm_save() end\nreturn M\n')
+            local fresh, failure = pcall(nav, { method = 'lsp_definition', session = 'warm-cache', uri = uri,
+                position = { line = 1, character = 6 } })
+            spec.equal(fresh, false); spec.contains(failure, 'source changed')
+        end)
+        parse.parse_tokens = original
+        navigation.close('warm-cache')
+        if not ok then error(err, 0) end
+        local imports = {}
+        for i = 1, 5 do
+            nav_write('WarmLimit' .. i .. '.lua', 'return { warm_limit = function() end }\n')
+            imports[i] = "local m" .. i .. " = dofile('WarmLimit" .. i .. ".lua')"
+        end
+        nav_write('WarmLimited.lua', table.concat(imports, '\n'))
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        spec.equal(nav({ method = 'lsp_warm', uri = nav_uri('WarmLimited.lua') }).files, 4)
+    end)
     spec.it('shares binding evidence across overlays while validating source and evicting old entries', function()
         local ordinary = require('codeoutline.ordinary_bindings')
         local storage = { entries = {}, order = {}, bytes = 0 }
@@ -2724,6 +2766,76 @@ local function session_with(submit, init, cancel)
 end
 
 spec.describe('LSP navigation requests', function()
+    spec.it('coalesces idle file warming and cancels it before capturing foreground drafts', function()
+        local clock, now = xtimer.now_ms, 100
+        xtimer.now_ms = function() return now end
+        local ok, err = pcall(function()
+            local jobs, cancelled = {}, {}
+            local session, send, output = session_with(function(req, done)
+                jobs[#jobs + 1] = { req = req, done = done }; return tostring(#jobs)
+            end, nil, function(id) cancelled[id] = true end)
+            jobs[1].done(true, true)
+            local first, second = nav_uri('WarmFirst.lua'), nav_uri('WarmSecond.lua')
+            for _, uri in ipairs({ first, second }) do
+                send('textDocument/didOpen', { textDocument = { uri = uri, languageId = 'lua', version = 1,
+                    text = 'function warm_idle() end\n' } })
+            end
+            now = 249; session:poll(); spec.equal(#jobs, 1)
+            now = 250; session:poll(); spec.equal(#jobs, 2)
+            spec.equal(jobs[2].req.method, 'lsp_warm'); spec.equal(jobs[2].req.uri, second)
+            spec.nil_value(jobs[2].req.changed[first], 'idle submission only transfers its selected draft')
+            send('textDocument/documentSymbol', { textDocument = { uri = second } }, 19)
+            send('codeoutline/visibleDocument', { textDocument = { uri = second, version = 1 } })
+            spec.nil_value(cancelled['2']); session:poll(); spec.equal(#jobs, 2)
+            send('textDocument/definition', { textDocument = { uri = second }, position = { line = 0, character = 10 } }, 20)
+            spec.truthy(cancelled['2']); spec.equal(#jobs, 3)
+            spec.truthy(jobs[3].req.changed[first]); spec.truthy(jobs[3].req.changed[second])
+            jobs[2].done(true, { result = { files = 1 } })
+            jobs[3].done(true, { result = {} }); spec.equal(output[#output].id, 20)
+            send('codeoutline/visibleDocument', { textDocument = { uri = first, version = 1 } })
+            now = 400; session:poll(); spec.equal(jobs[4].req.uri, first)
+            send('textDocument/didClose', { textDocument = { uri = first } })
+            spec.truthy(cancelled['4']); jobs[4].done(true, {})
+            send('textDocument/didChange', { textDocument = { uri = second, version = 2 },
+                contentChanges = { { text = 'function edited_idle() end\n' } } })
+            now = 899; session:poll(); spec.equal(#jobs, 4)
+            now = 900; session:poll(); spec.equal(jobs[5].req.changed[second].version, 2)
+            send('textDocument/didChange', { textDocument = { uri = second, version = 3 },
+                contentChanges = { { text = 'function latest_idle() end\n' } } })
+            spec.truthy(cancelled['5']); jobs[5].done(true, {})
+            now = 1400; session:poll(); spec.equal(jobs[6].req.changed[second].version, 3)
+            local replies = #output
+            jobs[6].done(false, 'idle deadline'); spec.equal(#output, replies)
+            send('textDocument/definition', { textDocument = { uri = second }, position = { line = 0, character = 10 } }, 21)
+            spec.equal(jobs[7].req.changed[second].version, 3)
+            jobs[7].done(true, { result = {} }); spec.equal(output[#output].id, 21)
+            session:close()
+        end)
+        xtimer.now_ms = clock
+        if not ok then error(err, 0) end
+    end)
+    spec.it('skips idle warming for auxiliary sessions and oversized documents', function()
+        local clock, now = xtimer.now_ms, 100
+        xtimer.now_ms = function() return now end
+        local ok, err = pcall(function()
+            for _, auxiliary in ipairs({ true, false }) do
+                local jobs = {}
+                local features = {}
+                for _, name in ipairs(lsp.FEATURES) do features[name] = not auxiliary or name == 'workspaceSymbol' end
+                local session, send = session_with(function(req, done)
+                    jobs[#jobs + 1] = { req = req, done = done }; return tostring(#jobs)
+                end, { initializationOptions = { features = features } })
+                jobs[1].done(true, true)
+                local uri = nav_uri('WarmSkipped.lua')
+                send('textDocument/didOpen', { textDocument = { uri = uri, languageId = 'lua', version = 1,
+                    text = auxiliary and 'function unused_idle() end' or '--' .. string.rep('x', 1048576) } })
+                now = now + 150; session:poll(); spec.equal(#jobs, 1)
+                session:close()
+            end
+        end)
+        xtimer.now_ms = clock
+        if not ok then error(err, 0) end
+    end)
     spec.it('shares in-flight identifier navigation and keeps cancellation per request', function()
         local jobs, cancelled = {}, {}
         local session, send, output = session_with(function(req, done)

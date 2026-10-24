@@ -174,6 +174,35 @@ test('LSP shares same-name navigation across every configured export table', { t
     }
 });
 
+test('LSP idle warming preserves navigation across visibility, edits and closed documents', { timeout: 30000 }, async (t) => {
+    const client = await start(t);
+    const target = join(client.project, 'warm_target.lua');
+    const first = join(client.project, 'warm_first.lua'), second = join(client.project, 'warm_second.lua');
+    const text = "local api = dofile('warm_target.lua')\napi.save()\n";
+    await writeFile(target, 'local M = {}\nfunction M.save() end\nreturn M\n');
+    await writeFile(first, text); await writeFile(second, text);
+    await initialize(client, [client.project]); await indexed(client);
+    const uri = pathToFileURL(first).href, other = pathToFileURL(second).href;
+    for (const opened of [uri, other]) client.notify('textDocument/didOpen', {
+        textDocument: { uri: opened, languageId: 'lua', version: 1, text }
+    });
+    client.notify('codeoutline/visibleDocument', { textDocument: { uri, version: 1 } });
+    client.notify('codeoutline/visibleDocument', { textDocument: { uri: other, version: 1 } });
+    await new Promise(resolve => setTimeout(resolve, 500));
+    const definition = () => client.request('textDocument/definition', { textDocument: { uri: other }, position: { line: 1, character: 6 } });
+    let result = await definition();
+    assert.equal(result.length, 1); assert.equal(fileURLToPath(result[0].uri), target);
+    assert.equal(result[0].range.start.line, 1);
+    client.notify('textDocument/didChange', { textDocument: { uri: other, version: 2 }, contentChanges: [{ text }] });
+    client.notify('codeoutline/visibleDocument', { textDocument: { uri: other, version: 2 } });
+    client.notify('textDocument/didOpen', { textDocument: { uri: pathToFileURL(target).href,
+        languageId: 'lua', version: 1, text: '\n\nlocal M = {}\nfunction M.save() end\nreturn M\n' } });
+    result = await definition(); assert.equal(result.length, 1); assert.equal(result[0].range.start.line, 3);
+    client.notify('textDocument/didClose', { textDocument: { uri } });
+    client.notify('codeoutline/visibleDocument', { textDocument: { uri, version: 1 } });
+    result = await definition(); assert.equal(result.length, 1); assert.equal(result[0].range.start.line, 3);
+});
+
 test('LSP coroutine queries retain ordered draft snapshots while RPCs are pending', { timeout: 30000 }, async (t) => {
     const client = await start(t);
     await initialize(client, [client.project]);

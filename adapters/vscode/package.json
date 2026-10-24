@@ -170,6 +170,9 @@
             "definition": {
               "type": "boolean"
             },
+            "implementation": {
+              "type": "boolean"
+            },
             "hover": {
               "type": "boolean"
             },

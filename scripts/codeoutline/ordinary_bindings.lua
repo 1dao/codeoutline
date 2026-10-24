@@ -18,6 +18,14 @@ function M.context(G, ctx, source, options)
         local old = table.remove(order, 1); storage.bytes = storage.bytes - cache[old].weight; cache[old] = nil
     end
     local C = { stats = { parses = 0, files = 0, bytes = 0 } }
+    function C.available(f)
+        local rec = G.files[f]
+        return rec.ordinary_bindings or rec.size ~= nil or source ~= nil
+    end
+    function C.source_size(f)
+        local draft = source and source(f)
+        return draft and #draft or G.files[f].size
+    end
     local hints = {}
     local function alias_hints(f)
         if hints[f] and hints[f].record == G.files[f] then return hints[f].roots end
@@ -95,6 +103,7 @@ function M.context(G, ctx, source, options)
             csharp_usings = parsed.csharp_usings, csharp_statics = parsed.csharp_statics,
             csharp_scopes = parsed.csharp_scopes, csharp_parameters = parsed.csharp_parameters, csharp_access = parsed.csharp_access }
         data.implementation_evidence = parsed.implementation_evidence
+        data.go_methods = parsed.go_methods
         data.cpp_macros = parsed.cpp_macros
         data.automatic_events = parsed.automatic_events
         data.lua_callback_loops = parsed.lua_callback_loops
@@ -105,6 +114,7 @@ function M.context(G, ctx, source, options)
             + #(parsed.csharp_parameters or {}) * 128 + #parsed.nodes * (parsed.implementation_evidence and 256 or 0)
             + #(parsed.rust_imports or {}) * 256 + #(parsed.rust_public or {}) * 32
             + #(parsed.cpp_macros or {}) * 256
+            + (parsed.go_methods and (#parsed.nodes * 384 + #parsed.go_methods.bindings * 256) or 0)
             + #(parsed.automatic_events or {}) * 512
             + (parsed.lua_callback_loops and parsed.lua_callback_loops.weight or 0)
         if cache[key] then
@@ -125,6 +135,12 @@ function M.context(G, ctx, source, options)
     function C.evidence(f, i)
         local rec = G.files[f]
         local value = evidence(rec, i)
+        if rec.language == 'go' and not C.available(f) then return value end
+        if rec.language == 'go' then
+            local data = require('codeoutline.go_methods').context(G, ctx).data(f)
+            if not data then return 'go:?' end
+            return data.evidence[i] or value
+        end
         local kind = rec.refs.kind[i]
         if kind ~= 'call' and kind ~= 'member_call' and not (rec.language == 'csharp' and kind == 'new')
             and kind ~= 'ref' then return value end

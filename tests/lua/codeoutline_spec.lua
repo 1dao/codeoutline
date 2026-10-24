@@ -5786,6 +5786,293 @@ spec.describe('project search ranking', function()
     end)
 end)
 
+spec.describe('query-owned Go method sets and implicit implementations', function()
+    local methods = require('codeoutline.go_methods')
+    local function build(files)
+        local records = {}
+        for path, source in pairs(files) do records[path] = ci.parse(path, source, { ordinary_bindings = true }) end
+        local G = graph.build({ files = records })
+        local ctx = {}; ctx.ordinary = require('codeoutline.ordinary_bindings').context(G, ctx)
+        return G, methods.context(G, ctx)
+    end
+    local function type_id(G, name, file)
+        for _, id in ipairs(G.by_name[name] or {}) do
+            if G.nodes[id].kind ~= 'field' and (not file or G.files[G.node_file[id]].path == file) then return id end
+        end
+    end
+    local function edge_names(G, id, kind, incoming)
+        local Q, names = graph.query(G, { explain = true }), {}
+        if incoming then Q:load_incoming({ id }) end
+        local edges = incoming and Q.inn[id] or Q.out[id]
+        for i = 1, #edges, graph.EDGE do
+            if not kind or edges[i + 2] == kind then names[#names + 1] = G.nodes[edges[i]].qualified end
+        end
+        table.sort(names); return table.concat(names, ','), Q
+    end
+    spec.it('distinguishes value and pointer method sets while promoting pointer embeddings', function()
+        local G, C = build({ ['p/a.go'] = [[package p
+type Reader interface { Read([]byte) (int, error) }
+type Base struct {}
+type Value struct { Base }
+type Pointer struct { *Base }
+func (b *Base) Read(data []byte) (n int, err error) { return 0, nil }
+func Use(r Reader, b Base, v Value, p Pointer) { r.Read(nil); b.Read(nil); v.Read(nil); p.Read(nil) }
+]] })
+        local reader, base = type_id(G, 'Reader'), type_id(G, 'Base')
+        spec.equal(C.satisfies(base, reader, false), false); spec.truthy(C.satisfies(base, reader, true))
+        spec.equal(C.satisfies(type_id(G, 'Value'), reader, false), false)
+        spec.truthy(C.satisfies(type_id(G, 'Value'), reader, true))
+        spec.truthy(C.satisfies(type_id(G, 'Pointer'), reader, false))
+        spec.equal(edge_names(G, G.by_qualified['Reader.Read'][1], 'implementation'), 'Base.Read')
+        spec.equal(edge_names(G, type_id(G, 'Use')), 'Base.Read,Base.Read,Base.Read,Reader.Read')
+        spec.equal(edge_names(G, G.by_qualified['Base.Read'][1], 'implementation', true), 'Reader.Read')
+    end)
+    spec.it('requires exact complete signatures including results, grouped names and variadics', function()
+        local G, C = build({ ['a.go'] = [[package p
+type I interface { Copy(a, b []byte) (n int, err error); Send(...string) }
+type Good struct {}
+func (Good) Copy(first []uint8, second []byte) (int, error) { return 0, nil }
+func (Good) Send(items ...string) {}
+type WrongResult struct {}
+func (WrongResult) Copy(a, b []byte) (string, error) { return "", nil }
+func (WrongResult) Send(...string) {}
+type WrongVariadic struct {}
+func (WrongVariadic) Copy([]byte, []byte) (int, error) { return 0, nil }
+func (WrongVariadic) Send([]string) {}
+type Missing struct {}
+func (Missing) Copy([]byte, []byte) (int, error) { return 0, nil }
+]] })
+        local contract = type_id(G, 'I')
+        spec.truthy(C.satisfies(type_id(G, 'Good'), contract, false))
+        for _, name in ipairs({ 'WrongResult', 'WrongVariadic', 'Missing' }) do spec.equal(C.satisfies(type_id(G, name), contract, true), false, name) end
+        spec.equal(edge_names(G, G.by_qualified['I.Copy'][1], 'implementation'), 'Good.Copy')
+    end)
+    spec.it('rejects same-depth promotions and fields while honoring shallower declarations', function()
+        local G, C = build({ ['a.go'] = [[package p
+type I interface { Run() }
+type A struct {}
+func (A) Run() {}
+type B struct {}
+func (B) Run() {}
+type Diamond struct { A; B }
+type Hidden struct { A; Run int }
+type Nested struct { A }
+type Shallow struct { B; Nested }
+type Override struct { A; B }
+func (Override) Run() {}
+]] })
+        local contract = type_id(G, 'I')
+        spec.equal(C.satisfies(type_id(G, 'Diamond'), contract, false), false)
+        spec.equal(C.satisfies(type_id(G, 'Hidden'), contract, false), false)
+        spec.truthy(C.satisfies(type_id(G, 'Shallow'), contract, false))
+        spec.truthy(C.satisfies(type_id(G, 'Override'), contract, false))
+        local set = C.method_set(type_id(G, 'Shallow'), false)
+        spec.equal(G.nodes[set.entries.Run.ids[1]].qualified, 'B.Run')
+    end)
+    spec.it('merges embedded interface methods and rejects conflicting signatures at any depth', function()
+        local G, C = build({ ['a.go'] = [[package p
+type I interface { Read() int }
+type J interface { Read() string }
+type Deep interface { J }
+type Both interface { I; Read() int }
+type Conflict interface { I; Deep }
+type Box struct {}
+func (Box) Read() int { return 0 }
+type ViaInterface struct { I }
+type BadPointer struct { *I }
+]] })
+        spec.truthy(C.satisfies(type_id(G, 'Box'), type_id(G, 'Both'), false))
+        spec.equal(C.satisfies(type_id(G, 'Box'), type_id(G, 'Conflict'), false), false)
+        spec.truthy(C.satisfies(type_id(G, 'ViaInterface'), type_id(G, 'I'), false))
+        spec.equal(C.satisfies(type_id(G, 'BadPointer'), type_id(G, 'I'), false), false)
+        spec.equal(edge_names(G, G.by_qualified['I.Read'][1], 'implementation'), 'Box.Read')
+    end)
+    spec.it('keeps private methods and named parameter types scoped to their Go package', function()
+        local G, C = build({ ['one/a.go'] = [[package same
+type Item struct {}
+type I interface { hidden(Item) }
+type Local struct {}
+func (Local) hidden(Item) {}
+]], ['two/a.go'] = [[package same
+type Item struct {}
+type Other struct {}
+func (Other) hidden(Item) {}
+]] })
+        local contract = type_id(G, 'I')
+        spec.truthy(C.satisfies(type_id(G, 'Local'), contract, false))
+        spec.equal(C.satisfies(type_id(G, 'Other'), contract, false), false)
+        spec.equal(edge_names(G, G.by_qualified['I.hidden'][1], 'implementation'), 'Local.hidden')
+    end)
+    spec.it('resolves cross-file methods, aliases and composite signature types conservatively', function()
+        local G, C = build({ ['p/types.go'] = [[package p
+type Bytes = []byte
+type Number int
+type I interface { Pack(map[string]Bytes, [3]int, chan<- int) Number }
+type Box struct {}
+]], ['p/methods.go'] = [[package p
+func (Box) Pack(m map[string][]uint8, a [3]int, c chan<- int) Number { return 0 }
+]], ['p/wrong.go'] = [[package p
+type Wrong struct {}
+func (Wrong) Pack(map[string][]byte, [4]int, <-chan int) int { return 0 }
+]] })
+        spec.truthy(C.satisfies(type_id(G, 'Box'), type_id(G, 'I'), false))
+        spec.equal(C.satisfies(type_id(G, 'Wrong'), type_id(G, 'I'), false), false)
+        spec.equal(edge_names(G, G.by_qualified['I.Pack'][1], 'implementation'), 'Box.Pack')
+    end)
+    spec.it('binds declarations and literals while preserving lexical and local-type barriers', function()
+        local G = build({ ['a.go'] = [[package p
+type Good struct {}
+func (Good) Run() {}
+type Other struct {}
+func (Other) Run() {}
+func Known() { var v Good; v.Run(); p := &Good{}; p.Run(); q := new(Good); q.Run() }
+func Scoped(v Good) { { var v Other; v.Run() }; v.Run(); func(v Other) { v.Run() }(Other{}) }
+func Block(v Good) { { v := factory(); v.Run() }; { type Good Other; var v Good; v.Run() } }
+func Generic[Good any](v Good) { v.Run() }
+func Unknown() { unknown.Run(); factory().Run(); items[0].Run() }
+]] })
+        spec.equal(edge_names(G, type_id(G, 'Known')), 'Good.Run,Good.Run,Good.Run')
+        spec.equal(edge_names(G, type_id(G, 'Scoped')), 'Good.Run,Other.Run,Other.Run')
+        spec.equal(edge_names(G, type_id(G, 'Block')), '')
+        spec.equal(edge_names(G, type_id(G, 'Generic')), '')
+        spec.equal(edge_names(G, type_id(G, 'Unknown')), '')
+    end)
+    spec.it('skips empty, constrained, generic and recursive interface matches', function()
+        local G, C = build({ ['a.go'] = [[package p
+type Empty interface {}
+type Constraint interface { ~int; Run() }
+type Generic[T any] interface { Run(T) }
+type Cycle interface { Cycle; Run() }
+type Box struct {}
+func (Box) Run() {}
+]] })
+        for _, name in ipairs({ 'Empty', 'Constraint', 'Generic', 'Cycle' }) do
+            spec.equal(C.satisfies(type_id(G, 'Box'), type_id(G, name), true), false, name)
+        end
+    end)
+    spec.it('checks function types and blocks shadowed builtins or local callables', function()
+        local G, C = build({ ['a.go'] = [[package p
+type I interface { Apply(func(int) error) }
+type Good struct {}
+func (Good) Apply(callback func(value int) error) {}
+type Wrong struct {}
+func (Wrong) Apply(func(string) error) {}
+func (Good) Run() {}
+func new(value any) Good { return Good{} }
+func fn() {}
+func Shadow() { p := new(Good{}); p.Run() }
+func Local(fn func()) { fn() }
+]] })
+        spec.truthy(C.satisfies(type_id(G, 'Good'), type_id(G, 'I'), false))
+        spec.equal(C.satisfies(type_id(G, 'Wrong'), type_id(G, 'I'), false), false)
+        spec.equal(edge_names(G, type_id(G, 'Shadow')), 'new')
+        spec.equal(edge_names(G, type_id(G, 'Local')), '')
+    end)
+    spec.it('keeps own methods reliable when an external embedding is unavailable', function()
+        local G, C = build({ ['a.go'] = [[package p
+import "sync"
+type I interface { Run() }
+type Base struct {}
+func (Base) Run() {}
+type Own struct { sync.Mutex }
+func (Own) Run() {}
+type Promoted struct { sync.Mutex; Base }
+]] })
+        spec.truthy(C.satisfies(type_id(G, 'Own'), type_id(G, 'I'), false))
+        spec.equal(C.satisfies(type_id(G, 'Promoted'), type_id(G, 'I'), false), false)
+    end)
+    spec.it('keeps unsupported parameter and result syntax from reviving package aliases', function()
+        local G = build({ ['p/a.go'] = [[package p
+import r "other"
+type Good struct {}
+func (Good) Run() {}
+func Inline(r interface { Run() }) { r.Run() }
+func Return(r Good) interface { Run() } { r.Run(); return nil }
+func Closure() { func(r interface { Run() }) { r.Run() }(nil) }
+func TypeShadow() { type r int; r.Run() }
+func GroupedTypeShadow() { type (r int); r.Run() }
+func Generic[r interface { Run() }](v r) { r.Run(v) }
+]], ['other/a.go'] = 'package other\nfunc Run() {}' })
+        spec.equal(edge_names(G, type_id(G, 'Inline')), '')
+        spec.equal(edge_names(G, type_id(G, 'Return')), 'Good.Run')
+        spec.equal(edge_names(G, type_id(G, 'Closure')), '')
+        spec.equal(edge_names(G, type_id(G, 'TypeShadow')), '')
+        spec.equal(edge_names(G, type_id(G, 'GroupedTypeShadow')), '')
+        spec.equal(edge_names(G, type_id(G, 'Generic')), '')
+    end)
+    spec.it('bounds candidates and reports incomplete results without persistent evidence', function()
+        local source = { 'package p', 'type I interface { Run() }' }
+        for i = 1, 12 do source[#source + 1] = 'type Box' .. i .. ' struct {}\nfunc (Box' .. i .. ') Run() {}' end
+        local G = build({ ['a.go'] = table.concat(source, '\n') })
+        local cap = methods.MAX_CANDIDATES; methods.MAX_CANDIDATES = 3
+        local ok, err = pcall(function()
+            local names, Q = edge_names(G, G.by_qualified['I.Run'][1], 'implementation')
+            spec.truthy(Q.incomplete); spec.truthy(#names > 0)
+        end)
+        methods.MAX_CANDIDATES = cap; assert(ok, err)
+        local compact = ci.parse('a.go', table.concat(source, '\n'), { ranges = false })
+        spec.nil_value(compact.go_methods); spec.nil_value(compact.refs.binding)
+    end)
+    spec.it('bounds source evidence and preserves cancellation identity', function()
+        local G = build({ ['i.go'] = 'package p\ntype I interface { Run() }',
+            ['box.go'] = 'package p\ntype Box struct {}\nfunc (Box) Run() {}' })
+        for _, field in ipairs({ 'MAX_FILES', 'MAX_BYTES', 'MAX_TIME_MS' }) do
+            local old = methods[field]; methods[field] = field == 'MAX_TIME_MS' and -1 or 1
+            local ok, err = pcall(function()
+                local names, Q = edge_names(G, G.by_qualified['I.Run'][1], 'implementation')
+                spec.equal(names, ''); spec.truthy(Q.incomplete)
+            end)
+            methods[field] = old; assert(ok, err)
+        end
+        local control = require('codeoutline.control'); local stopped = control.cancelled()
+        control.callback = function() error(stopped, 0) end
+        local ok, err = pcall(edge_names, G, G.by_qualified['I.Run'][1])
+        control.callback = nil; spec.equal(ok, false); spec.equal(err, stopped)
+    end)
+    spec.it('revalidates cached Go source after edits and keeps evidence out of disk records', function()
+        local root = tmp_root .. '/go_method_refresh'
+        write(root .. '/types.go', 'package p\ntype I interface { Run() int }\ntype Box struct {}')
+        write(root .. '/methods.go', 'package p\nfunc (Box) Run() int { return 1 }')
+        local options = { cache_path = root .. '/cache.idx', lister = 'walk' }
+        local idx, G = svc.get(root, options)
+        spec.equal(edge_names(G, G.by_qualified['I.Run'][1], 'implementation'), 'Box.Run')
+        local text = svc.explore(root, 'I.Run Box.Run', options)
+        spec.contains(text, 'possible Go implementation')
+        for _, rec in pairs(idx.files) do spec.nil_value(rec.go_methods); spec.nil_value(rec.refs.binding) end
+        idx:save(); svc.forget(root); idx, G = svc.get(root, options); spec.truthy(idx.cache_loaded)
+        spec.equal(edge_names(G, G.by_qualified['I.Run'][1], 'implementation'), 'Box.Run')
+        write(root .. '/methods.go', 'package p\nfunc (Box) Run() string { return "" }')
+        idx, G = svc.get(root, options)
+        spec.equal(edge_names(G, G.by_qualified['I.Run'][1], 'implementation'), '')
+        svc.forget(root)
+    end)
+    spec.it('keeps proven implementation entries when the set budget is exhausted', function()
+        local G = build({ ['a.go'] = [[package p
+type I interface { Read(); Write() }
+type Box struct {}
+func (Box) Read() {}
+func (Box) Write() {}
+]] })
+        local cap = methods.MAX_TYPES; methods.MAX_TYPES = 2
+        local ok, err = pcall(function()
+            spec.equal(edge_names(G, G.by_qualified['I.Read'][1], 'implementation'), 'Box.Read')
+        end)
+        methods.MAX_TYPES = cap; assert(ok, err)
+    end)
+    spec.it('does not mutate cached base interfaces while merging embedded declarations', function()
+        local G, C = build({ ['a.go'] = [[package p
+type I interface { Read() int }
+type J interface { Read() int }
+type Combined interface { I; J }
+]] })
+        local base = C.method_set(type_id(G, 'I'), false)
+        spec.equal(#base.entries.Read.ids, 1)
+        spec.equal(#C.method_set(type_id(G, 'Combined'), false).entries.Read.ids, 2)
+        spec.equal(#base.entries.Read.ids, 1)
+        spec.equal(G.nodes[base.entries.Read.ids[1]].qualified, 'I.Read')
+    end)
+end)
+
 return {
     __init = function()
         local failed = spec.finish()

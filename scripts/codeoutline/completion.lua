@@ -451,6 +451,7 @@ Completion.__index = Completion
 function Completion:types(name, f, scope, at)
     if not name then return {} end
     f = f or self.f
+    if self.V.files[f].language == 'go' then return require('codeoutline.go_methods').context(self.V, self.V.js_context).types(f, name) end
     local accept = self.language == 'lua' and LUA_TYPES or TYPES
     local direct, paired = navigation.deps(self.V, f)
     if self.V.files[f].language == 'csharp' then
@@ -509,6 +510,13 @@ end
 function Completion:members(ids, depth, seen)
     depth, seen = depth or 0, seen or {}
     local V, out = self.V, {}
+    if self.language == 'go' then
+        local methods = require('codeoutline.go_methods').context(V, V.js_context)
+        for _, id in ipairs(ids) do
+            for _, entry in ipairs(methods.members({ id = id, pointer = false, addressable = true }, self.f)) do out[#out + 1] = entry end
+        end
+        return out
+    end
     local function add(name, kind, node, f)
         out[#out + 1] = { name = name, kind = kind, node = node, file = f }
     end
@@ -774,6 +782,11 @@ end
 -- A receiver: { types = ids } or { modules = files }.
 function Completion:receiver(item, depth)
     local name = item.name
+    if self.language == 'go' then
+        local receiver = require('codeoutline.go_methods').context(self.V, self.V.js_context).receiver(self.f, name, self.offset)
+        if receiver == false then return { go_blocked = true } end
+        if receiver then return { go_receiver = receiver } end
+    end
     if self.language == 'lua' then
         local target, bound = require('codeoutline.lua_bindings').receiver(
             self.V, self.rec, self.T, name, self.offset, self.V.js_context.lua)
@@ -829,6 +842,8 @@ end
 
 function Completion:entries(target)
     if not target then return {} end
+    if target.go_blocked then return {} end
+    if target.go_receiver then return require('codeoutline.go_methods').context(self.V, self.V.js_context).members(target.go_receiver, self.f) end
     if target.rust_module then return require('codeoutline.rust_resolution').members(self.V, target.rust_module, self.V.js_context) end
     if target.cpp_namespace then
         local bindings, result = require('codeoutline.cpp_types'), {}
@@ -1078,7 +1093,7 @@ function M.complete(req)
         end
     end
     return { items = items, incomplete = self.incomplete or V.js_context.include_incomplete
-        or V.js_context.workspace_incomplete or V.js_context.go_incomplete or V.js_context.rust_incomplete }
+        or V.js_context.workspace_incomplete or V.js_context.go_incomplete or V.js_context.go_methods_incomplete or V.js_context.rust_incomplete }
 end
 
 navigation.register('lsp_completion', function(req)

@@ -189,6 +189,13 @@ overlay never writes to the resident tables.
   Alternative headers are evaluated independently within the existing query limits;
   configured include order still selects one header. These navigation candidates
   do not create execution edges in the call graph.
+- Go declared receivers and non-generic embedded methods use the same method-set
+  resolver as agent queries. Implementation lookup checks whole interface contracts,
+  including parameter/result types and pointer/value method sets. Completion and
+  definition lookup respect promotion conflicts, fields, package identity and local
+  receiver shadowing. Draft changes invalidate the relevant query evidence. Generic
+  bodies, type-set constraints and unresolved types remain conservative unknowns;
+  exhausted source/candidate/time limits report incomplete results.
 - When ordinary definition lookup has insufficient evidence, F12 can suggest
   exact-name symbols in the same language family elsewhere in the project.
   Explicit qualifications must match; known import/local/receiver barriers,

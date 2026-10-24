@@ -190,6 +190,7 @@ end
 -- Targets of one occurrence of name in file f, enclosed by node index from.
 local function resolve_site(V, f, from, name, kind, recv, evidence, offset, index, cursor_line)
     if index then evidence = V.js_context.ordinary.evidence(f, index) end
+    if V.files[f].language == 'go' and recv and offset and evidence ~= 'go:?' then evidence = 'go:recv:' .. offset end
     local src = from > 0 and V.id_of[f][from] or nil
     local direct, paired = deps(V, f)
     local rkind, accept = kind, nil
@@ -573,7 +574,7 @@ local function scan(V, targets, name)
             end
         end
     end
-    return hits, V.js_context.include_incomplete or V.js_context.workspace_incomplete or V.js_context.go_incomplete
+    return hits, V.js_context.include_incomplete or V.js_context.workspace_incomplete or V.js_context.go_incomplete or V.js_context.go_methods_incomplete
         or V.js_context.rust_incomplete or false
 end
 
@@ -1167,7 +1168,7 @@ function handlers.lsp_definition(req)
         -- An import line: `require "a.b"`, `dofile("x.lua")`, `#include <x.h>`, `from . import m`.
         local files = import_targets(V, f, line)
         if #files > 0 or importer then
-            return files, V.js_context.include_incomplete or V.js_context.workspace_incomplete or V.js_context.go_incomplete or V.js_context.rust_incomplete
+            return files, V.js_context.include_incomplete or V.js_context.workspace_incomplete or V.js_context.go_incomplete or V.js_context.go_methods_incomplete or V.js_context.rust_incomplete
         end
     end
     if #targets == 0 then
@@ -1186,7 +1187,7 @@ function handlers.lsp_definition(req)
             if hit then result[#result + 1] = { uri = target_doc.uri, range = target_doc:range(hit.name_start, hit.name_end) } end
         end
         return result, info.truncated or V.js_context.include_incomplete or V.js_context.workspace_incomplete
-            or V.js_context.go_incomplete or V.js_context.rust_incomplete
+            or V.js_context.go_incomplete or V.js_context.go_methods_incomplete or V.js_context.rust_incomplete
     end
     if c.decl and is_decl(V.nodes[targets[1]]) then
         -- From a declaration, go to its definitions.
@@ -1198,7 +1199,7 @@ function handlers.lsp_definition(req)
     end
     local result = {}
     for _, id in ipairs(targets) do result[#result + 1] = (location(V, id)) end
-    return result, V.js_context.include_incomplete or V.js_context.workspace_incomplete or V.js_context.go_incomplete or V.js_context.rust_incomplete
+    return result, V.js_context.include_incomplete or V.js_context.workspace_incomplete or V.js_context.go_incomplete or V.js_context.go_methods_incomplete or V.js_context.rust_incomplete
 end
 
 -- Follow unmatched delimiters up to the cursor. Commas in nested calls,
@@ -1386,13 +1387,13 @@ function handlers.lsp_outgoing(req)
             end
         end
     end
-    return result, V.js_context.include_incomplete or V.js_context.workspace_incomplete or V.js_context.go_incomplete or V.js_context.rust_incomplete
+    return result, V.js_context.include_incomplete or V.js_context.workspace_incomplete or V.js_context.go_incomplete or V.js_context.go_methods_incomplete or V.js_context.rust_incomplete
 end
 
 function handlers.lsp_references(req)
     local V, _, c, targets = at(req)
     if not V then return {} end
-    if #targets == 0 then return {}, V.js_context.workspace_incomplete or V.js_context.go_incomplete or V.js_context.rust_incomplete end
+    if #targets == 0 then return {}, V.js_context.workspace_incomplete or V.js_context.go_incomplete or V.js_context.go_methods_incomplete or V.js_context.rust_incomplete end
     local set = {}
     for _, id in ipairs(targets) do
         if not REFERENCE[V.nodes[id].kind] then

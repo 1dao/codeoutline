@@ -708,6 +708,32 @@ test('LSP answers local queries while a real background index is still running',
 });
 
 
+test('LSP shares Go implicit implementations and promoted methods across draft edits', { timeout: 30000 }, async (t) => {
+    const client = await start(t);
+    const types = join(client.project, 'types.go'), methods = join(client.project, 'methods.go'), use = join(client.project, 'use.go');
+    await writeFile(types, 'package demo\ntype Reader interface { Read([]byte) (int, error) }\ntype Base struct {}\ntype Wrapper struct { *Base }\n');
+    const implementation = 'package demo\nfunc (b *Base) Read(p []byte) (int, error) { return 0, nil }\n';
+    await writeFile(methods, implementation);
+    const source = 'package demo\nfunc use(r Reader, w Wrapper) { r.Read(nil); w.Read(nil) }\n';
+    await writeFile(use, source);
+    await initialize(client, [client.project]); await indexed(client);
+    const uri = pathToFileURL(use).href, target = pathToFileURL(methods).href;
+    const position = symbol => ({ line: 1, character: source.split('\n')[1].indexOf(symbol) + 2 });
+    const definition = await client.request('textDocument/definition', { textDocument: { uri }, position: position('w.Read') });
+    assert.equal(definition.length, 1); assert.equal(fileURLToPath(definition[0].uri), methods);
+    const implementations = await client.request('textDocument/implementation', { textDocument: { uri }, position: position('r.Read') });
+    assert.equal(implementations.length, 1); assert.equal(fileURLToPath(implementations[0].uri), methods);
+    client.notify('textDocument/didOpen', { textDocument: { uri: target, languageId: 'go', version: 1, text: implementation } });
+    client.notify('textDocument/didChange', { textDocument: { uri: target, version: 2 }, contentChanges: [
+        { text: 'package demo\nfunc (b *Base) Read(p []byte) string { return "" }\n' },
+    ] });
+    const changed = await client.request('textDocument/implementation', { textDocument: { uri }, position: position('r.Read') });
+    assert.deepEqual(changed, []);
+    client.notify('textDocument/didClose', { textDocument: { uri: target } });
+    const restored = await client.request('textDocument/implementation', { textDocument: { uri }, position: position('r.Read') });
+    assert.equal(restored.length, 1); assert.equal(fileURLToPath(restored[0].uri), methods);
+});
+
 test('LSP exit without shutdown fails and truncated frames fail on EOF', { timeout: 30000 }, async (t) => {
     for (const mode of ['exit', 'partial']) {
         const client = await start(t);

@@ -55,6 +55,7 @@ local function parameters(T, first, last, language)
 end
 
 function M.collect(r, T)
+    if r.language == 'go' then return require('codeoutline.go_methods').collect(r, T) end
     if r.language == 'cpp' then return require('codeoutline.cpp_implementations').collect(r, T) end
     if r.language == 'typescript' then return require('codeoutline.ts_implementations').collect(r, T) end
     if not languages[r.language] then return end
@@ -234,6 +235,11 @@ end
 function M.context(G, ctx, report)
     local C = { incomplete = false, stats = { candidates = 0, links = 0, hierarchy = 0 } }
     local cpp
+    local go
+    local function go_context()
+        if not go then go = require('codeoutline.go_methods').context(G, ctx, report); C.stats.go = go.stats end
+        return go
+    end
     local function cpp_context()
         if not cpp then cpp = require('codeoutline.cpp_implementations').context(G, ctx, report, M, C) end
         return cpp
@@ -344,6 +350,9 @@ function M.context(G, ctx, report)
         return a ~= nil and a == b
     end
     function C.outgoing(id)
+        if G.files[G.node_file[id]].language == 'go' then
+            local result = go_context().outgoing(id); C.incomplete = C.incomplete or go.incomplete; return result
+        end
         if G.files[G.node_file[id]].language == 'cpp' and G.nodes[id].kind == 'method' then return cpp_context().outgoing(id) end
         if outgoing[id] then return outgoing[id] end
         local result = {}
@@ -366,6 +375,9 @@ function M.context(G, ctx, report)
         outgoing[id] = result; return result
     end
     function C.incoming(id)
+        if G.files[G.node_file[id]].language == 'go' then
+            local result = go_context().incoming(id); C.incomplete = C.incomplete or go.incomplete; return result
+        end
         if G.files[G.node_file[id]].language == 'cpp' and G.nodes[id].kind == 'method' then return cpp_context().incoming(id) end
         if incoming[id] then return incoming[id] end
         local result, cls = {}, owner(G, id)

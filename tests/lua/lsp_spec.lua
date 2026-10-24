@@ -579,6 +579,49 @@ spec.describe('LSP navigation', function()
         local text, info = service.explore(nav_root, 'IndexedFragmentCall', { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
         spec.contains(text, 'IndexedFragment.piece:2'); spec.equal(#(info.on_demand_files or {}), 0)
     end)
+    spec.it('shares Go method sets across definitions, implementations, completion and draft changes', function()
+        local prefix = 'go-method-sets/'
+        assert(xutils.mkdir_p(nav_root .. '/' .. prefix))
+        nav_write(prefix .. 'types.go', [[package methods
+type GoReader interface { Read([]byte) (int, error) }
+type GoBase struct {}
+type GoWrapper struct { *GoBase }
+type GoOther struct {}
+func (GoOther) Read(int) string { return "" }
+]])
+        nav_write(prefix .. 'methods.go', 'package methods\nfunc (b *GoBase) Read(p []byte) (int, error) { return 0, nil }')
+        local source = 'package methods\nfunc GoMethodUse(r GoReader, w GoWrapper) { r.Read(nil); w.Read(nil) }'
+        nav_write(prefix .. 'use.go', source)
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local doc = docs.read(nav_root .. '/' .. prefix .. 'use.go')
+        local function request(symbol, method, session)
+            return nav({ method = method or 'lsp_definition', session = session, uri = doc.uri,
+                position = doc:position(assert(source:find(symbol, 1, true)) + 1) })
+        end
+        local result = request('r.Read')
+        spec.equal(#result, 1); spec.equal(result[1].uri, nav_uri(prefix .. 'types.go'))
+        result = request('w.Read')
+        spec.equal(#result, 1); spec.equal(result[1].uri, nav_uri(prefix .. 'methods.go'))
+        result = request('r.Read', 'lsp_implementation')
+        spec.equal(#result, 1); spec.equal(result[1].uri, nav_uri(prefix .. 'methods.go'))
+        result = request('GoReader', 'lsp_implementation')
+        spec.equal(#result, 2)
+        local completion = require('codeoutline.completion').complete({ root = nav_root, uri = doc.uri,
+            position = doc:position(assert(source:find('w.Read', 1, true)) + 1) })
+        local labels = {}; for _, item in ipairs(completion.items) do labels[item.label] = true end
+        spec.truthy(labels.Read); spec.truthy(labels.GoBase)
+        local target = nav_uri(prefix .. 'methods.go')
+        navigation.sync({ session = 'go-method-draft', open = { [target] = 1 }, changed = {
+            [target] = { language = 'go', version = 1, source = 'package methods\n\nfunc (b *GoBase) Read(p []byte) (int, error) { return 1, nil }' } } })
+        result = request('w.Read', 'lsp_definition', 'go-method-draft')
+        spec.equal(#result, 1); spec.equal(result[1].range.start.line, 2)
+        navigation.sync({ session = 'go-method-draft', open = { [target] = 2 }, changed = {
+            [target] = { language = 'go', version = 2, source = 'package methods\nfunc (b *GoBase) Read(p []byte) string { return "" }' } } })
+        result = request('r.Read', 'lsp_implementation', 'go-method-draft')
+        spec.equal(#result, 0)
+        navigation.close('go-method-draft')
+        result = request('r.Read', 'lsp_implementation'); spec.equal(#result, 1)
+    end)
     spec.it('warms navigation caches without bypassing source validation or dependency limits', function()
         nav_write('WarmTarget.lua', 'local M = {}\nfunction M.warm_save() end\nreturn M\n')
         local source = "local api = dofile('WarmTarget.lua')\napi.warm_save()\n"

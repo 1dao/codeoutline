@@ -170,6 +170,16 @@ configuration per query (1 MiB per file); exceeded limits report incomplete resu
 navigation, not full Node/TypeScript module resolution: dependency installation, lockfiles, package
 `imports`, custom conditions, arbitrary YAML, and CommonJS export analysis are not provided.
 
+Go method queries share bounded, query-time method sets across agent exploration,
+callers, LSP definition/implementation lookup and completion. Ordinary interfaces
+match only when every required method has an identical resolved parameter/result
+signature, including variadic form. Value and pointer receivers, non-generic
+embeddings, shallower declarations, field shadowing and ambiguous promotions are
+handled separately. Implementation edges are possible structural matches, not proof
+of a runtime receiver. Empty interfaces do not expand to every type. Generic bodies,
+type-set constraints and unresolved signatures remain unknown. Detailed evidence
+is not stored in the index; see [Go method queries](docs/GO-METHODS.md) for limits.
+
 Go imports use the nearest in-project `go.mod` and `go.work`: declared module paths,
 workspace `use` lists, and relative local `replace` targets locate indexed packages.
 Workspace replacements override module replacements; version-specific replacements

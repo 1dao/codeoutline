@@ -348,8 +348,12 @@ local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired, accept,
     local strategy = 'js/ts binding'
     local exact, binding_reason = js_resolution.resolve(G, f, name, kind, recv, evidence, js_context)
     if G.files[f].language == 'go' then
-        strategy = 'go package binding'
-        exact, binding_reason = require('codeoutline.go_modules').resolve(G, f, name, recv, js_context)
+        strategy = 'go method set'
+        exact, binding_reason = require('codeoutline.go_methods').resolve(G, f, name, recv, evidence, js_context)
+        if exact == nil then
+            strategy = 'go package binding'
+            exact, binding_reason = require('codeoutline.go_modules').resolve(G, f, name, recv, js_context)
+        end
     end
     if G.files[f].language == 'rust' and js_context then
         strategy = 'cargo crate/module binding'
@@ -667,7 +671,7 @@ function M.query(symbols, opts)
         local found, reason, macro_state = resolve_ref(symbols, f, ids[refs.from[i]], refs.name[i], refs.kind[i],
             refs.recv[i] or nil, direct, paired, nil, evidence, js_context, refs.line[i])
         if macros.incomplete then Q.incomplete = true end
-        if js_context.workspace_incomplete or js_context.go_incomplete or js_context.rust_incomplete then Q.incomplete = true end
+        if js_context.workspace_incomplete or js_context.go_incomplete or js_context.go_methods_incomplete or js_context.rust_incomplete then Q.incomplete = true end
         if report and explain and (refs.kind[i] == 'call' or refs.kind[i] == 'member_call') then
             if (not found or #found == 0) and explain == true then
                 report:add({ source = ids[refs.from[i]], line = refs.line[i], call = refs.name[i], reason = reason or 'unresolved reference',
@@ -827,7 +831,7 @@ function M.query(symbols, opts)
         -- selective name test first. Checkpoints run per file and per chunk.
         local files = symbols.files
         local candidates = js_context.ordinary.candidates(wanted)
-        if js_context.workspace_incomplete or js_context.go_incomplete then Q.incomplete = true end
+        if js_context.workspace_incomplete or js_context.go_incomplete or js_context.go_methods_incomplete then Q.incomplete = true end
         for _, f in ipairs(symbols.file_order) do
             control.check()
             local language = files[f].language

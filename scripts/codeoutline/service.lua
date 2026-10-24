@@ -151,7 +151,20 @@ local function run_query(engine, root, query, opts)
     local ok, result = pcall(function()
         while true do
             -- A GBK repair commits the decoded file, which renumbers its nodes.
-            local output, details = engine.run(idx:symbols(), idx, query, opts)
+            local symbols, source_index, dynamic = idx:symbols(), idx, nil
+            if engine == explore then symbols, source_index, dynamic = require('codeoutline.on_demand').open(symbols, idx, query) end
+            local output, details = engine.run(symbols, source_index, query, opts)
+            if dynamic then
+                details.on_demand_files, details.on_demand_rejected, details.on_demand_truncated = dynamic.files, dynamic.rejected, dynamic.truncated
+                if output and #dynamic.files > 0 then
+                    local notices = {}
+                    for _, file in ipairs(dynamic.files) do
+                        notices[#notices + 1] = string.format('On-demand source: %s (%s, %s); not stored in the index.', file.path, file.language, file.basis)
+                    end
+                    output, details.truncated = require('codeoutline.text').limit(table.concat(notices, '\n') .. '\n' .. output,
+                        opts and opts.budget or explore.DEFAULT_BUDGET, details.truncated or dynamic.truncated)
+                end
+            end
             control.check()
             if not details.encoding_retry then return { text = output, info = details } end
         end

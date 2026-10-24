@@ -12,7 +12,8 @@ return {
         'the definitions the query names, the call paths between them, and their callers ' ..
         'and callees. Unresolved calls may include unconfirmed definition candidates; inspect ' ..
         'them before inferring a binding or call relationship. Use it BEFORE Grep/Read when locating or understanding code; name ' ..
-        'functions, methods, classes, or files in the query (e.g. "xtimer_poll xtimer_add", ' ..
+        'functions, methods, classes, or files in the query. Explicit project-relative files with unknown suffixes ' ..
+        'are parsed on demand using supported syntax or a lang: hint (e.g. "xtimer_poll xtimer_add", ' ..
         '"Session.save", "how does xpoll.c dispatch events"). Source it returns is current ' ..
         'and can be edited directly without re-reading. Supports C, C++, Lua, Python, Java, Go, JavaScript/TypeScript, C#, Rust.',
     input_schema = {

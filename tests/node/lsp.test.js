@@ -449,6 +449,30 @@ test('LSP stdio handles drafts, UTF-16 ranges, cancellation and close restoratio
     assert.equal((await client.request('workspace/symbol', { query: 'unsaved' }))[0].name, 'unsaved');
 });
 
+test('LSP parses unknown suffixes through every navigation phase without learning the suffix', { timeout: 30000 }, async (t) => {
+    const client = await start(t);
+    await writeFile(join(client.project, 'api.h'), 'int unknown_api(int);\n');
+    await writeFile(join(client.project, 'api.c'), '#include "api.h"\nint unknown_api(int n) { return n; }\n');
+    const source = '#include "api.h"\nint unknown_caller() { return unknown_api(1); }\n';
+    await writeFile(join(client.project, 'use.fragment'), source);
+    await initialize(client, [client.project]); await indexed(client);
+    const uri = pathToFileURL(join(client.project, 'use.fragment')).href;
+    const params = { textDocument: { uri }, position: { line: 1, character: 32 } };
+    for (const languageId of ['cpp', 'c', 'plaintext']) {
+        client.notify('textDocument/didOpen', { textDocument: { uri, languageId, version: 1, text: source } });
+        for (let i = 0; i < 2; i++) {
+            const result = await client.request('textDocument/definition', params);
+            assert.equal(result.length, 1); assert.equal(fileURLToPath(result[0].uri), join(client.project, 'api.c'));
+        }
+        client.notify('textDocument/didClose', { textDocument: { uri } });
+    }
+    const luaUri = pathToFileURL(join(client.project, 'other.fragment')).href;
+    const lua = 'local function unknown_lua() end\nunknown_lua()\n';
+    client.notify('textDocument/didOpen', { textDocument: { uri: luaUri, languageId: 'plaintext', version: 1, text: lua } });
+    const result = await client.request('textDocument/definition', { textDocument: { uri: luaUri }, position: { line: 1, character: 3 } });
+    assert.equal(result.length, 1); assert.equal(result[0].uri, luaUri); assert.equal(result[0].range.start.line, 0);
+});
+
 test('LSP suggests distant definitions only after strict lookup fails', { timeout: 30000 }, async (t) => {
     const client = await start(t);
     for (const dir of ['one', 'two', 'use']) await mkdir(join(client.project, dir));

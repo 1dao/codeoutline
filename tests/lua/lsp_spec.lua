@@ -2452,6 +2452,37 @@ int luaopen_native_test(lua_State *L) { luaL_setfuncs(L, methods, 0); luaL_newli
         for _, dir in ipairs({ 'candidateLua', 'candidateCpp', 'candidateCaller' }) do assert(xutils.rmtree(nav_root .. '/' .. dir)) end
         service.refresh(nav_root, options); assert(ok, err)
     end)
+    spec.it('keeps inferred language across unknown-suffix bindings, tokens, positions and drafts', function()
+        local source = '#include "util.h"\nint UnknownSuffixUse() { return helper(1); }\n'
+        nav_write('unknown.fragment', source)
+        local uri = nav_uri('unknown.fragment')
+        local function jump(session)
+            return nav({ method = 'lsp_definition', session = session, uri = uri,
+                position = { line = 1, character = 36 } })
+        end
+        local result = jump('unknown-disk')
+        spec.equal(#result, 1); spec.equal(result[1].uri, nav_uri('util.c'))
+        for _, hint in ipairs({ 'c', 'cpp', 'plaintext' }) do
+            navigation.sync({ session = 'unknown-hint', open = { [uri] = 1 }, changed = {
+                [uri] = { source = source, version = 1, language = hint } } })
+            result = jump('unknown-hint'); spec.equal(#result, 1); spec.equal(result[1].uri, nav_uri('util.c'))
+            navigation.close('unknown-hint')
+        end
+        local edited = 'int UnknownDraft() { return 1; }\nint UnknownSuffixUse() { return UnknownDraft(); }\n'
+        navigation.sync({ session = 'unknown-hint', open = { [uri] = 2 }, changed = {
+            [uri] = { source = edited, version = 2, language = 'cpp' } } })
+        result = nav({ method = 'lsp_definition', session = 'unknown-hint', uri = uri, position = { line = 1, character = 36 } })
+        spec.equal(#result, 1); spec.equal(result[1].uri, uri); spec.equal(result[1].range.start.line, 0)
+        navigation.close('unknown-hint')
+        spec.nil_value(service.resident(nav_root).files['unknown.fragment'])
+        local branches = '#include "util.h"\n#if PLATFORM\nvoid ActiveUnknown() {}\n#else\nvoid InactiveUnknown() { helper(1); }\n#endif\n'
+        navigation.sync({ session = 'unknown-branches', open = { [uri] = 1 }, changed = {
+            [uri] = { source = branches, version = 1, language = 'cpp' } } })
+        result = nav({ method = 'lsp_definition', session = 'unknown-branches', uri = uri, position = { line = 4, character = 27 } })
+        spec.equal(#result, 1); spec.equal(result[1].uri, nav_uri('util.c'))
+        navigation.close('unknown-branches')
+        os.remove(nav_root .. '/unknown.fragment')
+    end)
     spec.it('goes to the definition across files and from a prototype to its body', function()
         local result = nav({ method = 'lsp_definition', uri = nav_uri('main.c'), position = { line = 1, character = 35 } })
         spec.equal(#result, 1)

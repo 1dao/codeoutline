@@ -116,6 +116,15 @@ C/C++ bare calls check [project macro visibility](docs/CPP-MACROS.md) on demand:
 indexed include order and finite conditions distinguish visible macros from ordinary
 functions. Unknown expansions remain unresolved; this does not run a preprocessor.
 
+Unknown filename suffixes are handled on demand. LSP uses a supported editor language
+ID first, then bounded, conservative syntax detection. Explicit project-relative file
+paths in explore queries receive the same temporary parsing; `lang:` can supply a
+language hint. Detection ignores comments, strings, binary data and ambiguous syntax.
+Each explore query admits at most four such files of 1 MiB each and 2 MiB in total.
+No suffix association is learned, and these files are neither swept by full indexing
+nor added to its disk cache. Supply a full relative path for files outside the root
+directory; file discovery by basename still uses the regular index.
+
 Explore can suggest exact-name definitions for unresolved calls, including possible
 macro declarations. The separate **Unconfirmed definition candidates** section gives
 locations, matching reasons and bounded source snippets. These suggestions never add

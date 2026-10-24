@@ -264,7 +264,7 @@ local function find_cursor(doc, offset, strict)
     end
 end
 
-local function cursor(doc, offset, V, f)
+local function cursor(doc, offset, V, f, include_inactive)
     local found = find_cursor(doc, offset, true) or find_cursor(doc, offset, false)
     if found then return found end
     local rec, T
@@ -272,11 +272,18 @@ local function cursor(doc, offset, V, f)
     rec = rec or doc:parse()
     T = T or doc:tokens()
     if not T then return nil end
-    local t
-    for i = 1, T.n do
-        local a = T.s[i] - 1
-        if a > offset then break end
-        if T.k[i] == 'id' and offset <= T.e[i] then t = i end
+    local function token_at(tokens)
+        local hit
+        for i = 1, tokens.n do
+            local a = tokens.s[i] - 1
+            if a > offset then break end
+            if tokens.k[i] == 'id' and offset <= tokens.e[i] then hit = i end
+        end
+        return hit
+    end
+    local t = token_at(T)
+    if not t and include_inactive and C_FAMILY[rec.language] then
+        T = doc:tokens(true); t = token_at(T)
     end
     if not t then return nil end
     local kind, recv = 'symbol', nil
@@ -337,7 +344,8 @@ function M.full(V, f, native)
         draft.full = draft.full or {}
         local entry = draft.full
         if not entry.rec or native and not entry.foreign then
-            entry.rec, entry.tokens = parse.parse_tokens(draft.path or V.files[f].path, draft.source, { foreign = native })
+            entry.rec, entry.tokens = parse.parse_tokens(draft.path or V.files[f].path, draft.source,
+                { foreign = native, language = draft:parse().language })
             entry.foreign = native
         end
         return entry.rec, entry.tokens, draft
@@ -349,7 +357,7 @@ function M.full(V, f, native)
         local doc = source_doc(V, f)
         -- Read/parse failures are transient, unlike a successful empty result.
         if not doc then return nil end
-        local rec, tokens = parse.parse_tokens(key.path, doc.source, { foreign = native })
+        local rec, tokens = parse.parse_tokens(key.path, doc.source, { foreign = native, language = key.language })
         if not rec then return nil end
         entry = { rec = rec, tokens = tokens, foreign = native }
         cache_full(key, entry)
@@ -1056,7 +1064,7 @@ local function at(req)
     local f = V.add(doc)
     if not f then return nil end
     local offset = doc:offset(req.position)
-    local c = cursor(doc, offset, V, f)
+    local c = cursor(doc, offset, V, f, req.method == 'lsp_definition')
     local targets, reason, evidence = {}
     if c and c.decl then targets = { V.id_of[f][c.decl] }
     elseif c then

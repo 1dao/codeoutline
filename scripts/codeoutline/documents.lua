@@ -2,6 +2,7 @@ local parse = require('codeoutline.parse')
 local paths = require('codeoutline.path')
 local text = require('codeoutline.text')
 local M = { MAX_BYTES = 1500000 }
+local branch_scanners = {}
 local Doc = {}
 Doc.__index = Doc
 
@@ -122,28 +123,39 @@ function Doc:offset(position)
     return p
 end
 
-local extensions = { javascript = 'js', typescript = 'ts', arkts = 'ets', ets = 'ets', python = 'py', csharp = 'cs', rust = 'rs', cpp = 'cpp', kotlin = 'kt' }
 local function parser_name(doc)
-    local name = doc.path or ('document.' .. (extensions[doc.language] or doc.language or 'txt'))
-    if not parse.language(name) and doc.language then name = 'document.' .. (extensions[doc.language] or doc.language) end
-    return name
+    return doc.path or 'document'
 end
 
 function Doc:parse()
     if self.parsed then return self.parsed end
-    self.parsed = parse.parse(parser_name(self), self.source) or { nodes = {} }
+    self.parsed = parse.parse(parser_name(self), self.source, { language = self.language, detect = true }) or { nodes = {} }
     return self.parsed
 end
 
 -- Tokens are not retained: only cursor lookups outside indexed refs need them.
-function Doc:tokens()
-    local _, tokens = parse.parse_tokens(parser_name(self), self.source)
+function Doc:tokens(all_branches)
+    local language = self:parse().language
+    if all_branches and (language == 'c' or language == 'cpp') then
+        if not self.branch_tokens then
+            local scanner = branch_scanners[language]
+            if not scanner then
+                local config = {}
+                for k, v in pairs(require('codeoutline.lang.' .. language).config) do config[k] = v end
+                config.pp_first_branch = false
+                scanner = require('codeoutline.xscan').lang(config); branch_scanners[language] = scanner
+            end
+            self.branch_tokens = scanner:tokenize(self.source)
+        end
+        return self.branch_tokens
+    end
+    local _, tokens = parse.parse_tokens(parser_name(self), self.source, { language = self:parse().language })
     return tokens
 end
 
 -- Transient sites use the same alias/literal resolver as relationship queries.
 function Doc:dispatch(names)
-    return parse.parse(parser_name(self), self.source, { dispatch = names, dispatch_only = true })
+    return parse.parse(parser_name(self), self.source, { dispatch = names, dispatch_only = true, language = self:parse().language })
 end
 
 -- An indexed target must still match its raw on-disk snapshot before decoding.

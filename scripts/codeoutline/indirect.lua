@@ -138,7 +138,7 @@ function M.query(G, rules, report)
             if not relevant then return {} end
         end
         local parsed = assert(require('codeoutline.parse').parse(rec.path, source,
-            { ranges = false, dispatch = names, dispatch_only = true }))
+            { ranges = false, dispatch = names, dispatch_only = true, language = rec.language }))
         assert(#parsed.nodes == #rec.nodes, 'source encoding changed; refresh index before indirect query: ' .. rec.path)
         for i, n in ipairs(parsed.nodes) do
             assert(n.qualified == rec.nodes[i].qualified and n.line == rec.nodes[i].line,

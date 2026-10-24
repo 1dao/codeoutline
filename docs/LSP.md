@@ -199,6 +199,12 @@ overlay never writes to the resident tables.
   References, rename, hover, implementations and call hierarchy do not use this
   fallback. Multiple definition results are candidates for inspection, not proof
   of a runtime binding.
+- Unknown suffixes use the editor's supported language ID, or conservative source
+  detection when no supported ID is supplied. The chosen language is retained for
+  binding extraction, completion and position lookup. These documents remain session
+  overlays and do not change persistent indexing or global suffix associations.
+  C/C++ definition navigation can also read identifier tokens in another preprocessor
+  branch; this lexical fallback does not add references or execution relationships.
 - Hover shows the target's signature, kind, qualified name and location.
 - Signature help, triggered by `(` and `,`, finds the innermost open call before
   the cursor (commas inside nested calls, literals and brackets do not count),

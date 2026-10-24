@@ -79,7 +79,7 @@ function M.context(G, ctx, source, options)
         if cached then return cached end
         local checksum = xcompress and xcompress.crc32 and xcompress.crc32(raw) or xutils.sha256_hex(raw)
         local parsed = assert(require('codeoutline.parse').parse(rec.path, raw,
-            { ranges = false, ordinary_bindings = true }))
+            { ranges = false, ordinary_bindings = true, language = rec.language }))
         local function check(ok) assert(ok, 'source changed; refresh index before binding query: ' .. rec.path) end
         check(#parsed.nodes == #rec.nodes and #parsed.refs.name == #rec.refs.name)
         for i, n in ipairs(parsed.nodes) do

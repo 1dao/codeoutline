@@ -4110,6 +4110,75 @@ spec.describe('recursive callers', function()
     end)
 end)
 
+spec.describe('query-time unknown suffixes', function()
+    spec.it('selects supported language hints or strong syntax without learning an extension', function()
+        local cases = {
+            { 'lua', 'local function save() end' },
+            { 'python', 'def save():\n    pass\n' },
+            { 'cpp', '#include "api.h"\nstruct Box { public: void save() {} };' },
+            { 'c', '#include "api.h"\nstatic int save(void) { return 1; }' },
+            { 'rust', 'pub fn save() {}' },
+            { 'go', 'package main\nfunc save() {}' },
+            { 'kotlin', 'fun save() = 1' },
+            { 'java', 'package sample; public class Store { void save() {} }' },
+            { 'csharp', 'using System; class Store { public void Save() {} }' },
+            { 'javascript', 'function save() {}' },
+            { 'typescript', 'function save(value: number) {}' },
+            { 'arkts', '@Component struct Store { build() {} }' },
+        }
+        for _, case in ipairs(cases) do
+            local rec = ci.parse('source.unmapped', case[2], { detect = true })
+            spec.truthy(rec, case[1]); spec.equal(rec.language, case[1]); spec.equal(rec.language_source, 'syntax')
+            spec.equal(rec.on_demand, true)
+        end
+        spec.nil_value(ci.language('source.unmapped'))
+        spec.nil_value(ci.parse('source.unmapped', cases[1][2]), 'ordinary indexing must not infer unknown files')
+        spec.equal(ci.parse('source.unmapped', 'int save() {}', { language = 'c++' }).language, 'cpp')
+        spec.equal(ci.parse('source.unmapped', 'int save() {}', { language = 'unsupported', detect = true }), nil)
+        for _, source in ipairs({ '/* function fake() {} */', '"function fake() {}"',
+            '--[[\nfunction fake() {}\n]]', '#!/bin/bash\nfunction fake() {}',
+            '```js\nfunction fake() {}\n```', '\0function fake() {}', 'ordinary prose',
+            'local function a() end\nfunction b() {}' }) do
+            spec.nil_value(ci.parse('source.unmapped', source, { detect = true }), source)
+        end
+    end)
+    spec.it('explores explicit files in isolated overlays and never persists inferred records', function()
+        local root = tmp_root .. '/unknown_suffixes'
+        write(root .. '/base.lua', 'function resident_symbol() end\n')
+        write(root .. '/part.fragment', '#include "api.h"\nstatic int dynamic_fragment(void) { return 7; }\n')
+        write(root .. '/other.fragment', 'local function dynamic_lua() return 8 end\n')
+        write(root .. '/unclear.fragment', 'ordinary prose')
+        local opts = { cache_path = root .. '/cache.idx', lister = 'walk' }
+        local idx, G = svc.get(root, opts)
+        local files, nodes = G.file_count, G.node_count
+        local output, info = svc.explore(root, 'part.fragment dynamic_fragment', opts)
+        spec.contains(output, 'return 7'); spec.contains(output, 'On-demand source: part.fragment (c, syntax)')
+        spec.equal(#info.on_demand_files, 1); spec.equal(info.on_demand_files[1].language, 'c')
+        output, info = svc.explore(root, 'other.fragment dynamic_lua', opts)
+        spec.contains(output, 'return 8'); spec.equal(info.on_demand_files[1].language, 'lua')
+        output, info = svc.explore(root, 'unclear.fragment', opts)
+        spec.equal(#info.on_demand_files, 0); spec.equal(#info.on_demand_rejected, 1)
+        write(root .. '/other.fragment', '#include "api.h"\nint dynamic_c(void) { return 9; }\n')
+        output, info = svc.explore(root, 'other.fragment dynamic_c', opts)
+        spec.contains(output, 'return 9'); spec.equal(info.on_demand_files[1].language, 'c')
+        spec.equal(idx:symbols(), G); spec.equal(G.file_count, files); spec.equal(G.node_count, nodes)
+        spec.nil_value(idx.files['part.fragment']); spec.nil_value(G.by_name.dynamic_fragment)
+        spec.nil_value(G.by_name.dynamic_c); spec.nil_value(G.file_index['other.fragment'])
+        write(root .. '/part.fragment', '#include "api.h"\nint resident_symbol(void) { return 10; }\n')
+        svc.explore(root, 'part.fragment resident_symbol', opts)
+        spec.equal(#G.by_name.resident_symbol, 1); spec.equal(#G.by_lname.resident_symbol, 1)
+        spec.equal(#G.by_qualified.resident_symbol, 1, 'copy-on-write lists must not leak overlay IDs')
+        write(root .. '-outside.fragment', '#include "api.h"\nvoid OutsideUnknown() {}')
+        output, info = svc.explore(root, '../unknown_suffixes-outside.fragment OutsideUnknown', opts)
+        spec.equal(#info.on_demand_files, 0); spec.nil_value(output:find('void OutsideUnknown', 1, true))
+        write(root .. '/large.fragment', '#include "api.h"\n' .. string.rep(' ', 1048576))
+        output, info = svc.explore(root, 'large.fragment', opts)
+        spec.equal(#info.on_demand_files, 0); spec.equal(info.on_demand_truncated, true)
+        idx:save(); svc.forget(root); idx = svc.refresh(root, opts)
+        spec.nil_value(idx.files['other.fragment']); svc.forget(root)
+    end)
+end)
+
 spec.describe('unconfirmed exploration candidates', function()
     local function project(files)
         local records = {}

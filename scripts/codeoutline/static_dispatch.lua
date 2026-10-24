@@ -471,7 +471,7 @@ function M.query(G, report)
             source = assert(xutils.to_utf8(raw, rec.encoding == 'gbk' and 'gbk' or 'auto'))
         end
         local parsed = require('codeoutline.parse').parse(rec.path, source,
-            { ranges = false, dispatch_only = true, static_dispatch = true })
+            { ranges = false, dispatch_only = true, static_dispatch = true, language = rec.language })
         assert(#parsed.nodes == #rec.nodes, 'source encoding changed; refresh index: ' .. rec.path)
         for i, n in ipairs(parsed.nodes) do
             assert(n.qualified == rec.nodes[i].qualified and n.line == rec.nodes[i].line, 'source encoding changed; refresh index: ' .. rec.path)

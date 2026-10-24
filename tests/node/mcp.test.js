@@ -78,6 +78,30 @@ test('official SDK stdio: discovery, source, incremental refresh, rebuild and er
     } finally { await c.close(); await f.cleanup(); }
 });
 
+test('official SDK explores unknown suffixes on demand without persisting their records', { timeout: 30000 }, async () => {
+    const f = await fixture();
+    await mkdir(join(f.project, 'parts'));
+    await writeFile(join(f.project, 'parts', 'unicode.fragment'), '#include <stddef.h>\nstatic int DynamicUnknown() { return 712; }\n');
+    const transport = new StdioClientTransport({ command: defaultRuntime,
+        args: [main, 'STDIO=1', `PROJECT=${f.project}`], cwd: tmpdir(), stderr: 'pipe' });
+    transport.stderr?.resume();
+    const c = client();
+    try {
+        await c.connect(transport);
+        const query = () => c.callTool({ name: 'codeoutline_explore', arguments: { query: 'parts/unicode.fragment DynamicUnknown' } });
+        let result = await query(); assert.notEqual(result.isError, true);
+        assert.match(result.content[0].text, /On-demand source: parts\/unicode.fragment \(c, syntax\)/);
+        assert.match(result.content[0].text, /return 712/);
+        let status = JSON.parse((await c.callTool({ name: 'codeoutline_status' })).content[0].text);
+        assert.equal(status.files, 1);
+        await writeFile(join(f.project, 'parts', 'unicode.fragment'), 'local function DynamicUnknown() return 913 end\n');
+        result = await query(); assert.match(result.content[0].text, /\(lua, syntax\)/); assert.match(result.content[0].text, /return 913/);
+        await c.callTool({ name: 'codeoutline_rebuild' });
+        status = JSON.parse((await c.callTool({ name: 'codeoutline_status' })).content[0].text);
+        assert.equal(status.files, 1);
+    } finally { await c.close(); await f.cleanup(); }
+});
+
 test('official SDK explore labels unconfirmed candidates without inventing callers', { timeout: 30000 }, async () => {
     const f = await fixture();
     for (const dir of ['one', 'two', 'use']) await mkdir(join(f.project, dir));

@@ -92,7 +92,7 @@ local function terms(query)
             for _, p in ipairs(parts) do seen['name:' .. p] = true; seen['word:' .. p] = true end
         end
     end
-    for path in query:gmatch('[%w_%-%./]+%.%a%a?%a?%a?') do
+    for path in query:gmatch('[%w_%-%./]+%.[%a][%w_]*') do
         local ext = path:match('%.(%a+)$')
         if path:find('/') or (ext and SOURCE_EXT[ext:lower()]) then add('file', path) end
     end
@@ -176,22 +176,27 @@ local function find_seeds(G, query, filters, ranking)
                     -- fuzzy: every query segment appears in the name's segments
                     local want = segments(t.text)
                     local hits, visited = 0, 0
-                    for name, ids in pairs(G.by_name) do
-                        visited = visited + 1
-                        if visited % 128 == 0 then control.check() end
-                        local lname = name:lower()
-                        local ok = true
-                        for _, w in ipairs(want) do
-                            if not lname:find(w, 1, true) then ok = false; break end
-                        end
-                        if ok then
-                            local accepted = false
-                            for _, id in ipairs(ids) do
-                                if consider(id, seed_score(id, false) - #name * 0.05) then accepted = true end
+                    for _, names in ipairs(G.query_base_names and { G.by_name, G.query_base_names } or { G.by_name }) do
+                        for name, ids in pairs(names) do
+                            if names ~= G.query_base_names or rawget(G.by_name, name) == nil then
+                                visited = visited + 1
+                                if visited % 128 == 0 then control.check() end
+                                local lname = name:lower()
+                                local ok = true
+                                for _, w in ipairs(want) do
+                                    if not lname:find(w, 1, true) then ok = false; break end
+                                end
+                                if ok then
+                                    local accepted = false
+                                    for _, id in ipairs(ids) do
+                                        if consider(id, seed_score(id, false) - #name * 0.05) then accepted = true end
+                                    end
+                                    if accepted then hits = hits + 1 end
+                                    if hits > 200 then break end
+                                end
                             end
-                            if accepted then hits = hits + 1 end
-                            if hits > 200 then break end
                         end
+                        if hits > 200 then break end
                     end
                 end
             end

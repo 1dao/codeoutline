@@ -41,12 +41,18 @@ end
 -- Returns the record and its tokens; positions in both exclude a UTF-8 BOM.
 function M.parse_tokens(path, src, opts)
     local lang = M.language(path)
+    local inferred
+    if not lang and opts and (opts.language or opts.detect) then
+        lang, inferred = require('codeoutline.language_detect').resolve(src, opts.language, opts.detect)
+    end
     if not lang then return nil end
     -- Strip a UTF-8 BOM so it is not read as part of the first token.
     if src:sub(1, 3) == '\239\187\191' then src = src:sub(4) end
     -- .h is shared by C and C++: sniff for C++-only syntax.
     if lang == 'c' and path:match('%.[hH]$') and parser('cpp').looks_cpp(src) then lang = 'cpp' end
-    return parser(MODULE[lang] or lang).parse(path, src, lang, opts)
+    local rec, tokens = parser(MODULE[lang] or lang).parse(path, src, lang, opts)
+    if inferred then rec.on_demand, rec.language_source = true, inferred end
+    return rec, tokens
 end
 
 -- opts.ranges=false emits compact index nodes; default parsing retains positions.

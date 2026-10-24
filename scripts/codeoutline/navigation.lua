@@ -1134,7 +1134,7 @@ function handlers.lsp_definition(req)
     if #targets == 0 and c and c.kind == 'call' and C_FAMILY[V.files[f].language] then
         -- Unknown build flags block execution binding, but F12 can still show
         -- the macro declaration sites that may be active at this call.
-        local _, definitions = require('codeoutline.cpp_macros').resolve(V, f, c.name, line, V.js_context)
+        local _, definitions = require('codeoutline.cpp_macros').resolve(V, f, c.name, line, V.js_context, true)
         if definitions and #definitions > 0 then targets = definitions end
     end
     -- Selecting a loader's member asks for that value, not the imported file.

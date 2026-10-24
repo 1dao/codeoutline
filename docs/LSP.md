@@ -184,6 +184,11 @@ overlay never writes to the resident tables.
   are ordered and stop at the first existing header. Explicit paths suppress
   whole-project suffix guesses, even when the selected header is outside the index.
   See the README for directory rules, limits and a multi-project example.
+- C/C++ macro calls can navigate to possible macro definitions when build flags
+  or unconfigured include paths are ambiguous, including object-like proxy macros.
+  Alternative headers are evaluated independently within the existing query limits;
+  configured include order still selects one header. These navigation candidates
+  do not create execution edges in the call graph.
 - Hover shows the target's signature, kind, qualified name and location.
 - Signature help, triggered by `(` and `,`, finds the innermost open call before
   the cursor (commas inside nested calls, literals and brackets do not count),

@@ -157,8 +157,10 @@ function M.context(G, ctx)
         summaries[f] = value; C.stats.files = C.stats.files + 1; C.stats.bytes = C.stats.bytes + (rec.size or 0)
         return value
     end
-    function C.resolve(f, name, line)
-        local key = f .. '\0' .. name .. '\0' .. line
+    -- Only definition navigation opts into ambiguous include alternatives;
+    -- execution queries keep their own strict, separately cached result.
+    function C.resolve(f, name, line, declarations)
+        local key = f .. '\0' .. name .. '\0' .. line .. (declarations and '\0declarations' or '')
         if results[key] then return results[key][1], results[key][2], results[key][3] end
         if result_count >= M.MAX_RESULTS then limited(); return {}, true end
         C.stats.checks = C.stats.checks + 1
@@ -213,7 +215,27 @@ function M.context(G, ctx)
                         else
                             local targets = require('codeoutline.cpp_includes').resolve(G, file, e, ctx)
                             if #targets == 1 then walk(targets[1], math.huge, active, depth + 1)
-                            elseif #targets > 1 then env[name] = UNKNOWN end
+                            elseif #targets > 1 then
+                                if declarations then
+                                    -- F12 may show alternatives without choosing a
+                                    -- build's include path. Evaluate each header
+                                    -- independently: sibling include guards, undef
+                                    -- and pragma once must not affect each other.
+                                    local original_env, original_once, original_definitions = env, once, definitions
+                                    local candidates = {}
+                                    local function copy(values)
+                                        local result = {}; for k, v in pairs(values) do result[k] = v end; return result
+                                    end
+                                    for _, target in ipairs(targets) do
+                                        env, once, definitions = copy(original_env), copy(original_once), copy(original_definitions)
+                                        walk(target, math.huge, active, depth + 1)
+                                        for id in pairs(definitions) do candidates[id] = true end
+                                        if failed then break end
+                                    end
+                                    env, once, definitions = original_env, original_once, candidates
+                                end
+                                env[name] = UNKNOWN
+                            end
                             -- External/unindexed headers are not interpreted.
                         end
                     end
@@ -240,7 +262,7 @@ function M.context(G, ctx)
     return C
 end
 
-function M.resolve(G, f, name, line, ctx)
+function M.resolve(G, f, name, line, ctx, declarations)
     if not line or not ctx or (G.files[f].language ~= 'c' and G.files[f].language ~= 'cpp') then return nil end
     local candidate = false
     for i, id in ipairs(G.by_name[name] or {}) do
@@ -248,7 +270,7 @@ function M.resolve(G, f, name, line, ctx)
         if G.nodes[id].kind == 'macro' then candidate = true; break end
     end
     if not candidate then return nil end
-    local ids, handled, definitions = M.context(G, ctx).resolve(f, name, line)
+    local ids, handled, definitions = M.context(G, ctx).resolve(f, name, line, declarations)
     return handled and ids or false, definitions
 end
 

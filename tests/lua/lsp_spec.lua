@@ -2483,6 +2483,57 @@ void MacroNavUnknown(void) { MACRO_NAV(3); }
         found = jump('MACRO_NAV(2)', 'macro-nav'); spec.equal(#found, 1); spec.equal(found[1].range.start.line, 3)
         navigation.close('macro-nav')
     end)
+    spec.it('navigates proxy macros in ambiguous headers without asserting execution targets', function()
+        for _, dir in ipairs({ 'proxyOne', 'proxyTwo', 'proxyUse' }) do assert(xutils.mkdir_p(nav_root .. '/' .. dir)) end
+        local options = { cache_path = nav_root .. '/cache.idx', lister = 'walk' }
+        local header = '#ifndef PROXY_API_H\n#define PROXY_API_H\n'
+            .. '#define PROXY_NAV __proxy__(PROXY_NAV)\n#if 0\n#define PROXY_NAV hidden\n#endif\n#endif\n'
+        nav_write('proxyOne/api.h', header)
+        nav_write('proxyTwo/api.h', header)
+        local source = '#include <api.h>\nvoid ProxyUse() { PROXY_NAV(1); }\n'
+            .. '#undef PROXY_NAV\nvoid ProxyAfter() { PROXY_NAV(2); }\n'
+            .. '#define PROXY_NAV current\nvoid ProxyNew() { PROXY_NAV(3); }\n'
+        nav_write('proxyUse/main.cpp', source)
+        service.refresh(nav_root, options)
+        local doc = assert(docs.read(nav_root .. '/proxyUse/main.cpp'))
+        local function jump(value, extra)
+            local req = { method = 'lsp_definition', uri = doc.uri,
+                position = doc:position(assert(source:find(value, 1, true)) - 1) }
+            for k, v in pairs(extra or {}) do req[k] = v end
+            return nav(req)
+        end
+        local ok, err = pcall(function()
+            local found = jump('PROXY_NAV(1)')
+            spec.equal(#found, 2, 'both alternative headers survive their shared include guard')
+            spec.equal(found[1].uri, nav_uri('proxyOne/api.h')); spec.equal(found[2].uri, nav_uri('proxyTwo/api.h'))
+            for _, loc in ipairs(found) do spec.equal(loc.range.start.line, 2) end
+            local V = navigation.view('spec', nav_root)
+            local f = V.file_index['proxyUse/main.cpp']
+            local C = require('codeoutline.cpp_macros').context(V, V.js_context)
+            local ids, handled, sites = C.resolve(f, 'PROXY_NAV', 2)
+            spec.equal(#ids, 0); spec.equal(handled, true); spec.equal(#sites, 0)
+            ids, handled, sites = C.resolve(f, 'PROXY_NAV', 2, true)
+            spec.equal(#ids, 0); spec.equal(handled, true); spec.equal(#sites, 2)
+            ids, handled, sites = C.resolve(f, 'PROXY_NAV', 2)
+            spec.equal(#ids, 0); spec.equal(#sites, 0, 'navigation alternatives cannot pollute graph results')
+            found = jump('PROXY_NAV(1)', { includePaths = { 'proxyTwo', 'proxyOne' } })
+            spec.equal(#found, 1); spec.equal(found[1].uri, nav_uri('proxyTwo/api.h'))
+            spec.equal(#jump('PROXY_NAV(1)', { includePaths = {} }), 2)
+            spec.equal(#jump('PROXY_NAV(2)'), 0, 'a later undef clears the alternatives')
+            found = jump('PROXY_NAV(3)'); spec.equal(#found, 1); spec.equal(found[1].uri, doc.uri)
+            spec.equal(found[1].range.start.line, 4)
+            local macros = require('codeoutline.cpp_macros')
+            local before = macros.MAX_FILES; macros.MAX_FILES = 2
+            local bounded = navigation.view('spec', nav_root)
+            local limited = macros.context(bounded, bounded.js_context)
+            local success, _, _, partial = pcall(limited.resolve, bounded.file_index['proxyUse/main.cpp'], 'PROXY_NAV', 2, true)
+            macros.MAX_FILES = before
+            spec.truthy(success); spec.truthy(limited.incomplete)
+            spec.equal(#partial, 0, 'a budget failure must not publish a partial alternative list')
+        end)
+        for _, dir in ipairs({ 'proxyOne', 'proxyTwo', 'proxyUse' }) do assert(xutils.rmtree(nav_root .. '/' .. dir)) end
+        service.refresh(nav_root, options); assert(ok, err)
+    end)
     spec.it('shares scoped include order across header jumps, definitions, implementations, completion and drafts', function()
         for _, dir in ipairs({ 'searchOne', 'searchTwo', 'searchUse' }) do assert(xutils.mkdir_p(nav_root .. '/' .. dir)) end
         for _, name in ipairs({ 'One', 'Two' }) do

@@ -449,6 +449,39 @@ test('LSP stdio handles drafts, UTF-16 ranges, cancellation and close restoratio
     assert.equal((await client.request('workspace/symbol', { query: 'unsaved' }))[0].name, 'unsaved');
 });
 
+test('LSP navigates ambiguous proxy macros and respects include path changes and drafts', { timeout: 30000 }, async (t) => {
+    const client = await start(t);
+    const header = '#ifndef PROXY_H\n#define PROXY_H\n#define api_rawgeti proxy->api_rawgeti\n#endif\n';
+    for (const dir of ['one', 'two']) {
+        await mkdir(join(client.project, dir));
+        await writeFile(join(client.project, dir, 'proxy.h'), header);
+    }
+    const source = '#include <proxy.h>\nvoid run() { api_rawgeti(1); }\n';
+    await writeFile(join(client.project, 'use.cpp'), source);
+    await initialize(client, [client.project]); await indexed(client);
+    const uri = pathToFileURL(join(client.project, 'use.cpp')).href;
+    client.notify('textDocument/didOpen', { textDocument: { uri, languageId: 'cpp', version: 1, text: source } });
+    const definition = () => client.request('textDocument/definition', { textDocument: { uri },
+        position: { line: 1, character: 15 } });
+    for (let i = 0; i < 3; i++) {
+        const targets = await definition();
+        assert.deepEqual(targets.map(target => fileURLToPath(target.uri)),
+            ['one', 'two'].map(dir => join(client.project, dir, 'proxy.h')));
+        for (const target of targets) assert.equal(target.range.start.line, 2);
+    }
+    const config = join(client.project, '.codeoutline.json');
+    await writeFile(config, JSON.stringify({ includePaths: ['two', 'one'] }));
+    let targets = await definition();
+    assert.equal(targets.length, 1); assert.equal(fileURLToPath(targets[0].uri), join(client.project, 'two', 'proxy.h'));
+    const targetUri = targets[0].uri;
+    client.notify('textDocument/didOpen', { textDocument: { uri: targetUri, languageId: 'c', version: 1, text: '\n' + header } });
+    targets = await definition(); assert.equal(targets.length, 1); assert.equal(targets[0].range.start.line, 3);
+    client.notify('textDocument/didClose', { textDocument: { uri: targetUri } });
+    targets = await definition(); assert.equal(targets[0].range.start.line, 2);
+    await writeFile(config, JSON.stringify({ includePaths: [] }));
+    assert.deepEqual(await definition(), [], 'an explicit missing include path must not revive suffix candidates');
+});
+
 test('LSP macro navigation bursts preserve following ordinary definitions', { timeout: 30000 }, async (t) => {
     const client = await start(t);
     const source = '#include "api.h"\nvoid run(void) { api_push(); api_pcall(); api_push(); }\n';

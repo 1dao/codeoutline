@@ -661,13 +661,15 @@ function M.query(symbols, opts)
         local refs = rec.refs
         local direct, paired = deps(f)
         Q.stats.resolved_refs = Q.stats.resolved_refs + 1
+        local evidence = js_context.ordinary.evidence(f, i)
         local found, reason = resolve_ref(symbols, f, ids[refs.from[i]], refs.name[i], refs.kind[i],
-            refs.recv[i] or nil, direct, paired, nil, js_context.ordinary.evidence(f, i), js_context, refs.line[i])
+            refs.recv[i] or nil, direct, paired, nil, evidence, js_context, refs.line[i])
         if macros.incomplete then Q.incomplete = true end
         if js_context.workspace_incomplete or js_context.go_incomplete or js_context.rust_incomplete then Q.incomplete = true end
         if report and explain and (refs.kind[i] == 'call' or refs.kind[i] == 'member_call') then
             if (not found or #found == 0) and explain == true then
-                report:add({ source = ids[refs.from[i]], line = refs.line[i], call = refs.name[i], reason = reason or 'unresolved reference' })
+                report:add({ source = ids[refs.from[i]], line = refs.line[i], call = refs.name[i], reason = reason or 'unresolved reference',
+                    reference = i, binding = evidence })
             else
                 for _, dst in ipairs(found or {}) do
                     if explain == true or explain[dst] then
@@ -677,6 +679,11 @@ function M.query(symbols, opts)
             end
         end
         return found
+    end
+    -- Opt-in inspection of already reported failures. Suggestions never load
+    -- outgoing/incoming edges or change the execution resolver's results.
+    function Q:definition_candidates()
+        return require('codeoutline.definition_candidates').suggest(self, report, js_context)
     end
     setmetatable(Q.out, { __index = function(cache, id)
         control.check()

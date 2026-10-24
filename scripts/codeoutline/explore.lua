@@ -326,6 +326,28 @@ local function label(G, id)
     return string.format('%s %s (%s)', node.kind, node.qualified, graph.where(G, id))
 end
 
+local function candidate_text(G, idx, report, in_order)
+    if #report.entries == 0 then return nil end
+    local lines = { '\n## Unconfirmed definition candidates',
+        'Suggestions for unresolved calls only, not call edges or verified bindings. Inspect the source before using them.' }
+    local shown = {}
+    for _, group in ipairs(report.entries) do
+        lines[#lines + 1] = string.format('- Unresolved %s at %s:%d: %s', group.call, group.path, group.line, group.resolution_reason)
+        for _, candidate in ipairs(group.candidates) do
+            local id = candidate.id
+            lines[#lines + 1] = '  Unconfirmed candidate: ' .. label(G, id) .. '; ' .. candidate.reason
+            if not in_order[id] and not shown[id] then
+                local node = G.nodes[id]
+                render_range(file_lines(idx, candidate.path), node.line, math.min(node.end_line, node.line + 7), lines)
+                if node.end_line > node.line + 7 then lines[#lines + 1] = '\t... (candidate snippet only; explore its file and name for more)' end
+                shown[id] = true
+            end
+        end
+    end
+    if report.truncated then lines[#lines + 1] = 'Candidate lookup reached a site, source, evidence or result limit; more candidates may exist.' end
+    return table.concat(lines, '\n')
+end
+
 -- Run a query over symbol tables (graph.build). Returns the text and a table
 -- with what was selected; relationships resolve per query.
 function M.run(G, idx, query, opts)
@@ -460,11 +482,16 @@ function M.run(G, idx, query, opts)
     end
 
     if G.load_incoming then G:load_incoming(seeds) end
+    -- Neighbors below already require these scans. Run them before diagnostics,
+    -- including for long seeds that did not take the short-wrapper context path.
+    for _, id in ipairs(seeds) do local _ = G.out[id] end
     if #seeds == 1 then
         searches[1] = { root = seeds[1], targets = {}, single = true,
             sites = reports.capture_paths(G.report, { [seeds[1]] = seeds[1] }, seeds[1]) }
     end
     local breakpoints = reports.path_breakpoints(G.report, G, searches, connected)
+    local candidates = G:definition_candidates()
+    G.stats.definition_candidates = candidates.stats
 
     -- Confirm every file whose source or symbol labels this query can emit.
     -- GBK reparsing invalidates node IDs, so rebuild and select again before
@@ -480,6 +507,9 @@ function M.run(G, idx, query, opts)
     for _, entry in ipairs(breakpoints.entries) do
         for _, id in ipairs(entry.path) do selected[G.node_file[id]] = true end
         if entry.goal then selected[G.node_file[entry.goal]] = true end
+    end
+    for _, group in ipairs(candidates.entries) do
+        for _, candidate in ipairs(group.candidates) do selected[G.node_file[candidate.id]] = true end
     end
     for f in pairs(selected) do
         local path = G.files[f].path -- a decoding repair replaces this file ID
@@ -503,6 +533,13 @@ function M.run(G, idx, query, opts)
         emit(text.limit(evidence_text, evidence_budget, G.report.truncated))
     else evidence_cut = #G.report.entries > 0 end
     omitted = omitted or evidence_cut or G.report.truncated or #flows > M.LIST_CAP
+
+    local candidate_block = candidate_text(G, idx, candidates, in_order)
+    local candidate_budget = math.min(3072, math.floor(budget / 5))
+    local candidate_cut = candidate_block and (#candidate_block > candidate_budget or candidates.truncated) or candidates.truncated
+    if candidate_block and candidate_budget >= 256 then emit(text.limit(candidate_block, candidate_budget, candidates.truncated))
+    elseif candidate_block then candidate_cut = true end
+    omitted = omitted or candidate_cut
 
     local reserve = math.floor(budget * 0.15)     -- keep room for sections 3-4
     for _, f in ipairs(file_order) do
@@ -606,11 +643,13 @@ function M.run(G, idx, query, opts)
         table.insert(parts, 1, 'Call-path breakpoint explanations omitted due to site/evidence/output limits.')
     end
     if filters.seed_limit_reached then table.insert(parts, 1, 'Seed selection stopped after 512 matching candidates; narrow the query filters.') end
+    if candidate_cut then table.insert(parts, 1, 'Unconfirmed definition candidates were limited or omitted; they are not call edges.') end
     local result, truncated = text.limit(table.concat(parts, '\n'), budget, omitted or #pointers > 0)
     return result, { seeds = seeds, spine = spine, shown = shown, flows = flows, truncated = truncated,
         relationships_incomplete = G.incomplete or false, query_stats = G.stats,
         seed_limit_reached = filters.seed_limit_reached or false,
         evidence = G.report.entries, evidence_truncated = evidence_cut or G.report.truncated,
+        unresolved_candidates = candidates.entries, unresolved_candidates_truncated = candidate_cut or false,
         path_search_limited = path_limited, evidence_scope = G.report.scope,
         path_breakpoints = breakpoints.entries, path_breakpoints_truncated = breakpoint_cut }
 end

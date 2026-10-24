@@ -1,5 +1,5 @@
 -- Query-only navigation suggestions, never execution bindings or index data.
-local M = { MAX_SCAN = 256, MAX_RESULTS = 8 }
+local M = { MAX_SCAN = 256, MAX_RESULTS = 8, MAX_SITES = 4, MAX_FILES = 4, MAX_BYTES = 2 * 1048576 }
 local control = require('codeoutline.control')
 local graph = require('codeoutline.graph')
 local callable = { ['function'] = true, prototype = true, method = true, constructor = true }
@@ -81,6 +81,68 @@ function M.find(G, f, site, ctx)
     for i = 1, math.min(#hits, M.MAX_RESULTS) do ids[i] = hits[i].id end
     info.truncated = info.truncated or #hits > M.MAX_RESULTS
     return ids, info
+end
+
+-- Candidates for failures already encountered by an explore query. Reuse its
+-- binding/macro context; never broaden graph traversal to hunt for failures.
+function M.suggest(G, report, ctx)
+    local result = { entries = {}, truncated = report and report.truncated or false,
+        stats = { sites = 0, scanned = 0, files = 0, bytes = 0 } }
+    local files, macro_ctx = {}, nil
+    for _, entry in ipairs(report and report.entries or {}) do
+        if entry.reference and entry.reason and not entry.target then
+            local f = G.node_file[entry.source]
+            local refs = G.files[f].refs
+            local site = { name = entry.call, kind = refs.kind[entry.reference], recv = refs.recv[entry.reference],
+                evidence = entry.binding, reason = entry.reason }
+            local macro = entry.reason == 'unknown or unsupported macro visibility'
+                and (G.files[f].language == 'c' or G.files[f].language == 'cpp')
+            if macro or M.allowed(site) then
+                if result.stats.sites >= M.MAX_SITES then result.truncated = true; break end
+                result.stats.sites = result.stats.sites + 1
+                local ids, info
+                if macro then
+                    -- A whole-function graph query may already have exhausted
+                    -- its macro budget. Suggestions get a separate bounded
+                    -- pass while sharing the existing source/binding caches.
+                    if not macro_ctx then
+                        macro_ctx = {}; for k, v in pairs(ctx) do macro_ctx[k] = v end
+                        macro_ctx.cpp_macro_context = nil
+                    end
+                    local _, sites = require('codeoutline.cpp_macros').resolve(G, f, site.name, entry.line, macro_ctx, true)
+                    ids = sites or {}
+                    info = { reason = 'possible macro declaration; binding unconfirmed',
+                        truncated = macro_ctx.cpp_macro_context and macro_ctx.cpp_macro_context.incomplete or false, scanned = 0 }
+                else ids, info = M.find(G, f, site, ctx) end
+                result.stats.scanned = result.stats.scanned + info.scanned
+                result.truncated = result.truncated or info.truncated or #ids > M.MAX_RESULTS
+                local group = { source = entry.source, path = G.files[f].path, line = entry.line, call = entry.call,
+                    resolution_reason = entry.reason, status = 'unconfirmed', candidates = {} }
+                for i = 1, math.min(#ids, M.MAX_RESULTS) do
+                    control.check()
+                    local id = ids[i]
+                    local g, node = G.node_file[id], G.nodes[id]
+                    local rec = G.files[g]
+                    local size = rec.size or 0
+                    local accepted = files[g]
+                    if not accepted then
+                        if result.stats.files < M.MAX_FILES and size <= 1048576 and result.stats.bytes + size <= M.MAX_BYTES then
+                            files[g], accepted = true, true
+                            result.stats.files, result.stats.bytes = result.stats.files + 1, result.stats.bytes + size
+                        else result.truncated = true end
+                    end
+                    if accepted then
+                        group.candidates[#group.candidates + 1] = { id = id, path = rec.path, line = node.line,
+                            name = node.name, qualified = node.qualified, kind = node.kind,
+                            status = 'unconfirmed', reason = info.reason }
+                    end
+                end
+                if #group.candidates > 0 then result.entries[#result.entries + 1] = group end
+            end
+        end
+    end
+    if macro_ctx and macro_ctx.cpp_macro_context then result.stats.macros = macro_ctx.cpp_macro_context.stats end
+    return result
 end
 
 return M

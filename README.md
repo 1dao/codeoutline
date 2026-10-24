@@ -116,6 +116,16 @@ C/C++ bare calls check [project macro visibility](docs/CPP-MACROS.md) on demand:
 indexed include order and finite conditions distinguish visible macros from ordinary
 functions. Unknown expansions remain unresolved; this does not run a preprocessor.
 
+Explore can suggest exact-name definitions for unresolved calls, including possible
+macro declarations. The separate **Unconfirmed definition candidates** section gives
+locations, matching reasons and bounded source snippets. These suggestions never add
+call edges, seeds, callers or impact paths; inspect them before inferring a relationship.
+Known import, local, receiver, qualification and include-policy barriers still apply.
+Lookup inspects at most four encountered sites and 256 same-name entries per ordinary site,
+with eight results per site and snippets from four source files totaling 2 MiB. Macro
+suggestions use a separate bounded pass with the existing macro limits. Output limits
+are reported; suggestions and their evidence are query-owned and are not stored in the index.
+
 C++ lookup covers named type aliases, namespace aliases, `using ns::Type`, `using ns::function`,
 and bounded `using namespace` chains across included headers. Calls, navigation and completion
 share this lookup; local imports respect their declaration position and block scope, and

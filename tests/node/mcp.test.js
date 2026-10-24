@@ -78,6 +78,35 @@ test('official SDK stdio: discovery, source, incremental refresh, rebuild and er
     } finally { await c.close(); await f.cleanup(); }
 });
 
+test('official SDK explore labels unconfirmed candidates without inventing callers', { timeout: 30000 }, async () => {
+    const f = await fixture();
+    for (const dir of ['one', 'two', 'use']) await mkdir(join(f.project, dir));
+    for (const [dir, value] of [['one', 11], ['two', 22]]) {
+        await writeFile(join(f.project, dir, 'api.c'), `int AgentSdkTarget() { return ${value}; }\n`);
+    }
+    await writeFile(join(f.project, 'use', 'entry.cpp'), 'void AgentSdkEntry() { AgentSdkTarget(); }\n');
+    const transport = new StdioClientTransport({ command: defaultRuntime,
+        args: [main, 'STDIO=1', `PROJECT=${f.project}`], cwd: tmpdir(), stderr: 'pipe' });
+    transport.stderr?.resume();
+    const c = client();
+    try {
+        await c.connect(transport);
+        const query = () => c.callTool({ name: 'codeoutline_explore', arguments: { query: 'AgentSdkEntry' } });
+        let result = await query();
+        assert.notEqual(result.isError, true);
+        assert.match(result.content[0].text, /## Unconfirmed definition candidates/);
+        assert.match(result.content[0].text, /not call edges or verified bindings/);
+        assert.match(result.content[0].text, /return 11/); assert.match(result.content[0].text, /return 22/);
+        const callers = await c.callTool({ name: 'codeoutline_callers', arguments: { query: 'AgentSdkTarget' } });
+        assert.notEqual(callers.isError, true); assert.doesNotMatch(callers.content[0].text, /AgentSdkEntry/);
+        await writeFile(join(f.project, '.codeoutline.json'), '{"includePaths":[]}');
+        result = await query(); assert.doesNotMatch(result.content[0].text, /## Unconfirmed definition candidates/);
+        await writeFile(join(f.project, '.codeoutline.json'), '{}');
+        await writeFile(join(f.project, 'one', 'api.c'), 'int AgentSdkTarget() { return 99; }\n');
+        result = await query(); assert.match(result.content[0].text, /return 99/); assert.doesNotMatch(result.content[0].text, /return 11/);
+    } finally { await c.close(); await f.cleanup(); }
+});
+
 test('official SDK search ranking reloads config and preserves project coverage', { timeout: 30000 }, async () => {
     const f = await fixture();
     await mkdir(join(f.project, 'generated'));

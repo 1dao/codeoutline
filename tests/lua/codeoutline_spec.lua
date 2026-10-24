@@ -4110,6 +4110,108 @@ spec.describe('recursive callers', function()
     end)
 end)
 
+spec.describe('unconfirmed exploration candidates', function()
+    local function project(files)
+        local records = {}
+        for path, source in pairs(files) do records[path] = ci.parse(path, source, { ordinary_bindings = true }) end
+        return graph.build({ files = records }), { root = tmp_root,
+            query_source = function(_, path) return assert(files[path]), false end }
+    end
+    spec.it('shows distant candidate sources without adding seeds, paths or execution edges', function()
+        local G, idx = project({
+            ['use/start.cpp'] = 'void AgentFallbackStart() { AgentFallbackTarget(); }\n',
+            ['one/lib.c'] = 'int AgentFallbackTarget() { return 11; }\n',
+            ['two/lib.c'] = 'int AgentFallbackTarget() { return 22; }\n',
+            ['three/private.c'] = 'static int AgentFallbackTarget() { return 33; }\n',
+            ['four/other.lua'] = 'function AgentFallbackTarget() end\n',
+        })
+        local output, info = explore.run(G, idx, 'AgentFallbackStart')
+        spec.equal(#info.seeds, 1); spec.equal(#info.flows, 0)
+        spec.equal(#info.unresolved_candidates, 1)
+        local group = info.unresolved_candidates[1]
+        spec.equal(group.status, 'unconfirmed'); spec.equal(group.path, 'use/start.cpp')
+        spec.equal(group.call, 'AgentFallbackTarget'); spec.equal(#group.candidates, 2)
+        spec.equal(group.candidates[1].path, 'one/lib.c'); spec.equal(group.candidates[2].path, 'two/lib.c')
+        for _, candidate in ipairs(group.candidates) do
+            spec.equal(candidate.status, 'unconfirmed'); spec.equal(candidate.line, 1)
+            spec.contains(candidate.reason, 'binding unconfirmed')
+        end
+        spec.contains(output, '## Unconfirmed definition candidates'); spec.contains(output, 'not call edges or verified bindings')
+        spec.contains(output, 'return 11'); spec.contains(output, 'return 22')
+        spec.nil_value(output:find('return 33', 1, true))
+        local Q = graph.query(G)
+        spec.equal(#Q.out[G.by_name.AgentFallbackStart[1]], 0)
+        for _, id in ipairs(G.by_name.AgentFallbackTarget) do spec.equal(#Q.inn[id], 0) end
+        spec.nil_value(G.out); spec.nil_value(G.inn)
+        for _, rec in pairs(G.files) do spec.nil_value(rec.unresolved_candidates) end
+        local original = idx.query_source
+        idx.query_source = function(self, path)
+            if path == 'one/lib.c' then error('candidate source changed') end
+            return original(self, path)
+        end
+        local ok, err = pcall(explore.run, G, idx, 'AgentFallbackStart')
+        spec.equal(ok, false); spec.contains(tostring(err), 'candidate source changed')
+    end)
+    spec.it('retains known Lua bindings and C++ receiver barriers', function()
+        local G, idx = project({
+            ['use/start.lua'] = 'local api = require("lib.api")\nfunction AgentBlockedImport() api.AgentMissing() end\n',
+            ['lib/api.lua'] = 'local M = {}\nreturn M\n',
+            ['elsewhere/free.lua'] = 'function AgentMissing() end\n',
+            ['types.hpp'] = 'class AgentA {}; class AgentB { public: void AgentMethod() {} };\n',
+            ['use/types.cpp'] = '#include "../types.hpp"\nvoid AgentBlockedReceiver(AgentA *p) { p->AgentMethod(); }\n',
+        })
+        for _, name in ipairs({ 'AgentBlockedImport', 'AgentBlockedReceiver' }) do
+            local output, info = explore.run(G, idx, name)
+            spec.equal(#info.unresolved_candidates, 0)
+            spec.nil_value(output:find('## Unconfirmed definition candidates', 1, true))
+        end
+    end)
+    spec.it('offers alternative proxy macro declarations without treating them as calls', function()
+        local header = '#ifndef AGENT_PROXY_H\n#define AGENT_PROXY_H\n#define AgentProxy proxy->call\n#endif\n'
+        local G, idx = project({ ['one/proxy.h'] = header, ['two/proxy.h'] = header,
+            ['use/start.cpp'] = '#include <proxy.h>\nvoid AgentProxyStart() { AgentProxy(); }\n' })
+        local output, info = explore.run(G, idx, 'AgentProxyStart')
+        spec.equal(#info.unresolved_candidates, 1)
+        local group = info.unresolved_candidates[1]
+        spec.equal(#group.candidates, 2)
+        for _, candidate in ipairs(group.candidates) do
+            spec.equal(candidate.kind, 'macro'); spec.equal(candidate.line, 3)
+            spec.contains(candidate.reason, 'possible macro declaration')
+        end
+        spec.contains(output, '#define AgentProxy proxy->call'); spec.equal(#info.flows, 0)
+        spec.equal(#graph.query(G).out[G.by_name.AgentProxyStart[1]], 0)
+    end)
+    spec.it('bounds candidate lookup and reports source and output omissions', function()
+        local files = { ['use/start.cpp'] = 'void AgentBudgetStart() { AgentBudgetTarget(); }\n' }
+        for i = 1, 300 do files['lib' .. i .. '/api.c'] = 'int AgentBudgetTarget() { return 1; }\n' end
+        local G, idx = project(files)
+        local output, info = explore.run(G, idx, 'AgentBudgetStart')
+        spec.equal(#info.unresolved_candidates, 1)
+        spec.equal(#info.unresolved_candidates[1].candidates, 4)
+        spec.equal(info.query_stats.definition_candidates.scanned, 256)
+        spec.equal(info.query_stats.definition_candidates.files, 4)
+        spec.equal(info.unresolved_candidates_truncated, true)
+        output, info = explore.run(G, idx, 'AgentBudgetStart', { budget = 256 })
+        spec.truthy(#output <= 256); spec.equal(info.unresolved_candidates_truncated, true)
+        spec.contains(output, 'not call edges')
+    end)
+    spec.it('keeps a separate bounded suggestion budget after graph macro exhaustion', function()
+        local header = '#ifndef AGENT_PROXY_BUDGET\n#define AGENT_PROXY_BUDGET\n#define AgentProxyBudget proxy->call\n#endif\n'
+        local G, idx = project({ ['one/proxy.h'] = header, ['two/proxy.h'] = header,
+            ['use/start.cpp'] = '#include <proxy.h>\nvoid AgentProxyBudgetStart() {\n'
+                .. string.rep('AgentProxyBudget();\n', 30) .. '}\n' })
+        local macros = require('codeoutline.cpp_macros')
+        local before = macros.MAX_EVENTS; macros.MAX_EVENTS = 20
+        local ok, output, info = pcall(explore.run, G, idx, 'AgentProxyBudgetStart')
+        macros.MAX_EVENTS = before; assert(ok, output)
+        spec.equal(info.relationships_incomplete, true)
+        spec.truthy(#info.unresolved_candidates > 0)
+        spec.equal(#info.unresolved_candidates[1].candidates, 2)
+        spec.equal(info.unresolved_candidates_truncated, true)
+        spec.contains(output, 'Unconfirmed definition candidates')
+    end)
+end)
+
 spec.describe('call-path breakpoints', function()
     local function project(files, opts)
         local records = {}

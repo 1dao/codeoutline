@@ -473,6 +473,33 @@ test('LSP parses unknown suffixes through every navigation phase without learnin
     assert.equal(result.length, 1); assert.equal(result[0].uri, luaUri); assert.equal(result[0].range.start.line, 0);
 });
 
+test('LSP returns only macro definitions for fragments with no include context', { timeout: 30000 }, async (t) => {
+    const client = await start(t);
+    for (let i = 1; i <= 4; i++) {
+        await mkdir(join(client.project, 'version' + i));
+        await writeFile(join(client.project, 'version' + i, 'api.h'), '#define api_replace(L,n) copy_stack(L,n)\n');
+    }
+    const calls = Array.from({ length: 100 }, (_, i) => `void use_${i}() { api_replace(0,1); }`).join('\n');
+    await writeFile(join(client.project, 'calls.cpp'), calls);
+    const text = 'void FragmentUse() { api_replace(0,1); }\n';
+    await writeFile(join(client.project, 'base.fragment'), text);
+    await initialize(client, [client.project]); await indexed(client);
+    const uri = pathToFileURL(join(client.project, 'base.fragment')).href;
+    client.notify('textDocument/didOpen', { textDocument: { uri, languageId: 'cpp', version: 1, text } });
+    const position = { textDocument: { uri }, position: { line: 0, character: text.indexOf('api_replace') + 2 } };
+    for (let i = 0; i < 3; i++) {
+        const result = await client.request('textDocument/definition', position);
+        assert.equal(result.length, 4);
+        for (const target of result) {
+            assert.match(fileURLToPath(target.uri), /version[1-4][\\/]api\.h$/);
+            assert.equal(target.range.start.line, 0);
+        }
+    }
+    const warnings = client.notifications.filter(msg => msg.method === 'window/showMessage');
+    assert.deepEqual(warnings, []);
+    assert.deepEqual(await client.request('textDocument/references', { ...position, context: { includeDeclaration: false } }), []);
+});
+
 test('LSP suggests distant definitions only after strict lookup fails', { timeout: 30000 }, async (t) => {
     const client = await start(t);
     for (const dir of ['one', 'two', 'use']) await mkdir(join(client.project, dir));

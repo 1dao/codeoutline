@@ -161,8 +161,8 @@ function M.context(G, ctx)
     -- execution queries keep their own strict, separately cached result.
     function C.resolve(f, name, line, declarations)
         local key = f .. '\0' .. name .. '\0' .. line .. (declarations and '\0declarations' or '')
-        if results[key] then return results[key][1], results[key][2], results[key][3] end
-        if result_count >= M.MAX_RESULTS then limited(); return {}, true end
+        if results[key] then return results[key][1], results[key][2], results[key][3], results[key][4] end
+        if result_count >= M.MAX_RESULTS then limited(); return {}, true, nil, 'limited' end
         C.stats.checks = C.stats.checks + 1
         local env, once, active_files, definitions = {}, {}, {}, {}
         local failed = false
@@ -256,8 +256,10 @@ function M.context(G, ctx)
         local sites = {}
         if not failed then for id in pairs(definitions) do sites[#sites + 1] = id end end
         table.sort(sites)
-        result_count = result_count + 1; results[key] = { ids, handled, sites }
-        return ids, handled, sites
+        local state = failed and 'limited' or value == nil and 'unseen' or value == false and 'undefined'
+            or value == UNKNOWN and 'uncertain' or 'defined'
+        result_count = result_count + 1; results[key] = { ids, handled, sites, state }
+        return ids, handled, sites, state
     end
     return C
 end
@@ -270,8 +272,8 @@ function M.resolve(G, f, name, line, ctx, declarations)
         if G.nodes[id].kind == 'macro' then candidate = true; break end
     end
     if not candidate then return nil end
-    local ids, handled, definitions = M.context(G, ctx).resolve(f, name, line, declarations)
-    return handled and ids or false, definitions
+    local ids, handled, definitions, state = M.context(G, ctx).resolve(f, name, line, declarations)
+    return handled and ids or false, definitions, state
 end
 
 return M

@@ -183,15 +183,15 @@ local function recursive(node, recv)
 end
 
 -- Targets of one occurrence of name in file f, enclosed by node index from.
-local function resolve_site(V, f, from, name, kind, recv, evidence, offset, index)
+local function resolve_site(V, f, from, name, kind, recv, evidence, offset, index, cursor_line)
     if index then evidence = V.js_context.ordinary.evidence(f, index) end
     local src = from > 0 and V.id_of[f][from] or nil
     local direct, paired = deps(V, f)
     local rkind, accept = kind, nil
     if kind == 'symbol' then rkind, accept = 'call', ANY
     elseif kind == 'member_symbol' then rkind, accept = 'member_call', ANY end
-    local site_line = index and V.files[f].refs.line[index]
-    local targets, reason = graph.resolve(V, f, src, name, rkind, recv or nil, direct, paired, accept, evidence, V.js_context, site_line)
+    local site_line = index and V.files[f].refs.line[index] or cursor_line
+    local targets, reason, macro_state = graph.resolve(V, f, src, name, rkind, recv or nil, direct, paired, accept, evidence, V.js_context, site_line)
     targets = targets or {}
     if kind == 'symbol' then
         local kept = {}
@@ -239,7 +239,7 @@ local function resolve_site(V, f, from, name, kind, recv, evidence, offset, inde
         end
         targets = kept
     end
-    return targets, reason, evidence
+    return targets, reason, evidence, macro_state
 end
 
 -- What the cursor names: a declaration, an indexed reference, or another identifier.
@@ -1065,11 +1065,12 @@ local function at(req)
     if not f then return nil end
     local offset = doc:offset(req.position)
     local c = cursor(doc, offset, V, f, req.method == 'lsp_definition')
-    local targets, reason, evidence = {}
+    local targets, reason, evidence, macro_state = {}
     if c and c.decl then targets = { V.id_of[f][c.decl] }
     elseif c then
-        targets, reason, evidence = resolve_site(V, f, c.from, c.name, c.kind, c.recv, c.evidence, c.first, c.index)
-        c.reason, c.evidence = reason, evidence
+        c.line = doc:position(c.first).line + 1
+        targets, reason, evidence, macro_state = resolve_site(V, f, c.from, c.name, c.kind, c.recv, c.evidence, c.first, c.index, c.line)
+        c.reason, c.evidence, c.macro_state = reason, evidence, macro_state
     end
     return V, doc, c, targets, f, offset
 end

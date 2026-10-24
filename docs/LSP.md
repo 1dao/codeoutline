@@ -193,7 +193,11 @@ overlay never writes to the resident tables.
   exact-name symbols in the same language family elsewhere in the project.
   Explicit qualifications must match; known import/local/receiver barriers,
   C/C++ include policies and Go/Rust/C# package or project binding remain strict.
-  Suggestions exclude unrelated private locals, source-file statics and macros.
+  Suggestions exclude call sites, unrelated private locals and source-file statics.
+  If no macro declaration is visible and there is no explicit undef or uncertain
+  macro state, definition lookup may suggest same-name macro definitions elsewhere
+  in the project. Implementations take precedence over repeated API declarations;
+  declarations remain available when no implementation is indexed.
   Lookup checks at most 256 same-name entries and selects at most eight targets;
   exact source positions are limited to four files, 2 MiB and a 500 ms soft budget.
   References, rename, hover, implementations and call hierarchy do not use this

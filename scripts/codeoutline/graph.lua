@@ -329,9 +329,11 @@ local scored_ids, scored_vals = {}, {}
 -- accept overrides the node kinds the ref kind may bind to (navigation only).
 local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired, accept, evidence, js_context, line)
     if kind == 'annotation' then return nil end
+    local macro_state
     if kind == 'call' and C_FAMILY[G.files[f].language] and (not src_id or G.nodes[src_id].kind ~= 'macro') then
-        local macro = require('codeoutline.cpp_macros').resolve(G, f, name, line, js_context)
-        if macro then return macro, #macro > 0 and 'visible macro' or 'unknown or unsupported macro visibility' end
+        local macro, _, state = require('codeoutline.cpp_macros').resolve(G, f, name, line, js_context)
+        macro_state = state
+        if macro then return macro, #macro > 0 and 'visible macro' or 'unknown or unsupported macro visibility', macro_state end
         if macro == false then accept = accept or NO_MACRO end
     end
     if evidence and evidence:sub(1, 7) == 'cs:new:' then kind = 'new' end
@@ -380,7 +382,7 @@ local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired, accept,
     if exact ~= nil then
         local result = {}
         for _, id in ipairs(exact) do if accept[G.nodes[id].kind] then result[#result + 1] = id end end
-        return result, #result == 0 and (binding_reason or 'binding target unresolved') or strategy
+        return result, #result == 0 and (binding_reason or 'binding target unresolved') or strategy, macro_state
     end
     if function_value and recv and recv ~= 'self' and recv ~= 'cls' and recv ~= 'this' then
         return {}, 'unresolved function-value receiver'
@@ -399,7 +401,7 @@ local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired, accept,
             end
         end
     end
-    if not cands then return nil, 'no indexed target' end
+    if not cands then return nil, 'no indexed target', macro_state end
     -- A published Lua global can share its spelling with private helpers.
     -- Keep lexical same-file matches and real global definitions, but do not
     -- let unrelated private functions make a known export ambiguous.
@@ -454,12 +456,12 @@ local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired, accept,
     -- A lone candidate far away (score 0) is still a match for a unique
     -- name; many far candidates with nothing to separate them is a guess.
     if best and best <= 0 and #ties > 1 then
-        return nil, 'ambiguous name candidates' .. (#cands > M.MAX_CANDIDATES and '; candidate scan limit reached' or '')
+        return nil, 'ambiguous name candidates' .. (#cands > M.MAX_CANDIDATES and '; candidate scan limit reached' or ''), macro_state
     end
     local reason = #ties == 0 and 'no eligible target' or #ties > 1 and 'multiple name/locality candidates' or 'name/locality match'
     if #cands > M.MAX_CANDIDATES then reason = reason .. '; candidate scan limit reached' end
     if tie_count > M.MAX_TIES then reason = reason .. '; tied candidate limit reached' end
-    return ties, reason
+    return ties, reason, macro_state
 end
 
 -- Files compare by path; nodes by file path, then node order (ids ascend
@@ -662,14 +664,14 @@ function M.query(symbols, opts)
         local direct, paired = deps(f)
         Q.stats.resolved_refs = Q.stats.resolved_refs + 1
         local evidence = js_context.ordinary.evidence(f, i)
-        local found, reason = resolve_ref(symbols, f, ids[refs.from[i]], refs.name[i], refs.kind[i],
+        local found, reason, macro_state = resolve_ref(symbols, f, ids[refs.from[i]], refs.name[i], refs.kind[i],
             refs.recv[i] or nil, direct, paired, nil, evidence, js_context, refs.line[i])
         if macros.incomplete then Q.incomplete = true end
         if js_context.workspace_incomplete or js_context.go_incomplete or js_context.rust_incomplete then Q.incomplete = true end
         if report and explain and (refs.kind[i] == 'call' or refs.kind[i] == 'member_call') then
             if (not found or #found == 0) and explain == true then
                 report:add({ source = ids[refs.from[i]], line = refs.line[i], call = refs.name[i], reason = reason or 'unresolved reference',
-                    reference = i, binding = evidence })
+                    reference = i, binding = evidence, macro_state = macro_state })
             else
                 for _, dst in ipairs(found or {}) do
                     if explain == true or explain[dst] then

@@ -566,8 +566,13 @@ function M.new(config, emit, submit, cancel, stop, await_worker)
         if not ok then return end
         if value.error then error_response(id, -32803, value.error); return end
         if value.incomplete then
+            local message = req.method == 'lsp_definition'
+                and 'CodeOutline: definition lookup reached a candidate, source or visibility limit; some definitions may be omitted'
+                or req.method == 'lsp_references'
+                and 'CodeOutline: results were truncated; too many matching references'
+                or 'CodeOutline: lookup reached a query limit; some results may be omitted'
             emit({ jsonrpc = '2.0', method = 'window/showMessage', params = { type = 2,
-                message = 'CodeOutline: results were truncated; too many matching references' } })
+                message = message } })
         end
         reply(id, to_client(finish(value.result)))
     end

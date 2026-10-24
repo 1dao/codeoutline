@@ -52,6 +52,12 @@ function M.find(G, f, site, ctx)
         local kind = site.kind == 'new' and types[node.kind]
             or site.kind ~= 'new' and (callable[node.kind]
                 or (site.kind == 'symbol' or site.kind == 'member_symbol') and (types[node.kind] or values[node.kind]))
+        -- An absent include context permits inspecting macro declarations.
+        -- An explicit undef, uncertain expansion, or budget failure does not.
+        if node.kind == 'macro' then
+            kind = site.kind == 'call' and site.macro_state == 'unseen'
+                and (g ~= f or site.line and node.line < site.line)
+        end
         local name_matches = (node.name == site.name or published) and (normalized(node.qualified) == site.name or published)
         if qualified then
             name_matches = normalized(node.qualified) == qualified
@@ -61,7 +67,7 @@ function M.find(G, f, site, ctx)
                 end
             end
         end
-        -- No macros, private locals, nested functions or unrelated class methods.
+        -- No call sites, private locals, nested functions or unrelated class methods.
         -- Even same-file locals require lexical evidence from the strict resolver.
         if kind and name_matches and graph.family(rec.language) == graph.family(language)
             and (not node['local'] or published) and not (node.static and g ~= f)
@@ -73,6 +79,19 @@ function M.find(G, f, site, ctx)
         end
     end
     info.truncated = #list > M.MAX_SCAN
+    -- Prefer implementations over repeated API declarations. A declaration is
+    -- still useful when the project has no matching implementation at all.
+    local defined = {}
+    for _, hit in ipairs(hits) do
+        local node = G.nodes[hit.id]
+        if not graph.is_decl(node) then defined[node.qualified] = true end
+    end
+    local kept = {}
+    for _, hit in ipairs(hits) do
+        local node = G.nodes[hit.id]
+        if not graph.is_decl(node) or not defined[node.qualified] then kept[#kept + 1] = hit end
+    end
+    hits = kept
     table.sort(hits, function(a, b)
         if a.score ~= b.score then return a.score > b.score end
         return graph.before(G, a.id, b.id)
@@ -94,7 +113,7 @@ function M.suggest(G, report, ctx)
             local f = G.node_file[entry.source]
             local refs = G.files[f].refs
             local site = { name = entry.call, kind = refs.kind[entry.reference], recv = refs.recv[entry.reference],
-                evidence = entry.binding, reason = entry.reason }
+                evidence = entry.binding, reason = entry.reason, macro_state = entry.macro_state, line = entry.line }
             local macro = entry.reason == 'unknown or unsupported macro visibility'
                 and (G.files[f].language == 'c' or G.files[f].language == 'cpp')
             if macro or M.allowed(site) then

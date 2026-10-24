@@ -4250,6 +4250,19 @@ spec.describe('unconfirmed exploration candidates', function()
         spec.contains(output, '#define AgentProxy proxy->call'); spec.equal(#info.flows, 0)
         spec.equal(#graph.query(G).out[G.by_name.AgentProxyStart[1]], 0)
     end)
+    spec.it('suggests unseen macro definitions without turning API uses into graph edges', function()
+        local G, idx = project({ ['use/start.cpp'] = 'void AgentMacroOnlyStart() { AgentMacroOnly(); }\n',
+            ['one/api.h'] = '#define AgentMacroOnly() api_call()\n',
+            ['two/api.h'] = '#define AgentMacroOnly() api_call()\n',
+            ['other/calls.cpp'] = 'void AgentOtherUse() { AgentMacroOnly(); }\n' })
+        local output, info = explore.run(G, idx, 'AgentMacroOnlyStart')
+        spec.equal(#info.unresolved_candidates, 1); spec.equal(#info.unresolved_candidates[1].candidates, 2)
+        for _, candidate in ipairs(info.unresolved_candidates[1].candidates) do
+            spec.equal(candidate.kind, 'macro'); spec.truthy(candidate.path:match('/api%.h$'))
+        end
+        spec.contains(output, '#define AgentMacroOnly'); spec.equal(#info.flows, 0)
+        spec.equal(#graph.query(G).out[G.by_name.AgentMacroOnlyStart[1]], 0)
+    end)
     spec.it('bounds candidate lookup and reports source and output omissions', function()
         local files = { ['use/start.cpp'] = 'void AgentBudgetStart() { AgentBudgetTarget(); }\n' }
         for i = 1, 300 do files['lib' .. i .. '/api.c'] = 'int AgentBudgetTarget() { return 1; }\n' end

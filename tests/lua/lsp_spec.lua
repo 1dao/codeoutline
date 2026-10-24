@@ -2580,6 +2580,62 @@ void MacroNavUnknown(void) { MACRO_NAV(3); }
         found = jump('MACRO_NAV(2)', 'macro-nav'); spec.equal(#found, 1); spec.equal(found[1].range.start.line, 3)
         navigation.close('macro-nav')
     end)
+    spec.it('returns macro definitions without API call sites and keeps undef and include barriers', function()
+        for _, dir in ipairs({ 'macroDef1', 'macroDef2', 'macroDef3', 'macroDef4', 'macroUse' }) do assert(xutils.mkdir_p(nav_root .. '/' .. dir)) end
+        for i = 1, 4 do nav_write('macroDef' .. i .. '/api.h', '#define MissingContextMacro(L,n) use_stack(L,n)\n') end
+        local calls = {}
+        for i = 1, 80 do calls[i] = 'void OtherMacroUse' .. i .. '() { MissingContextMacro(0,1); }\n' end
+        nav_write('macroUse/calls.cpp', table.concat(calls))
+        local source = 'void MissingContextUse() { MissingContextMacro(0,1); }\n'
+        nav_write('macroUse/use.fragment', source)
+        local options = { cache_path = nav_root .. '/cache.idx', lister = 'walk' }
+        service.refresh(nav_root, options)
+        local uri = nav_uri('macroUse/use.fragment')
+        local function jump(text, extra, method)
+            local doc = docs.new(uri, text, 1, 'cpp')
+            navigation.sync({ session = 'missing-macro-context', open = { [uri] = 1 }, changed = {
+                [uri] = { source = text, version = 1, language = 'cpp' } } })
+            local req = { method = method or 'lsp_definition', session = 'missing-macro-context', uri = uri,
+                position = doc:position(assert(text:find('MissingContextMacro(0', 1, true)) - 1) }
+            for k,v in pairs(extra or {}) do req[k] = v end
+            return nav(req)
+        end
+        local ok, err = pcall(function()
+            local found, out = jump(source)
+            spec.equal(#found, 4); spec.equal(out.incomplete, false)
+            for _, target in ipairs(found) do
+                spec.truthy(target.uri:find('/macroDef', 1, true)); spec.equal(target.range.start.line, 0)
+            end
+            spec.equal(#jump(source, nil, 'lsp_references'), 0, 'candidates cannot turn calls into definition sites or reference edges')
+            spec.equal(#jump('#undef MissingContextMacro\n' .. source), 0)
+            spec.equal(#jump('#if FLAG\n#undef MissingContextMacro\n#endif\n' .. source), 0)
+            spec.equal(#jump(source, { includePaths = {} }), 4, 'an empty client path list is not an explicit project policy')
+            spec.equal(#jump(source, { includePaths = { 'macroDef1' } }), 0, 'configured visibility cannot be bypassed')
+            found = jump('#include "../macroDef1/api.h"\n' .. source)
+            spec.equal(#found, 1); spec.equal(found[1].uri, nav_uri('macroDef1/api.h'))
+            found = jump(source .. '#define MissingContextMacro(L,n) later(L,n)\n')
+            for _, target in ipairs(found) do spec.truthy(target.uri ~= uri, 'the same-file definition after the call is excluded') end
+        end)
+        navigation.close('missing-macro-context')
+        for _, dir in ipairs({ 'macroDef1', 'macroDef2', 'macroDef3', 'macroDef4', 'macroUse' }) do assert(xutils.rmtree(nav_root .. '/' .. dir)) end
+        service.refresh(nav_root, options); assert(ok, err)
+    end)
+    spec.it('prefers actual implementations over repeated API declarations before limiting candidate sources', function()
+        for _, dir in ipairs({ 'bodyOne', 'bodyTwo', 'bodyUse' }) do assert(xutils.mkdir_p(nav_root .. '/' .. dir)) end
+        nav_write('bodyOne/api.c', 'int CandidateBodyFirst() { return 1; }\n')
+        nav_write('bodyTwo/api.c', 'int CandidateBodyFirst() { return 2; }\n')
+        for i = 1, 10 do nav_write('bodyUse/decl' .. i .. '.h', 'int CandidateBodyFirst();\n') end
+        nav_write('bodyUse/use.cpp', 'int BodyUse() { return CandidateBodyFirst(); }\n')
+        local options = { cache_path = nav_root .. '/cache.idx', lister = 'walk' }
+        service.refresh(nav_root, options)
+        local ok, err = pcall(function()
+            local found, out = nav({ method = 'lsp_definition', uri = nav_uri('bodyUse/use.cpp'), position = { line = 0, character = 26 } })
+            spec.equal(#found, 2); spec.equal(out.incomplete, false)
+            spec.equal(found[1].uri, nav_uri('bodyOne/api.c')); spec.equal(found[2].uri, nav_uri('bodyTwo/api.c'))
+        end)
+        for _, dir in ipairs({ 'bodyOne', 'bodyTwo', 'bodyUse' }) do assert(xutils.rmtree(nav_root .. '/' .. dir)) end
+        service.refresh(nav_root, options); assert(ok, err)
+    end)
     spec.it('navigates proxy macros in ambiguous headers without asserting execution targets', function()
         for _, dir in ipairs({ 'proxyOne', 'proxyTwo', 'proxyUse' }) do assert(xutils.mkdir_p(nav_root .. '/' .. dir)) end
         local options = { cache_path = nav_root .. '/cache.idx', lister = 'walk' }
@@ -3109,6 +3165,15 @@ spec.describe('LSP navigation requests', function()
         spec.contains(send('textDocument/references', position, 5), '-32803')
         spec.contains(send('textDocument/definition', { textDocument = { uri = 'file:///outside/x.c' },
             position = { line = 0, character = 0 } }, 6), '"result":[]')
+        done_with.lsp_definition = { result = {}, incomplete = true }
+        warned = #replies
+        send('textDocument/definition', position, 7)
+        spec.contains(replies[warned + 1], 'definition lookup')
+        spec.equal(replies[warned + 1]:find('too many matching references', 1, true), nil)
+        done_with.lsp_references = { result = {}, incomplete = true }
+        warned = #replies
+        send('textDocument/references', position, 8)
+        spec.contains(replies[warned + 1], 'too many matching references')
     end)
     spec.it('applies drafts in the worker even when the request is cancelled', function()
         local saved = { xthread = xthread, xshared = xshared, replys = _thread_replys }

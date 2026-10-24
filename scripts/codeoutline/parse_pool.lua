@@ -149,7 +149,7 @@ function M.run(jobs, max_bytes, on_result)
                 chunk, bytes = {}, 0
             end
             for _, j in ipairs(bucket) do
-                chunk[#chunk + 1] = { j.rel, j.abs, j.size or false, j.crc or false }
+                chunk[#chunk + 1] = { j.rel, j.abs, j.size or false, j.crc or false, j.language or false }
                 bytes = bytes + j.weight
                 if #chunk >= M.CHUNK_FILES or bytes >= M.CHUNK_BYTES then flush() end
             end

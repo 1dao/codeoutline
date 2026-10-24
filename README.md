@@ -121,9 +121,23 @@ ID first, then bounded, conservative syntax detection. Explicit project-relative
 paths in explore queries receive the same temporary parsing; `lang:` can supply a
 language hint. Detection ignores comments, strings, binary data and ambiguous syntax.
 Each explore query admits at most four such files of 1 MiB each and 2 MiB in total.
-No suffix association is learned, and these files are neither swept by full indexing
-nor added to its disk cache. Supply a full relative path for files outside the root
-directory; file discovery by basename still uses the regular index.
+No suffix association is learned. Except for the C/C++ include-driven admission below,
+these files are not added to the persistent index. Supply a full relative path for files
+outside the root directory; file discovery by basename uses the regular index.
+
+C/C++ literal `#include` directives can admit project-local unknown-suffix source
+fragments such as `.inl` or `.inc`. The normal file listing supplies candidates and
+honors ignore rules; relative paths and project include-path configuration take
+precedence. Without configured search paths, only a unique suffix match is admitted.
+Fragments inherit a C/C++ parser hint, with C++ syntax detection, and are parsed once
+per language hint into compact cached records. Unreferenced unknown files, ignored
+files, external SDKs, binary data and clearly foreign-language sources are not admitted.
+Changes rediscover reachable fragments and remove orphaned include cycles; cache
+reloads preserve parser hints. Limits are 4,096 fragments, 64 MiB combined source and
+32 discovery rounds, plus the normal per-file size limit; refresh statistics expose
+`fragment_limited` when a discovery limit is reached. Detailed bindings and macro
+environments remain query-time data. Inclusion alone does not restore a surrounding
+class, namespace or the compiler configuration of every translation unit.
 
 Explore can suggest exact-name definitions for unresolved calls, including possible
 macro declarations. The separate **Unconfirmed definition candidates** section gives
@@ -265,7 +279,7 @@ build/forced-include relationships remain declarations instead of guessed defini
 
 An explicit `includePaths` (including `[]`), a matching directory rule, or nonempty LSP search
 paths disables whole-project suffix guesses for that file. Without configuration, legacy suffix
-lookup remains. External/unindexed headers can be opened from include lines but do not contribute
+lookup remains. External or excluded headers can be opened from include lines but do not contribute
 indexed symbols or fall through to indexed duplicates. There are at most 128 rules and 128
 effective directories per file; paths are literal, without globs. These are per-file lookup rules,
 not compiler build configurations, forced includes or full preprocessor/translation-unit analysis.

@@ -122,6 +122,29 @@ steps[#steps + 1] = { 'commits the same records as a serial pass', function()
     sweep_after(0)
     spec.equal(alive(), 4, 'retain threads during the idle grace period')
     idx:close()
+    -- Unknown suffixes must carry their include-derived language to workers.
+    local fragments = root .. '/fragments'
+    assert(xutils.mkdir_p(fragments))
+    local includes = {}
+    for i = 1, 40 do
+        local p = 'part' .. i .. '.piece'
+        includes[#includes + 1] = '#include "' .. p .. '"'
+        write(fragments .. '/' .. p, 'class Piece' .. i .. ' { public: int read() { return 1; } };\n')
+    end
+    write(fragments .. '/main.cpp', table.concat(includes, '\n'))
+    local extra = index.open(fragments, { cache_path = root .. '/fragments.idx', lister = 'walk' })
+    local extra_stats = extra:refresh_all()
+    spec.equal(extra_stats.parsed, 41); spec.equal(extra_stats.failed, 0)
+    for i = 1, 40 do
+        local p = 'part' .. i .. '.piece'
+        local rec = extra.files[p]
+        spec.equal(rec.language, 'cpp'); spec.equal(rec.cpp_fragment, 'cpp')
+        local single = index.load_file(fragments .. '/' .. p, p, MAX_BYTES, nil, nil, 'cpp').rec
+        single.mtime = rec.mtime
+        spec.equal(canonical(rec, 'checked'), canonical(single, 'checked'))
+    end
+    spec.equal(extra:refresh_all().parsed, 0)
+    extra:close()
 end }
 
 steps[#steps + 1] = { 'abandons a cancelled pass and ignores its late results', function()

@@ -19,13 +19,16 @@ local paths = require('codeoutline.path')
 local control = require('codeoutline.control')
 local graph = require('codeoutline.graph')
 local pool = require('codeoutline.parse_pool')
+local fragments = require('codeoutline.cpp_fragments')
 
 local M = {}
 local INDEX_PARSE = { ranges = false, omit_signatures = true }
 local LARGE_PARSE = { ranges = false }
 -- Keep signatures for files beyond the shared query parser's 1 MiB limit.
-local function parse_options(source)
-    return #source <= 1048576 and INDEX_PARSE or LARGE_PARSE
+local function parse_options(source, language)
+    local options = #source <= 1048576 and INDEX_PARSE or LARGE_PARSE
+    if not language then return options end
+    return { ranges = false, omit_signatures = options.omit_signatures, language = language, cpp_fragment = language }
 end
 
 -- Cache version: a checksum of the parser sources, so any parser change
@@ -33,7 +36,7 @@ end
 M.VERSION = (function()
     local parts = {}
     for _, m in ipairs({ 'xscan', 'text', 'common', 'indirect', 'dispatch_aliases', 'static_dispatch', 'js_evidence', 'python_bindings', 'cpp_bindings', 'cpp_types', 'csharp_bindings', 'lua_bindings', 'foreign', 'foreign_lua', 'parse', 'lang.c', 'lang.cpp', 'lang.lua', 'lang.python',
-        'cpp_macros', 'function_values', 'implementations', 'cpp_implementations', 'ts_implementations', 'type_bases', 'automatic_events', 'lua_callback_loops', 'lang.java', 'lang.kotlin', 'lang.go', 'lang.js', 'lang.csharp', 'lang.rust' }) do
+        'cpp_macros', 'cpp_includes', 'cpp_fragments', 'language_detect', 'function_values', 'implementations', 'cpp_implementations', 'ts_implementations', 'type_bases', 'automatic_events', 'lua_callback_loops', 'lang.java', 'lang.kotlin', 'lang.go', 'lang.js', 'lang.csharp', 'lang.rust' }) do
         local file = package.searchpath and package.searchpath('codeoutline.' .. m, package.path)
         local h = file and io.open(file, 'rb')
         if h then parts[#parts + 1] = h:read('a'); h:close() end
@@ -144,6 +147,8 @@ function Index:load()
             for part in rec.path:gmatch('[^/]+') do assert(part ~= '..' and part ~= '.') end
             assert(type(rec.nodes) == 'table' and type(rec.refs) == 'table' and type(rec.imports) == 'table')
             assert(type(rec.size) == 'number' and type(rec.language) == 'string')
+            assert(rec.cpp_fragment == nil or rec.cpp_fragment == 'c' or rec.cpp_fragment == 'cpp')
+            assert(rec.cpp_fragment_cpp == nil or rec.cpp_fragment_cpp == true)
             assert(rec.encoding == nil or rec.encoding == 'utf-8' or rec.encoding == 'utf-8-bom' or rec.encoding == 'gbk')
             for i, n in ipairs(rec.nodes) do
                 if i % 128 == 0 then control.check() end
@@ -316,7 +321,7 @@ function Index:query_source(rel)
     local changed = false
     if not rec.encoding then
         if encoding == 'gbk' then
-            local parsed = assert(ci.parse(rel, src, parse_options(src)), 'cannot parse decoded source: ' .. rel)
+            local parsed = assert(ci.parse(rel, src, parse_options(src, rec.cpp_fragment)), 'cannot parse decoded source: ' .. rel)
             parsed.size, parsed.crc, parsed.mtime, parsed.checked = rec.size, rec.crc, rec.mtime, rec.checked
             local repair_only = not self:needs_save() or self.repair_only
             if same_value(parsed, rec) then
@@ -402,6 +407,7 @@ end
 -- Also returns each file's stat fields when the runtime lists them.
 function Index:walk_files()
     local out, meta = {}, {}
+    self.fragment_inventory = fragments.inventory(self.root)
     assert(xutils and xutils.list_dir, 'file enumeration unavailable: install rg or use a runtime with list_dir')
     local rules = load_ignore(self.root)
     local dirs = { '' }
@@ -422,9 +428,11 @@ function Index:walk_files()
             if st and st.type ~= 'link' and name:sub(1, 1) ~= '.' and not ignored(rules, rel, name, e.dir) then
                 if e.dir then
                     if not M.WALK_SKIP[name] then dirs[#dirs + 1] = rel end
-                elseif ci.language(name) then
-                    out[#out + 1] = rel
-                    meta[rel] = st
+                else
+                    if ci.language(name) then
+                        out[#out + 1] = rel
+                        meta[rel] = st
+                    else fragments.add(self.fragment_inventory, rel) end
                 end
             end
         end
@@ -448,6 +456,7 @@ function Index:list_files()
     local p = io.popen(cmd .. (package.config:sub(1, 1) == '\\' and ' 2>nul' or ' 2>/dev/null'))
     assert(p, 'cannot start rg file enumeration')
     local out = {}
+    self.fragment_inventory = fragments.inventory(self.root)
     local prefix = self.root:sub(-1) == '/' and self.root or self.root .. '/'
     local listing = p:read('a')
     local ok, _, code = p:close()
@@ -458,6 +467,9 @@ function Index:list_files()
         if ci.language(path) then
             out[#out + 1] = path
             assert(#out <= M.MAX_WALK_FILES, 'file enumeration limit exceeded')
+        else
+            fragments.add(self.fragment_inventory, path)
+            assert(self.fragment_inventory.count <= M.MAX_WALK_FILES, 'file enumeration limit exceeded')
         end
     end
     table.sort(out)
@@ -502,7 +514,7 @@ end
 -- Read one file and parse it unless its size and checksum match the known
 -- record. Touches no index state, so a parse thread can run it too. `checked`
 -- is taken before the read: content read after that second is current.
-function M.load_file(abs, rel, max_bytes, old_size, old_crc)
+function M.load_file(abs, rel, max_bytes, old_size, old_crc, language)
     local checked = os.time()
     local src = slurp(abs)
     if not src or #src > max_bytes then return { status = 'skipped' } end
@@ -510,7 +522,7 @@ function M.load_file(abs, rel, max_bytes, old_size, old_crc)
     if old_size == #src and old_crc == crc then
         return { status = 'unchanged', checked = checked }
     end
-    local ok, r = pcall(ci.parse, rel, src, parse_options(src))
+    local ok, r = pcall(ci.parse, rel, src, parse_options(src, language))
     if not ok and control.is_interrupted(r) then error(r, 0) end
     -- A parser exception must not permanently hide a GBK file.
     -- Successful speculative parsing does not scan encoding here.
@@ -518,13 +530,13 @@ function M.load_file(abs, rel, max_bytes, old_size, old_crc)
         if xutils.to_utf8 then
             local decoded, encoding = xutils.to_utf8(src)
             if decoded then
-                ok, r = pcall(ci.parse, rel, decoded, parse_options(src))
+                ok, r = pcall(ci.parse, rel, decoded, parse_options(src, language))
                 if not ok and control.is_interrupted(r) then error(r, 0) end
                 if ok and r then r.encoding = encoding end
             end
         end
     end
-    if not (ok and r) then return { status = 'failed' } end
+    if not (ok and r) then return { status = language and ok and 'skipped' or 'failed' } end
     r.size, r.crc, r.checked = #src, crc, checked
     return { status = 'parsed', rec = r }
 end
@@ -571,11 +583,46 @@ function Index:apply_load(rel, st, res, stats)
     return true
 end
 
-function Index:read_file(rel, st, stats)
+function Index:read_file(rel, st, stats, language)
     local rec = self.files[rel]
-    local res = M.load_file(self:abs(rel), rel, self.max_bytes, rec and rec.size, rec and rec.crc)
+    language = language or rec and rec.cpp_fragment
+    local same = rec and rec.cpp_fragment == language
+    local res = M.load_file(self:abs(rel), rel, self.max_bytes, same and rec.size, same and rec.crc, language)
     control.check()
     return self:apply_load(rel, st, res, stats)
+end
+
+function Index:refresh_fragments(stats, seen, changed)
+    fragments.refresh(self, stats, seen, function(batch)
+        local frontier, reads, meta = {}, {}, {}
+        for _, candidate in ipairs(batch) do
+            local rel, language, st = candidate.rel, candidate.language, candidate.stat
+            local rec = self.files[rel]
+            local settled
+            if not (changed and changed[rel]) and rec and rec.cpp_fragment == language then
+                settled = self:check_stat(rel, st, stats)
+            end
+            if settled then seen[rel] = true; frontier[#frontier + 1] = rel
+            elseif settled == nil then
+                local same = rec and rec.cpp_fragment == language
+                reads[#reads + 1] = { rel = rel, abs = self:abs(rel), language = language,
+                    size = same and rec.size, crc = same and rec.crc, weight = st.size + M.FILE_WEIGHT }
+                meta[rel] = st
+            end
+        end
+        local function apply(rel, response)
+            control.check()
+            if self:apply_load(rel, meta[rel], response, stats) then seen[rel] = true; frontier[#frontier + 1] = rel end
+        end
+        if #reads >= M.PARALLEL_MIN_FILES and pool.ready() then pool.run(reads, self.max_bytes, apply)
+        else
+            for _, job in ipairs(reads) do
+                control.check()
+                apply(job.rel, M.load_file(job.abs, job.rel, self.max_bytes, job.size, job.crc, job.language))
+            end
+        end
+        return frontier
+    end, changed)
 end
 
 -- Bring one listed file in line with the tree, given its stat fields (nil
@@ -621,7 +668,7 @@ local IGNORE_FILES = { ['.gitignore'] = true, ['.ignore'] = true, ['.rgignore'] 
 local function relevant(paths)
     local changed = {}
     for _, rel in ipairs(paths) do
-        if IGNORE_FILES[rel:match('[^/]*$')] then return nil end
+        if IGNORE_FILES[rel:match('[^/]*$')] or rel == '.codeoutline.json' then return nil end
         if rel:sub(1, 1) ~= '.' and not rel:find('/.', 1, true) then changed[rel] = true end
     end
     return changed
@@ -632,6 +679,13 @@ end
 -- files that differ from the index.
 function Index:refresh_changed(changed, structural)
     local stats = new_stats('changes')
+    local refresh_fragments = structural or false
+    for rel in pairs(changed) do
+        local rec, language = self.files[rel], ci.language(rel)
+        if (rec and (rec.cpp_fragment or rec.language == 'c' or rec.language == 'cpp'))
+            or language == 'c' or language == 'cpp' or not language then refresh_fragments = true end
+    end
+    if refresh_fragments and not self.fragment_inventory then structural = true end
     if not structural then
         -- A supported file the index lacks may have shrunk under the size
         -- limit or been fixed after a failed parse: let the listing decide.
@@ -641,6 +695,7 @@ function Index:refresh_changed(changed, structural)
     end
     local listed
     if structural then
+        refresh_fragments = true
         stats.mode = 'relisted'
         listed = {}
         for _, rel in ipairs(self:list_files()) do
@@ -648,14 +703,16 @@ function Index:refresh_changed(changed, structural)
             if not self.files[rel] then changed[rel] = true end
         end
         for rel in pairs(self.files) do
-            if not listed[rel] then changed[rel] = true end
+            if not listed[rel] and not self.files[rel].cpp_fragment then changed[rel] = true end
         end
     end
     local has_stat = xutils and xutils.stat
     for rel in pairs(changed) do
         control.check()
         local known = self.files[rel] ~= nil
-        if listed and listed[rel] or (not listed and known) then
+        if known and self.files[rel].cpp_fragment then
+            -- Recheck through the reachable include closure below.
+        elseif listed and listed[rel] or (not listed and known) then
             if not self:sync_file(rel, has_stat and xutils.stat(self:abs(rel)) or nil, stats) and known then
                 self:commit(rel, nil)
                 stats.removed = stats.removed + 1
@@ -664,6 +721,14 @@ function Index:refresh_changed(changed, structural)
             self:commit(rel, nil)           -- no longer listed
             stats.removed = stats.removed + 1
         end
+    end
+    if refresh_fragments then
+        local seen = {}
+        for rel, rec in pairs(self.files) do if not rec.cpp_fragment then seen[rel] = true end end
+        self:refresh_fragments(stats, seen, changed)
+        local gone = {}
+        for rel, rec in pairs(self.files) do if rec.cpp_fragment and not seen[rel] then gone[#gone + 1] = rel end end
+        for _, rel in ipairs(gone) do self:commit(rel, nil); stats.removed = stats.removed + 1 end
     end
     local total = 0
     for _ in pairs(self.files) do total = total + 1 end
@@ -677,12 +742,20 @@ end
 -- watcher is reopened before one.
 function Index:refresh(opts)
     opts = opts or {}
+    local policy = fragments.policy_key(self.root)
+    if self.fragment_policy and self.fragment_policy ~= policy then
+        self.watch_ready = false
+        local stats = self:refresh_all()
+        if self.watcher then self.watch_ready = true end
+        return stats
+    end
     if opts.paths then
         local changed = {}
         for _, path in ipairs(opts.paths) do
             if paths.contains(self.root, path) then
                 local prefix = self.root:sub(-1) == '/' and self.root or self.root .. '/'
                 local rel = path:sub(#prefix + 1)
+                if rel == '.codeoutline.json' then return self:refresh_all() end
                 -- Unindexed/ignored files are admitted by watcher enumeration.
                 if self.files[rel] then changed[rel] = true end
             end
@@ -725,6 +798,7 @@ end
 function Index:refresh_all()
     local stats = new_stats('full')
     self.next_full = nil
+    self.fragment_policy = fragments.policy_key(self.root)
     local seen = {}
     local list, meta = self:list_files()
     if not meta and xutils and xutils.stat then meta = self:stat_listing(list) end
@@ -752,6 +826,7 @@ function Index:refresh_all()
             if self:read_file(rel, meta and meta[rel], stats) then seen[rel] = true end
         end
     end
+    self:refresh_fragments(stats, seen)
     local gone = {}
     for rel in pairs(self.files) do
         if not seen[rel] then gone[#gone + 1] = rel end

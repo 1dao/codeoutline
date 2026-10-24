@@ -110,7 +110,7 @@ function M.resolve(G, f, imp, ctx)
         if policy.root ~= '' then
             if paths.contains(policy.root, file) then rel = file:sub(#policy.root + 2) else rel = nil end
         end
-        local id = rel and G.file_index[rel]
+        local id = rel and (G.file_index[rel] or G.file_index[paths.key(rel)])
         local exists = id ~= nil
         if not exists and policy.root ~= '' then
             local stat = xutils.stat(file); exists = stat and stat.type == 'file' or false
@@ -144,10 +144,11 @@ function M.resolve(G, f, imp, ctx)
     end
     if policy.configured then return {}, true end
     local ids = {}
-    for i, id in ipairs(G.by_base[written:match('([^/]*)$')] or {}) do
+    local base = written:match('([^/]*)$')
+    for i, id in ipairs(G.by_base[base] or G.by_base[paths.key(base)] or {}) do
         if i % 128 == 0 then control.check() end
-        local path = G.files[id].path
-        if path == written or path:sub(-#written - 1) == '/' .. written then ids[#ids + 1] = id end
+        local path, name = paths.key(G.files[id].path), paths.key(written)
+        if path == name or path:sub(-#name - 1) == '/' .. name then ids[#ids + 1] = id end
     end
     return ids, false
 end

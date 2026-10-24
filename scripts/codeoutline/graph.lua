@@ -195,7 +195,7 @@ local function resolve_deps(G, f, js_context, imports_only)
         end
         for g in pairs(deps) do
             local p = G.files[g].path
-            if HEADER_EXT[p:match('%.(%w+)$') or ''] or G.files[g].on_demand then
+            if HEADER_EXT[p:match('%.(%w+)$') or ''] or G.files[g].on_demand or G.files[g].cpp_fragment then
                 local local_sources, has_local = {}, false
                 for _, h in ipairs(G.by_stem[stem(p)] or {}) do
                     if SOURCE_EXT[G.files[h].path:match('%.(%w+)$') or ''] and dirname(G.files[h].path) == dirname(p) then
@@ -283,7 +283,7 @@ local function locality(G, f, cf, c, deps, paired)
     if cf == f then return 100 end
     if c.static then
         -- `static inline` helpers in an included header serve every includer.
-        if deps[cf] and (HEADER_EXT[G.files[cf].path:match('%.(%w+)$') or ''] or G.files[cf].on_demand) then return 50 end
+        if deps[cf] and (HEADER_EXT[G.files[cf].path:match('%.(%w+)$') or ''] or G.files[cf].on_demand or G.files[cf].cpp_fragment) then return 50 end
         return nil
     end
     if deps[cf] then return 50 end

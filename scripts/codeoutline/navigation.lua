@@ -93,6 +93,11 @@ local function view(session, root, include_paths, only)
         local rel = doc.path and relative(root, doc.path)
         local f = rel and V.file_index[rel]
         if not rel or (f and V.drafts[f]) then return f end
+        local hint = f and V.files[f].cpp_fragment
+            and not require('codeoutline.language_detect').resolve('', doc.language, false) and V.files[f].language or nil
+        if doc.indexed_language ~= hint then
+            doc.indexed_language, doc.parsed, doc.full, doc.branch_tokens = hint, nil, nil, nil
+        end
         local rec = doc:parse()
         if not rec.language then return nil end
         if f then masked[f] = true

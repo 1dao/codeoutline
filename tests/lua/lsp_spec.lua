@@ -561,6 +561,24 @@ end
 
 spec.describe('LSP navigation', function()
     service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+    spec.it('navigates indexed include fragments without an editor language hint', function()
+        nav_write('IndexedFragment.cpp', '#include "IndexedFragment.piece"\nint IndexedFragmentCall() { return IndexedPiece(); }')
+        nav_write('IndexedFragment.piece', '#include "IndexedLeaf.piece"\nstatic int IndexedPiece() { return IndexedLeaf(); }')
+        nav_write('IndexedLeaf.piece', 'static int IndexedLeaf() { return 7; }')
+        local idx = service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        spec.truthy(idx.files['IndexedFragment.piece']); spec.truthy(idx.files['IndexedLeaf.piece'])
+        local function jump(path, name)
+            local doc = docs.read(nav_root .. '/' .. path)
+            local offset = assert(doc.source:find(name, 1, true)) - 1
+            return nav({ method = 'lsp_definition', uri = doc.uri, position = doc:position(offset) })
+        end
+        local found = jump('IndexedFragment.cpp', 'IndexedPiece()')
+        spec.equal(#found, 1); spec.equal(found[1].uri, nav_uri('IndexedFragment.piece'))
+        found = jump('IndexedFragment.piece', 'IndexedLeaf()')
+        spec.equal(#found, 1); spec.equal(found[1].uri, nav_uri('IndexedLeaf.piece'))
+        local text, info = service.explore(nav_root, 'IndexedFragmentCall', { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        spec.contains(text, 'IndexedFragment.piece:2'); spec.equal(#(info.on_demand_files or {}), 0)
+    end)
     spec.it('warms navigation caches without bypassing source validation or dependency limits', function()
         nav_write('WarmTarget.lua', 'local M = {}\nfunction M.warm_save() end\nreturn M\n')
         local source = "local api = dofile('WarmTarget.lua')\napi.warm_save()\n"

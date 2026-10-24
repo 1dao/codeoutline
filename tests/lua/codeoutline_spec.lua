@@ -2066,6 +2066,139 @@ class Use { void call(I value) { { Object value = unknown; value.run(1); } value
     end)
 end)
 
+spec.describe('include-driven C/C++ source fragments', function()
+    local index = require('codeoutline.index')
+    local serial = 0
+    local function project(files, lister)
+        serial = serial + 1
+        local root = tmp_root .. '/fragments/' .. serial
+        for path, source in pairs(files) do write(root .. '/' .. path, source) end
+        return index.open(root, { cache_path = root .. '.idx', lister = lister or 'walk' }), root
+    end
+    for _, lister in ipairs({ 'walk', 'rg' }) do
+        spec.it('indexes only reachable fragments, static calls and cycles with ' .. lister, function()
+            if lister == 'rg' and not index.rg_available() then return end
+            local idx = project({ ['main.c'] = '#include "parts/one.fragment"\nint FragmentEntry(void) { return FragmentPart(); }',
+                ['other.c'] = 'int FragmentUnrelated(void) { return FragmentLeaf(); }',
+                ['parts/one.fragment'] = '#include "two.bits"\nstatic inline int FragmentPart(void) { return FragmentLeaf(); }',
+                ['parts/two.bits'] = '#include "one.fragment"\nstatic inline int FragmentLeaf(void) { return 7; }',
+                ['unused.fragment'] = 'int FragmentUnused(void) { return 9; }' }, lister)
+            local stats = idx:refresh_all()
+            spec.equal(stats.parsed, 4); spec.equal(stats.failed, 0)
+            spec.equal(idx.files['parts/two.bits'].cpp_fragment, 'c')
+            spec.nil_value(idx.files['unused.fragment']); spec.nil_value(ci.language('parts/two.bits'))
+            local G = idx:symbols(); local Q = graph.query(G)
+            local entry, part, leaf = G.by_name.FragmentEntry[1], G.by_name.FragmentPart[1], G.by_name.FragmentLeaf[1]
+            spec.equal(Q.out[entry][1], part); spec.equal(Q.out[part][1], leaf)
+            spec.equal(#Q.out[G.by_name.FragmentUnrelated[1]], 0)
+            spec.truthy(idx:save())
+            local loaded = index.open(idx.root, { cache_path = idx.cache_path, lister = lister })
+            spec.truthy(loaded.cache_loaded); spec.truthy(loaded.files['parts/two.bits'])
+            spec.equal(loaded:refresh_all().parsed, 0)
+            spec.truthy(loaded.files['parts/two.bits'])
+        end)
+    end
+    spec.it('discovers late dependencies and removes orphaned fragment cycles incrementally', function()
+        local idx, root = project({ ['main.c'] = '#include "late.bits"\nint FragmentRoot(void) { return LatePart(); }' })
+        spec.equal(idx:refresh_all().parsed, 1)
+        write(root .. '/late.bits', '#include "child.bits"\nint LatePart(void) { return ChildPart(); }')
+        write(root .. '/child.bits', '#include "late.bits"\nint ChildPart(void) { return 1; }')
+        local stats = idx:refresh_changed({ ['late.bits'] = true, ['child.bits'] = true }, true)
+        spec.equal(stats.parsed, 2); spec.truthy(idx.files['child.bits'])
+        local before = idx.files['child.bits'].crc
+        idx.files['child.bits'].checked = (idx.files['child.bits'].mtime or os.time()) + 5
+        write(root .. '/child.bits', '#include "late.bits"\nint ChildPart(void) { return 2; }')
+        stats = idx:refresh_changed({ ['child.bits'] = true }, false)
+        spec.equal(stats.parsed, 1); spec.truthy(idx.files['child.bits'].crc ~= before)
+        local G = idx:symbols()
+        write(root .. '/main.c', 'int FragmentRoot(void) { return 0; }')
+        stats = idx:refresh_changed({ ['main.c'] = true }, false)
+        spec.equal(stats.removed, 2); spec.nil_value(idx.files['late.bits']); spec.nil_value(idx.files['child.bits'])
+        spec.nil_value(G.by_name.LatePart)
+    end)
+    spec.it('honors include paths, ambiguity, ignored shadows and configuration refresh', function()
+        local idx, root = project({ ['main.cpp'] = '#include <api.part>\nvoid FragmentConfigured() {}',
+            ['one/api.part'] = 'void FragmentOne() {}', ['two/api.part'] = 'void FragmentTwo() {}' })
+        idx:refresh_all(); spec.nil_value(idx.files['one/api.part']); spec.nil_value(idx.files['two/api.part'])
+        write(root .. '/.codeoutline.json', '{"includePaths":["one"]}')
+        idx:refresh({ paths = { root .. '/.codeoutline.json' } })
+        spec.truthy(idx.files['one/api.part']); spec.nil_value(idx.files['two/api.part'])
+        write(root .. '/.codeoutline.json', '{"includePaths":["two"]}')
+        -- Hidden config files need not be reported by the native watcher.
+        idx.next_full = os.time() + 300
+        idx:refresh({ full_interval = 300 })
+        spec.nil_value(idx.files['one/api.part']); spec.truthy(idx.files['two/api.part'])
+        write(root .. '/.gitignore', 'api.part\n')
+        idx:refresh_all(); spec.nil_value(idx.files['two/api.part'])
+        local shadow = project({ ['main.c'] = '#include "api.part"\nvoid FragmentShadow() {}',
+            ['api.part'] = 'void HiddenFragment() {}', ['lib/api.part'] = 'void WrongFragment() {}',
+            ['.gitignore'] = '/api.part\n', ['.codeoutline.json'] = '{"includePaths":["lib"]}' })
+        shadow:refresh_all(); spec.nil_value(shadow.files['api.part']); spec.nil_value(shadow.files['lib/api.part'])
+    end)
+    spec.it('keeps supported language boundaries and skips binary or foreign-language fragments', function()
+        local idx = project({ ['main.c'] = '#include "blob.part"\n#include "foreign.part"\n#include "real.lua"\nvoid FragmentBinary() {}',
+            ['blob.part'] = 'int Blob;\0binary', ['foreign.part'] = 'local function foreign_lua() return 1 end',
+            ['real.lua'] = 'function ExistingLua() end', ['loader.lua'] = 'dofile("unused.part")',
+            ['unused.part'] = 'int NotIncluded(void) { return 0; }' })
+        local stats = idx:refresh_all()
+        spec.equal(stats.failed, 0); spec.nil_value(idx.files['blob.part']); spec.nil_value(idx.files['foreign.part'])
+        spec.equal(idx.files['real.lua'].language, 'lua'); spec.nil_value(idx.files['unused.part'])
+    end)
+    spec.it('retains C++ hints and GBK source repair across cache reload and reindex', function()
+        local idx, root = project({ ['main.cpp'] = '#include "box.part"\nvoid FragmentCpp() {}',
+            ['box.part'] = '// \214\208\206\196\nclass FragmentBox { public: int size() { return 1; } };' })
+        idx:refresh_all()
+        local rec = idx.files['box.part']; spec.equal(rec.language, 'cpp'); spec.equal(rec.cpp_fragment, 'cpp')
+        local source = idx:query_source('box.part'); spec.contains(source, 'FragmentBox')
+        spec.equal(idx.files['box.part'].encoding, 'gbk'); spec.equal(idx.files['box.part'].cpp_fragment, 'cpp')
+        spec.truthy(idx:save())
+        local loaded = index.open(root, { cache_path = idx.cache_path, lister = 'walk' })
+        spec.truthy(loaded.cache_loaded); spec.equal(loaded.files['box.part'].cpp_fragment, 'cpp')
+        spec.equal(loaded:refresh_all().parsed, 0)
+    end)
+    spec.it('bounds additional files and reports a limited include closure', function()
+        local fragments = require('codeoutline.cpp_fragments')
+        local idx = project({ ['main.c'] = '#include "a.part"', ['a.part'] = '#include "b.part"\nvoid FragmentA() {}',
+            ['b.part'] = 'void FragmentB() {}' })
+        local cap = fragments.MAX_FILES; fragments.MAX_FILES = 1
+        local ok, stats = pcall(function() return idx:refresh_all() end)
+        fragments.MAX_FILES = cap; spec.truthy(ok, tostring(stats))
+        spec.truthy(stats.fragment_limited); spec.truthy(idx.files['a.part']); spec.nil_value(idx.files['b.part'])
+        for _, field in ipairs({ 'MAX_BYTES', 'MAX_DEPTH' }) do
+            local limit = fragments[field]; fragments[field] = 1
+            local ok, stats = pcall(function() return idx:refresh_all() end)
+            fragments[field] = limit; spec.truthy(ok, tostring(stats)); spec.truthy(stats.fragment_limited)
+            if field == 'MAX_BYTES' then spec.nil_value(idx.files['a.part']) end
+        end
+    end)
+    spec.it('rejects external dependencies and honors directory-specific include rules', function()
+        local idx, root = project({ ['app/main.cpp'] = '#include <chosen.piece>',
+            ['one/chosen.piece'] = 'void FragmentRuleOne() {}', ['two/chosen.piece'] = 'void FragmentRuleTwo() {}',
+            ['.codeoutline.json'] = '{"includePaths":["one"],"includePathRules":[{"directory":"app","paths":["two"]}]}' })
+        idx:refresh_all(); spec.truthy(idx.files['two/chosen.piece']); spec.nil_value(idx.files['one/chosen.piece'])
+        write(root .. '_external/outside.piece', 'void FragmentExternal() {}')
+        write(root .. '/app/main.cpp', '#include <outside.piece>')
+        write(root .. '/.codeoutline.json', '{"includePaths":["../' .. root:match('([^/]+)$') .. '_external"]}')
+        idx:refresh_all(); spec.nil_value(idx.files['two/chosen.piece'])
+        for path in pairs(idx.files) do spec.truthy(not path:find('outside.piece', 1, true)) end
+    end)
+    spec.it('settles mixed C/C++ hints through nested cached includes without repeated parsing', function()
+        local idx, root = project({ ['a.c'] = '#include "shared.part"', ['b.cpp'] = '#include "bridge.part"',
+            ['bridge.part'] = '#include "shared.part"\nvoid MixedBridge() {}',
+            ['shared.part'] = 'int MixedShared(void) { return 1; }' })
+        idx:refresh_all(); spec.equal(idx.files['shared.part'].cpp_fragment, 'cpp')
+        local stats = idx:refresh_all(); spec.equal(stats.parsed, 0)
+        write(root .. '/b.cpp', 'void MixedCppRemoved() {}')
+        stats = idx:refresh_changed({ ['b.cpp'] = true }, false)
+        spec.nil_value(idx.files['bridge.part']); spec.equal(idx.files['shared.part'].cpp_fragment, 'c')
+        spec.equal(idx:refresh_all().parsed, 0)
+        write(root .. '/shared.part', '#include "bridge.part"\nclass SyntaxCppPart {};')
+        idx:refresh_changed({ ['shared.part'] = true }, false)
+        spec.truthy(idx.files['shared.part'].cpp_fragment_cpp)
+        spec.equal(idx:refresh_all().parsed, 0)
+    end)
+end)
+
 spec.describe('query-owned C/C++ include search paths', function()
     local serial = 0
     local function build(files, config)

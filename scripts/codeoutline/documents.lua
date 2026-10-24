@@ -129,7 +129,7 @@ end
 
 function Doc:parse()
     if self.parsed then return self.parsed end
-    self.parsed = parse.parse(parser_name(self), self.source, { language = self.language, detect = true }) or { nodes = {} }
+    self.parsed = parse.parse(parser_name(self), self.source, { language = self.indexed_language or self.language, detect = true }) or { nodes = {} }
     return self.parsed
 end
 
@@ -170,7 +170,7 @@ function M.read(path, indexed)
     end
     local source = xutils.to_utf8(raw)
     if not source then return nil end
-    return M.new(M.uri(path), source)
+    return M.new(M.uri(path), source, nil, indexed and indexed.language)
 end
 
 return M

@@ -206,7 +206,11 @@ overlay never writes to the resident tables.
 - Unknown suffixes use the editor's supported language ID, or conservative source
   detection when no supported ID is supplied. The chosen language is retained for
   binding extraction, completion and position lookup. These documents remain session
-  overlays and do not change persistent indexing or global suffix associations.
+  overlays and do not change global suffix associations. Project-local C/C++ files
+  reached through literal includes can also enter the shared persistent index, even
+  with an unknown suffix. Navigation reuses their indexed language when the editor
+  provides no supported language ID. This admission follows project include-path and
+  ignore rules; LSP-only search paths do not change the shared index inventory.
   C/C++ definition navigation can also read identifier tokens in another preprocessor
   branch; this lexical fallback does not add references or execution relationships.
 - Hover shows the target's signature, kind, qualified name and location.

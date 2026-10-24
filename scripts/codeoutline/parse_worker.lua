@@ -14,7 +14,7 @@ return {
             for i, f in ipairs(files) do
                 -- An abandoned pass (cancelled, failed, shutting down) skips its rest.
                 if shared:get('shutdown') or (shared:get('parse_abort') or 0) >= token then return end
-                local res = index.load_file(f[2], f[1], max_bytes, f[3] or nil, f[4] or nil)
+                local res = index.load_file(f[2], f[1], max_bytes, f[3] or nil, f[4] or nil, f[5] or nil)
                 res.rel = f[1]
                 results[i] = res
             end

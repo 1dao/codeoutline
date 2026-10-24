@@ -41,17 +41,26 @@ end
 -- Returns the record and its tokens; positions in both exclude a UTF-8 BOM.
 function M.parse_tokens(path, src, opts)
     local lang = M.language(path)
-    local inferred
+    local inferred, cpp_syntax
     if not lang and opts and (opts.language or opts.detect) then
         lang, inferred = require('codeoutline.language_detect').resolve(src, opts.language, opts.detect)
     end
     if not lang then return nil end
+    if opts and opts.cpp_fragment then
+        assert(not M.language(path) and (opts.cpp_fragment == 'c' or opts.cpp_fragment == 'cpp'))
+        if src:find('\0', 1, true) then return nil end
+        local detected = require('codeoutline.language_detect').resolve(src, nil, true)
+        if detected and detected ~= 'c' and detected ~= 'cpp' then return nil end
+        cpp_syntax = not not parser('cpp').looks_cpp(src)
+        if lang == 'c' and cpp_syntax then lang = 'cpp' end
+    end
     -- Strip a UTF-8 BOM so it is not read as part of the first token.
     if src:sub(1, 3) == '\239\187\191' then src = src:sub(4) end
     -- .h is shared by C and C++: sniff for C++-only syntax.
     if lang == 'c' and path:match('%.[hH]$') and parser('cpp').looks_cpp(src) then lang = 'cpp' end
     local rec, tokens = parser(MODULE[lang] or lang).parse(path, src, lang, opts)
-    if inferred then rec.on_demand, rec.language_source = true, inferred end
+    if opts and opts.cpp_fragment then rec.cpp_fragment, rec.cpp_fragment_cpp = opts.cpp_fragment, cpp_syntax or nil
+    elseif inferred then rec.on_demand, rec.language_source = true, inferred end
     return rec, tokens
 end
 

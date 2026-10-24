@@ -3255,6 +3255,39 @@ return M
         spec.equal(#G.by_name.replaced, 1)
         spec.equal(G.by_name.kept, nil)
     end)
+    spec.it('keeps same-name global exports distinct from unrelated private Lua functions', function()
+        for _, declaration in ipairs({ 'local aaa = function() end;', 'local function aaa() end' }) do
+            local G = build({
+                ['exports/api.lua'] = declaration .. '\ng_exports.aaa = aaa\n',
+                ['helpers/private.lua'] = 'local aaa = function() end\n',
+                ['client.lua'] = 'function run() aaa() end\n',
+                ['local_client.lua'] = 'local aaa = function() end\nfunction private_run() aaa() end\n',
+            })
+            spec.equal(#G.by_name.aaa, 3, 'same-name exports do not duplicate name-index entries')
+            spec.equal(edges_from(G, 'run'), 'aaa@exports/api.lua')
+            spec.equal(edges_from(G, 'private_run'), 'aaa@local_client.lua')
+            local exported = G.files[G.file_index['exports/api.lua']].nodes[1]
+            spec.equal(exported.lua_aliases.g_exports[1], 'aaa')
+            graph.remove_file(G, 'exports/api.lua'); spec.equal(#G.by_name.aaa, 2)
+            graph.add_file(G, 'exports/api.lua', ci.parse('exports/api.lua', declaration .. "\ng_exports['aaa'] = aaa\n"))
+            spec.equal(#G.by_name.aaa, 3)
+            spec.equal(edges_from(G, 'run'), 'aaa@exports/api.lua')
+        end
+        local direct = build({
+            ['exports/direct.lua'] = 'g_exports.aaa = function() end\n',
+            ['private.lua'] = 'local aaa = function() end\n',
+            ['client.lua'] = 'function run() aaa() end\n',
+        })
+        spec.equal(edges_from(direct, 'run'), 'aaa@exports/direct.lua')
+        local private = ci.parse('private_table.lua', 'local g_exports = {}\nfunction g_exports.aaa() end\n')
+        spec.nil_value(private.nodes[2].lua_aliases)
+        local scoped = ci.parse('scoped.lua', 'local aaa = function() end\n'
+            .. 'do local aaa = function() end end\ng_exports.aaa = aaa\n')
+        spec.equal(scoped.nodes[1].lua_aliases.g_exports[1], 'aaa')
+        spec.nil_value(scoped.nodes[2].lua_aliases)
+        local replaced = ci.parse('replaced.lua', 'local aaa = function() end\naaa = unknown\ng_exports.aaa = aaa\n')
+        spec.nil_value(replaced.nodes[1].lua_aliases)
+    end)
     spec.it('configures global export tables across cached and resident indexes', function()
         local root = tmp_root .. '/global_export_config'
         write(root .. '/exports.lua', 'local function impl() end\ncustom_exports.custom_export = impl\n'

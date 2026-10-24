@@ -142,9 +142,20 @@ function M.collect(r, T, bm)
         end
     end
 
-    local function alias(into, key, target)
+    local function alias(into, key, target, token)
+        local bound
+        if token then
+            for _, b in ipairs(bindings[target] or {}) do
+                if b.token <= token and b.a <= token and b.b >= token
+                    and (not bound or b.a > bound.a or b.a == bound.a and b.token > bound.token) then bound = b end
+            end
+        end
         for index, n in ipairs(r.nodes) do
-            if not n.parent and n.name == target and n.qualified == target and (n.kind == 'function' or n.kind == 'method') then
+            local scope = scopes[n.ti]
+            local visible = not token or n.ti < token and (bound
+                and bound.token >= n.ti and bound.token <= n.tj and bound.a == scope
+                or not bound and (scope == 0 or scope <= token and bm[scope] >= token))
+            if visible and not n.parent and n.name == target and n.qualified == target and (n.kind == 'function' or n.kind == 'method') then
                 into[key] = index
             end
         end
@@ -152,7 +163,13 @@ function M.collect(r, T, bm)
     -- A global alias is a statement of its own: the right-hand side is a bare
     -- identifier and nothing but a separator follows it on that line. The key
     -- is dotted (`g_exports.name`) or a literal (`g_exports['name']`).
-    local globals = {}
+    local globals, definitions = {}, {}
+    for index, n in ipairs(r.nodes) do
+        local owner, key = n.qualified:match('^([%a_][%w_]*)[.:]([%a_][%w_]*)$')
+        if owner and not bindings[owner] and not n.parent and (n.kind == 'function' or n.kind == 'method') then
+            definitions[n.ti] = { owner = owner, key = key, index = index }
+        end
+    end
     for i = 1, T.n - 4 do
         if i % 4096 == 0 then control.check() end
         local owner = T:text(i)
@@ -165,9 +182,16 @@ function M.collect(r, T, bm)
                 globals[owner] = globals[owner] or {}
                 globals[owner][key] = nil
             end
-            if target and target ~= key and (T.l[eq + 2] ~= T.l[eq + 1] or T:text(eq + 2) == ';') then
-                alias(globals[owner], key, target)
+            if target and value_end(T, eq + 2) and (T.l[eq + 2] ~= T.l[eq + 1] or T:text(eq + 2) == ';') then
+                alias(globals[owner], key, target, eq + 1)
             end
+        end
+        -- Direct definitions participate in the same ordered overwrite rules
+        -- as named aliases, without requiring another name-index entry.
+        local definition = definitions[i]
+        if definition then
+            globals[definition.owner] = globals[definition.owner] or {}
+            globals[definition.owner][definition.key] = definition.index
         end
     end
     -- Keep candidates independent of project configuration, including in caches.
@@ -339,10 +363,19 @@ function M.aliases(node, owners)
     local names, seen = {}, {}
     for _, owner in ipairs(owners) do
         for _, name in ipairs((node.lua_aliases or {})[owner] or {}) do
-            if not seen[name] then names[#names + 1], seen[name] = name, true end
+            -- The ordinary name already has one entry. Retain same-name
+            -- publication metadata without duplicating resident/draft IDs.
+            if name ~= node.name and not seen[name] then names[#names + 1], seen[name] = name, true end
         end
     end
     return names
+end
+function M.exported(node, name, owners)
+    if not node.lua_aliases then return false end
+    for _, owner in ipairs(owners) do
+        for _, alias in ipairs(node.lua_aliases[owner] or EMPTY) do if alias == name then return true end end
+    end
+    return false
 end
 function M.modules(G, imp, ctx)
     ctx = ctx or M.context(G)

@@ -137,6 +137,26 @@ test('LSP resolves cached Lua modules and extracted loader members without unrel
     assert.deepEqual(await definition(1, 42), []);
 });
 
+test('LSP resolves same-name global exports without confusing private helpers', { timeout: 30000 }, async (t) => {
+    const client = await start(t);
+    await mkdir(join(client.project, 'public')); await mkdir(join(client.project, 'private'));
+    const exported = 'local aaa = function() end; g_exports.aaa = aaa\n';
+    const target = join(client.project, 'public', 'api.lua');
+    await writeFile(target, exported);
+    await writeFile(join(client.project, 'private', 'helper.lua'), 'local aaa = function() end\n');
+    await writeFile(join(client.project, 'sample.lua'), 'function run() aaa() end\n');
+    await initialize(client, [client.project]); await indexed(client);
+    const uri = pathToFileURL(join(client.project, 'sample.lua')).href;
+    const at = { textDocument: { uri }, position: { line: 0, character: 16 } };
+    let result = await client.request('textDocument/definition', at);
+    assert.equal(result.length, 1); assert.equal(fileURLToPath(result[0].uri), target);
+    assert.equal(result[0].range.start.character, 6);
+    client.notify('textDocument/didOpen', { textDocument: { uri: pathToFileURL(target).href,
+        languageId: 'lua', version: 1, text: '\n' + exported } });
+    result = await client.request('textDocument/definition', at);
+    assert.equal(result.length, 1); assert.equal(result[0].range.start.line, 1);
+});
+
 test('LSP coroutine queries retain ordered draft snapshots while RPCs are pending', { timeout: 30000 }, async (t) => {
     const client = await start(t);
     await initialize(client, [client.project]);

@@ -400,6 +400,15 @@ local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired, accept,
         end
     end
     if not cands then return nil, 'no indexed target' end
+    -- A published Lua global can share its spelling with private helpers.
+    -- Keep lexical same-file matches and real global definitions, but do not
+    -- let unrelated private functions make a known export ambiguous.
+    local published = false
+    if G.files[f].language == 'lua' and kind == 'call' and not recv and #cands > 1 then
+        for i = 1, math.min(#cands, M.MAX_CANDIDATES) do
+            if lua_bindings.exported(G.nodes[cands[i]], name, G.lua_global_export_tables) then published = true; break end
+        end
+    end
     -- Score first: score() rejects other languages and statics of other
     -- files, so "is there a real definition?" is only asked among the
     -- candidates this call could actually reach. (Asking it over all
@@ -416,6 +425,8 @@ local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired, accept,
         local cid = cands[i]
         local node = G.nodes[cid]
         if cid ~= src_id and accept[node.kind]
+            and (not published or not node['local'] or G.node_file[cid] == f
+                or lua_bindings.exported(node, name, G.lua_global_export_tables))
             and (not local_only or (locality(G, f, G.node_file[cid], node, deps, paired) or 0) > 0) then
             local s = score(G, f, src_id, kind, recv, cid, deps, paired, owner)
             if s then

@@ -108,6 +108,13 @@ Dot keys and literal string keys (such as `g_exports['get_list'] = impl`) are
 supported for assignments of a named function. Locally defined export tables
 are excluded, and function-call results are not treated as function aliases.
 
+Same-name publication is supported too: `local aaa = function() end;
+g_exports.aaa = aaa` and `local function aaa() end; g_exports.aaa = aaa`
+retain explicit export evidence without adding duplicate name-index entries.
+Bare calls prefer a known published function over unrelated private functions
+with that spelling; same-file local definitions still take precedence. Direct
+definitions such as `g_exports.aaa = function() end` use the same export evidence.
+
 Aliases use the existing name index for definitions, references and callers.
 Configuration is reread on the next query/request, including unsaved documents.
 Changing the list rebuilds symbol tables from cached records without reparsing

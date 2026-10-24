@@ -3258,7 +3258,7 @@ return M
     spec.it('shares global publication behavior across every configured Lua export table', function()
         local root = tmp_root .. '/export_table_contract'
         local owners = { 'g_exports', '__global_exports', 'custom_exports' }
-        write(root .. '/.codeoutline.json', xutils.json_pack({ luaGlobalExportTables = owners }))
+        write(root .. '/.codeoutline.json', xutils.json_pack({ luaGlobalExportTables = { '__global_exports', 'custom_exports' } }))
         for _, owner in ipairs(owners) do
             for _, form in ipairs({
                 { 'local aaa = function() end;', 'aaa' },
@@ -3308,16 +3308,17 @@ return M
         spec.equal(G.by_name.custom_export, nil)
         spec.equal(#G.by_name.default_export, 1)
         assert(idx:save()); svc.forget(root)
-        write(root .. '/.codeoutline.json', '{"luaGlobalExportTables":["custom_exports","other_exports","custom_exports"]}')
+        write(root .. '/.codeoutline.json', '{"luaGlobalExportTables":["custom_exports","other_exports","custom_exports","g_exports","g_exports"]}')
         idx, G = svc.get(root, options)
         spec.equal(idx.cache_loaded, true)
         spec.equal(#G.by_name.custom_export, 1)
-        spec.equal(G.by_name.default_export, nil)
+        spec.equal(#G.by_name.default_export, 1)
+        spec.equal(#G.lua_global_export_tables, 3, 'configured names extend and deduplicate the built-in export table')
         spec.equal(edges_from(G, 'run'), 'impl@exports.lua')
         write(root .. '/.codeoutline.json', '{"luaGlobalExportTables":[]}')
         G = idx:symbols()
         spec.equal(G.by_name.custom_export, nil)
-        spec.equal(G.by_name.default_export, nil)
+        spec.equal(#G.by_name.default_export, 1, 'an empty extension list preserves g_exports')
         for _, value in ipairs({ '"g_exports"', '[1]', '["g.exports"]', '{"bad":"g_exports"}' }) do
             write(root .. '/.codeoutline.json', '{"luaGlobalExportTables":' .. value .. '}')
             local ok, err = pcall(function() idx:symbols() end)

@@ -337,7 +337,7 @@ function M.context(G)
         local owners = config.luaGlobalExportTables
         if owners ~= nil then
             assert(type(owners) == 'table', 'luaGlobalExportTables must be an array of Lua identifiers')
-            local seen, names = {}, {}
+            local seen, names = { g_exports = true }, { 'g_exports' }
             for key, name in pairs(owners) do
                 assert(type(key) == 'number' and key >= 1 and key <= #owners and key % 1 == 0
                     and type(name) == 'string' and name:match('^[%a_][%w_]*$'),

@@ -1526,7 +1526,7 @@ int luaopen_native_test(lua_State *L) { luaL_setfuncs(L, methods, 0); luaL_newli
         assert(xutils.mkdir_p(nav_root .. '/GlobalPublic'))
         assert(xutils.mkdir_p(nav_root .. '/GlobalPrivate'))
         local owners = { 'g_exports', '__global_exports', 'custom_exports' }
-        local config = xutils.json_pack({ luaGlobalExportTables = owners })
+        local config = xutils.json_pack({ luaGlobalExportTables = { '__global_exports', 'custom_exports' } })
         for ordinal, owner in ipairs(owners) do
             nav_write('.codeoutline.json', config)
             local name = 'configured_export_' .. ordinal
@@ -1558,7 +1558,7 @@ int luaopen_native_test(lua_State *L) { luaL_setfuncs(L, methods, 0); luaL_newli
                 [uri] = { version = 1, language = 'lua', source = '\n' .. module } } })
             spec.equal(nav(req)[1].range.start.line, 1)
             nav_write('.codeoutline.json', '{"luaGlobalExportTables":[]}')
-            spec.equal(#nav(req), 0)
+            spec.equal(#nav(req), owner == 'g_exports' and 1 or 0)
             nav_write('.codeoutline.json', config)
             spec.equal(#nav(req), 1)
             navigation.sync({ session = req.session, open = { [uri] = 2 }, changed = {

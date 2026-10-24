@@ -141,7 +141,7 @@ test('LSP shares same-name navigation across every configured export table', { t
     const client = await start(t);
     await mkdir(join(client.project, 'public')); await mkdir(join(client.project, 'private'));
     const owners = ['g_exports', '__global_exports', 'custom_exports'];
-    await writeFile(join(client.project, '.codeoutline.json'), JSON.stringify({ luaGlobalExportTables: owners }));
+    await writeFile(join(client.project, '.codeoutline.json'), JSON.stringify({ luaGlobalExportTables: owners.filter(owner => owner !== 'g_exports') }));
     const cases = [];
     for (const [index, owner] of owners.entries()) {
         const name = `configured_export_${index}`;
@@ -164,6 +164,13 @@ test('LSP shares same-name navigation across every configured export table', { t
             languageId: 'lua', version: 1, text: '\n' + exported } });
         result = await client.request('textDocument/definition', at);
         assert.equal(result.length, 1); assert.equal(result[0].range.start.line, 1);
+    }
+    await writeFile(join(client.project, '.codeoutline.json'), JSON.stringify({ luaGlobalExportTables: [] }));
+    for (const [index, { position, target }] of cases.entries()) {
+        const result = await client.request('textDocument/definition', { textDocument: { uri }, position });
+        if (index === 0) {
+            assert.equal(result.length, 1); assert.equal(fileURLToPath(result[0].uri), target);
+        } else assert.deepEqual(result, []);
     }
 });
 

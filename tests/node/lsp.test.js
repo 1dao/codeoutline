@@ -449,6 +449,33 @@ test('LSP stdio handles drafts, UTF-16 ranges, cancellation and close restoratio
     assert.equal((await client.request('workspace/symbol', { query: 'unsaved' }))[0].name, 'unsaved');
 });
 
+test('LSP suggests distant definitions only after strict lookup fails', { timeout: 30000 }, async (t) => {
+    const client = await start(t);
+    for (const dir of ['one', 'two', 'use']) await mkdir(join(client.project, dir));
+    for (const dir of ['one', 'two']) await writeFile(join(client.project, dir, 'api.c'), 'int DistantCandidate() { return 1; }\n');
+    await writeFile(join(client.project, 'two', 'private.c'), 'static int DistantCandidate() { return 0; }\n');
+    const source = 'void run() { DistantCandidate(); }\n';
+    await writeFile(join(client.project, 'use', 'main.cpp'), source);
+    await initialize(client, [client.project]); await indexed(client);
+    const uri = pathToFileURL(join(client.project, 'use', 'main.cpp')).href;
+    client.notify('textDocument/didOpen', { textDocument: { uri, languageId: 'cpp', version: 1, text: source } });
+    const params = { textDocument: { uri }, position: { line: 0, character: 15 } };
+    let targets = await client.request('textDocument/definition', params);
+    assert.deepEqual(targets.map(target => fileURLToPath(target.uri)),
+        ['one', 'two'].map(dir => join(client.project, dir, 'api.c')));
+    assert.deepEqual(await client.request('textDocument/references', { ...params, context: { includeDeclaration: true } }), []);
+    const targetUri = targets[0].uri;
+    client.notify('textDocument/didOpen', { textDocument: { uri: targetUri, languageId: 'c', version: 1,
+        text: '\n\nint DistantCandidate() { return 2; }\n' } });
+    targets = await client.request('textDocument/definition', params);
+    assert.equal(targets[0].range.start.line, 2);
+    client.notify('textDocument/didClose', { textDocument: { uri: targetUri } });
+    targets = await client.request('textDocument/definition', params);
+    assert.equal(targets[0].range.start.line, 0);
+    await writeFile(join(client.project, '.codeoutline.json'), JSON.stringify({ includePaths: [] }));
+    assert.deepEqual(await client.request('textDocument/definition', params), []);
+});
+
 test('LSP navigates ambiguous proxy macros and respects include path changes and drafts', { timeout: 30000 }, async (t) => {
     const client = await start(t);
     const header = '#ifndef PROXY_H\n#define PROXY_H\n#define api_rawgeti proxy->api_rawgeti\n#endif\n';

@@ -83,9 +83,9 @@ function M.resolve(G, f, src, name, evidence, deps, ctx, accept)
     if written then
         local scope = src and G.nodes[src].qualified
         if src and (G.nodes[src].kind == 'function' or G.nodes[src].kind == 'method') then scope = scope:match('^(.*)::[^:]+$') end
-        local ids = require('codeoutline.cpp_types').resolve(G, f, written,
+        local ids, known = require('codeoutline.cpp_types').resolve(G, f, written,
             { scope = scope, at = tonumber(position), deps = deps, context = ctx, accept = accept, definitions = true })
-        return ids
+        return ids, not known and 'unresolved c++ name' or nil
     end
     local ty = evidence:match('^cpp:type:(.+)$')
     if not ty then return {} end

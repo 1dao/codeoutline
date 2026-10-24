@@ -189,6 +189,16 @@ overlay never writes to the resident tables.
   Alternative headers are evaluated independently within the existing query limits;
   configured include order still selects one header. These navigation candidates
   do not create execution edges in the call graph.
+- When ordinary definition lookup has insufficient evidence, F12 can suggest
+  exact-name symbols in the same language family elsewhere in the project.
+  Explicit qualifications must match; known import/local/receiver barriers,
+  C/C++ include policies and Go/Rust/C# package or project binding remain strict.
+  Suggestions exclude unrelated private locals, source-file statics and macros.
+  Lookup checks at most 256 same-name entries and selects at most eight targets;
+  exact source positions are limited to four files, 2 MiB and a 500 ms soft budget.
+  References, rename, hover, implementations and call hierarchy do not use this
+  fallback. Multiple definition results are candidates for inspection, not proof
+  of a runtime binding.
 - Hover shows the target's signature, kind, qualified name and location.
 - Signature help, triggered by `(` and `,`, finds the innermost open call before
   the cursor (commas inside nested calls, literals and brackets do not count),

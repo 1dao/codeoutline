@@ -2386,6 +2386,72 @@ int luaopen_native_test(lua_State *L) { luaL_setfuncs(L, methods, 0); luaL_newli
         os.remove(config)
         spec.equal(ok, false); spec.contains(tostring(err), 'argument must be an integer')
     end)
+    spec.it('falls back to bounded exact-name definitions without changing strict navigation consumers', function()
+        for _, dir in ipairs({ 'candidateA', 'candidateB', 'candidateUse' }) do assert(xutils.mkdir_p(nav_root .. '/' .. dir)) end
+        nav_write('candidateA/lib.c', 'int CandidateFar(void) { return 1; }\n')
+        nav_write('candidateB/lib.c', 'int CandidateFar(void) { return 2; }\n')
+        nav_write('candidateB/private.c', 'static int CandidateFar(void) { return 3; }\n')
+        nav_write('candidateB/other.lua', 'function CandidateFar() end\n')
+        local source = 'int CandidateUse(void) { return CandidateFar(); }\n'
+        nav_write('candidateUse/use.c', source); nav_write('candidateUse/use.cpp', source)
+        local options = { cache_path = nav_root .. '/cache.idx', lister = 'walk' }
+        service.refresh(nav_root, options)
+        local ok, err = pcall(function()
+            for _, extension in ipairs({ 'c', 'cpp' }) do
+                local doc = docs.read(nav_root .. '/candidateUse/use.' .. extension)
+                local req = { method = 'lsp_definition', uri = doc.uri,
+                    position = doc:position(assert(source:find('CandidateFar', 1, true)) - 1) }
+                local result = nav(req)
+                spec.equal(#result, 2)
+                spec.equal(result[1].uri, nav_uri('candidateA/lib.c')); spec.equal(result[2].uri, nav_uri('candidateB/lib.c'))
+                for _, target in ipairs(result) do spec.equal(range_text(target.uri == result[1].uri and 'candidateA/lib.c' or 'candidateB/lib.c', target.range), 'CandidateFar') end
+                for _, method in ipairs({ 'lsp_references', 'lsp_prepare_calls', 'lsp_implementation' }) do
+                    req.method = method
+                    local strict = nav(req)
+                    spec.truthy(strict == false or #strict == 0, method .. ' must not use navigation candidates')
+                end
+                req.method = 'lsp_hover'; spec.equal(nav(req), false)
+                req.method = 'lsp_definition'; req.includePaths = { 'candidateA' }
+                spec.equal(#nav(req), 0, 'explicit include policy is authoritative')
+            end
+            local uri = nav_uri('candidateA/lib.c')
+            navigation.sync({ session = 'candidate-draft', open = { [uri] = 1 }, changed = {
+                [uri] = { source = '\n\nint CandidateFar(void) { return 4; }\n', version = 1, language = 'c' } } })
+            local doc = docs.read(nav_root .. '/candidateUse/use.cpp')
+            local result = nav({ method = 'lsp_definition', session = 'candidate-draft', uri = doc.uri,
+                position = doc:position(assert(source:find('CandidateFar', 1, true)) - 1) })
+            spec.equal(#result, 2); spec.equal(result[1].range.start.line, 2)
+            navigation.close('candidate-draft')
+        end)
+        navigation.close('candidate-draft')
+        for _, dir in ipairs({ 'candidateA', 'candidateB', 'candidateUse' }) do assert(xutils.rmtree(nav_root .. '/' .. dir)) end
+        service.refresh(nav_root, options); assert(ok, err)
+    end)
+    spec.it('limits candidate sources and preserves Lua import, local and receiver barriers', function()
+        for _, dir in ipairs({ 'candidateLua', 'candidateCpp', 'candidateCaller' }) do assert(xutils.mkdir_p(nav_root .. '/' .. dir)) end
+        for i = 1, 10 do nav_write('candidateCpp/f' .. i .. '.c', 'int CandidateMany(void) { return 1; }\n') end
+        nav_write('candidateCaller/use.cpp', 'void UseMany() { CandidateMany(); }\n')
+        nav_write('candidateLua/a.lua', 'function remote.CandidateLua() end\nlocal function CandidatePrivate() end\n')
+        nav_write('candidateLua/b.lua', 'function remote.CandidateLua() end\nlocal function CandidatePrivate() end\n')
+        nav_write('candidateLua/module.lua', 'local M = {}\nreturn M\n')
+        local lua = 'remote.CandidateLua()\nunknown.CandidateLua()\nCandidatePrivate()\n'
+            .. 'local remote = dofile("../candidateLua/module.lua")\nremote.CandidateLua()\n'
+        nav_write('candidateCaller/use.lua', lua)
+        local options = { cache_path = nav_root .. '/cache.idx', lister = 'walk' }
+        service.refresh(nav_root, options)
+        local ok, err = pcall(function()
+            local doc = docs.read(nav_root .. '/candidateCaller/use.cpp')
+            local result, out = nav({ method = 'lsp_definition', uri = doc.uri, position = { line = 0, character = 19 } })
+            spec.equal(#result, 4); spec.equal(out.incomplete, true, 'candidate sources are bounded')
+            local lua_doc = docs.read(nav_root .. '/candidateCaller/use.lua')
+            for _, case in ipairs({ { 0, 8, 2 }, { 1, 9, 0 }, { 2, 3, 0 }, { 4, 8, 0 } }) do
+                result = nav({ method = 'lsp_definition', uri = lua_doc.uri, position = { line = case[1], character = case[2] } })
+                spec.equal(#result, case[3], 'Lua line ' .. case[1])
+            end
+        end)
+        for _, dir in ipairs({ 'candidateLua', 'candidateCpp', 'candidateCaller' }) do assert(xutils.rmtree(nav_root .. '/' .. dir)) end
+        service.refresh(nav_root, options); assert(ok, err)
+    end)
     spec.it('goes to the definition across files and from a prototype to its body', function()
         local result = nav({ method = 'lsp_definition', uri = nav_uri('main.c'), position = { line = 1, character = 35 } })
         spec.equal(#result, 1)

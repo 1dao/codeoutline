@@ -239,7 +239,7 @@ local function resolve_site(V, f, from, name, kind, recv, evidence, offset, inde
         end
         targets = kept
     end
-    return targets
+    return targets, reason, evidence
 end
 
 -- What the cursor names: a declaration, an indexed reference, or another identifier.
@@ -1057,9 +1057,12 @@ local function at(req)
     if not f then return nil end
     local offset = doc:offset(req.position)
     local c = cursor(doc, offset, V, f)
-    local targets = {}
+    local targets, reason, evidence = {}
     if c and c.decl then targets = { V.id_of[f][c.decl] }
-    elseif c then targets = resolve_site(V, f, c.from, c.name, c.kind, c.recv, c.evidence, c.first, c.index) end
+    elseif c then
+        targets, reason, evidence = resolve_site(V, f, c.from, c.name, c.kind, c.recv, c.evidence, c.first, c.index)
+        c.reason, c.evidence = reason, evidence
+    end
     return V, doc, c, targets, f, offset
 end
 
@@ -1149,9 +1152,27 @@ function handlers.lsp_definition(req)
     if #targets == 0 or importer then
         -- An import line: `require "a.b"`, `dofile("x.lua")`, `#include <x.h>`, `from . import m`.
         local files = import_targets(V, f, line)
-        if #files > 0 or #targets == 0 then
+        if #files > 0 or importer then
             return files, V.js_context.include_incomplete or V.js_context.workspace_incomplete or V.js_context.go_incomplete or V.js_context.rust_incomplete
         end
+    end
+    if #targets == 0 then
+        local ids, info = require('codeoutline.definition_candidates').find(V, f, c, V.js_context)
+        local result, seen, bytes, started = {}, {}, 0, os.clock()
+        local count = 0
+        for _, id in ipairs(ids) do
+            local g = V.node_file[id]
+            local size = V.files[g].size or 0
+            if not seen[g] then
+                if count >= 4 or size > M.MAX_FILE_BYTES or bytes + size > 2 * M.MAX_FILE_BYTES
+                    or os.clock() - started >= 0.5 then info.truncated = true; break end
+                seen[g], bytes, count = true, bytes + size, count + 1
+            end
+            local target_doc, hit = locate(V, id)
+            if hit then result[#result + 1] = { uri = target_doc.uri, range = target_doc:range(hit.name_start, hit.name_end) } end
+        end
+        return result, info.truncated or V.js_context.include_incomplete or V.js_context.workspace_incomplete
+            or V.js_context.go_incomplete or V.js_context.rust_incomplete
     end
     if c.decl and is_decl(V.nodes[targets[1]]) then
         -- From a declaration, go to its definitions.

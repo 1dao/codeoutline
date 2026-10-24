@@ -359,7 +359,7 @@ local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired, accept,
     end
     if exact == nil and G.files[f].language == 'cpp' then
         strategy = evidence and evidence:match('^cpp:name:') and 'c++ namespace/import' or 'c++ declared receiver'
-        exact = require('codeoutline.cpp_bindings').resolve(G, f, src_id, name, evidence, deps, js_context, accept)
+        exact, binding_reason = require('codeoutline.cpp_bindings').resolve(G, f, src_id, name, evidence, deps, js_context, accept)
     end
     if exact == nil and G.files[f].language == 'csharp' then
         strategy = 'c# binding'

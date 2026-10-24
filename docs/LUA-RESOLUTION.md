@@ -99,11 +99,15 @@ g_exports.phantom_system_get_phantom_design_list = get_design_list
 Configure the table names in the workspace root's `.codeoutline.json`:
 
 ```json
-{ "luaGlobalExportTables": ["g_exports", "custom_exports"] }
+{ "luaGlobalExportTables": ["g_exports", "__global_exports", "custom_exports"] }
 ```
 
 The default is `["g_exports"]`. An explicit list replaces the default;
 `[]` disables global export aliases. Entries must be simple Lua identifiers.
+Every configured table uses the same publication and navigation rules; the table
+name does not select a different implementation. For example,
+`local aaa = function() end; __global_exports.aaa = aaa` supports the same direct
+jump from `aaa()` or the export's dotted key as the equivalent `g_exports` form.
 Dot keys and literal string keys (such as `g_exports['get_list'] = impl`) are
 supported for assignments of a named function. Locally defined export tables
 are excluded, and function-call results are not treated as function aliases.

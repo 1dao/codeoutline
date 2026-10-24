@@ -1522,40 +1522,52 @@ int luaopen_native_test(lua_State *L) { luaL_setfuncs(L, methods, 0); luaL_newli
         navigation.close('configured-global')
         os.remove(nav_root .. '/.codeoutline.json')
     end)
-    spec.it('navigates same-name global exports across private collisions, cache reloads and drafts', function()
+    spec.it('shares configured export navigation across private collisions, cache reloads and drafts', function()
         assert(xutils.mkdir_p(nav_root .. '/GlobalPublic'))
         assert(xutils.mkdir_p(nav_root .. '/GlobalPrivate'))
-        local module = 'local aaa = function() end; g_exports.aaa = aaa\n'
-        nav_write('GlobalPublic/api.lua', module)
-        nav_write('GlobalPrivate/hidden.lua', 'local aaa = function() end\n')
-        nav_write('SameNameGlobalClient.lua', 'function same_name_global_use() aaa() end\n')
-        local options = { cache_path = nav_root .. '/cache.idx', lister = 'walk' }
-        service.refresh(nav_root, options); service.resident(nav_root):save(); service.forget(nav_root)
-        service.refresh(nav_root, options)
-        local req = { method = 'lsp_definition', session = 'same-name-exports', uri = nav_uri('SameNameGlobalClient.lua'),
-            position = { line = 0, character = 33 } }
-        local found = nav(req)
-        spec.equal(#found, 1); spec.equal(found[1].uri, nav_uri('GlobalPublic/api.lua'))
-        spec.equal(range_text('GlobalPublic/api.lua', found[1].range), 'aaa')
-        local uri = nav_uri('GlobalPublic/api.lua')
-        local exported = docs.read(nav_root .. '/GlobalPublic/api.lua')
-        local key = nav({ method = 'lsp_definition', uri = uri,
-            position = exported:position(assert(module:find('g_exports.aaa', 1, true)) - 1 + #'g_exports.') })
-        spec.equal(#key, 1); spec.equal(key[1].range.start.character, 6)
-        local refs = nav({ method = 'lsp_references', uri = uri, position = { line = 0, character = 7 }, includeDeclaration = false })
-        spec.equal(#refs, 1); spec.equal(refs[1].uri, req.uri)
-        navigation.sync({ session = req.session, open = { [uri] = 1 }, changed = {
-            [uri] = { version = 1, language = 'lua', source = '\n' .. module } } })
-        spec.equal(nav(req)[1].range.start.line, 1)
-        nav_write('.codeoutline.json', '{"luaGlobalExportTables":[]}')
-        spec.equal(#nav(req), 0)
+        local owners = { 'g_exports', '__global_exports', 'custom_exports' }
+        local config = xutils.json_pack({ luaGlobalExportTables = owners })
+        for ordinal, owner in ipairs(owners) do
+            nav_write('.codeoutline.json', config)
+            local name = 'configured_export_' .. ordinal
+            local public = 'GlobalPublic/api_' .. ordinal .. '.lua'
+            local private = 'GlobalPrivate/hidden_' .. ordinal .. '.lua'
+            local client = 'SameNameGlobalClient_' .. ordinal .. '.lua'
+            local module = 'local ' .. name .. ' = function() end; ' .. owner .. '.' .. name .. ' = ' .. name .. '\n'
+            local source = 'function same_name_global_use_' .. ordinal .. '() ' .. name .. '() end\n'
+            nav_write(public, module)
+            nav_write(private, 'local ' .. name .. ' = function() end\n')
+            nav_write(client, source)
+            local options = { cache_path = nav_root .. '/cache.idx', lister = 'walk' }
+            service.refresh(nav_root, options); service.resident(nav_root):save(); service.forget(nav_root)
+            service.refresh(nav_root, options)
+            local doc = docs.read(nav_root .. '/' .. client)
+            local req = { method = 'lsp_definition', session = 'same-name-exports-' .. ordinal, uri = doc.uri,
+                position = doc:position(assert(source:find(name .. '()', 1, true))) }
+            local found = nav(req)
+            spec.equal(#found, 1); spec.equal(found[1].uri, nav_uri(public))
+            spec.equal(range_text(public, found[1].range), name)
+            local uri = nav_uri(public)
+            local exported = docs.read(nav_root .. '/' .. public)
+            local key = nav({ method = 'lsp_definition', uri = uri,
+                position = exported:position(assert(module:find(owner .. '.' .. name, 1, true)) + #owner) })
+            spec.equal(#key, 1); spec.equal(key[1].range.start.character, 6)
+            local refs = nav({ method = 'lsp_references', uri = uri, position = { line = 0, character = 7 }, includeDeclaration = false })
+            spec.equal(#refs, 1); spec.equal(refs[1].uri, req.uri)
+            navigation.sync({ session = req.session, open = { [uri] = 1 }, changed = {
+                [uri] = { version = 1, language = 'lua', source = '\n' .. module } } })
+            spec.equal(nav(req)[1].range.start.line, 1)
+            nav_write('.codeoutline.json', '{"luaGlobalExportTables":[]}')
+            spec.equal(#nav(req), 0)
+            nav_write('.codeoutline.json', config)
+            spec.equal(#nav(req), 1)
+            navigation.sync({ session = req.session, open = { [uri] = 2 }, changed = {
+                [uri] = { version = 2, language = 'lua', source = owner .. '.' .. name .. ' = function() end\n' } } })
+            spec.equal(#nav(req), 1, 'direct global definitions retain the same collision handling')
+            navigation.close(req.session)
+            spec.equal(#service.resident(nav_root):symbols().by_name[name], 2)
+        end
         os.remove(nav_root .. '/.codeoutline.json')
-        spec.equal(#nav(req), 1)
-        navigation.sync({ session = req.session, open = { [uri] = 2 }, changed = {
-            [uri] = { version = 2, language = 'lua', source = 'g_exports.aaa = function() end\n' } } })
-        spec.equal(#nav(req), 1, 'direct global definitions retain the same collision handling')
-        navigation.close(req.session)
-        spec.equal(#service.resident(nav_root):symbols().by_name.aaa, 2)
     end)
     spec.it('resolves native objects through the metatable a C call returns', function()
         nav_write('pool.c', '#define POOL_META "demo.pool"\n'

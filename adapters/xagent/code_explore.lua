@@ -33,10 +33,12 @@ return {
             return { content = 'Error: query is required', is_error = true }
         end
         local root = input.path or (ctx and ctx.cwd) or '.'
-        local ok, text = pcall(svc.explore, root, query, { budget = tonumber(input.budget) })
+        local ok, text, info = pcall(svc.explore, root, query, { budget = tonumber(input.budget) })
         if not ok then
-            return { content = 'Error: ' .. tostring(text), is_error = true }
+            return { content = 'Error: ' .. tostring(text), is_error = true,
+                metadata = { state = 'error', error = require('codeoutline.coverage').error(text) } }
         end
-        return { content = text }
+        return { content = text, metadata = { state = info.coverage.partial and 'partial' or 'ok',
+            coverage = info.coverage, projectPath = info.projectPath, generation = info.generation } }
     end,
 }

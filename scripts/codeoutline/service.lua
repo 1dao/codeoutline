@@ -176,6 +176,9 @@ local function run_query(engine, root, query, opts)
         stats.cache_saved, stats.cache_error = saved, err
     end
     result.info.refresh = stats
+    result.info.coverage = require('codeoutline.coverage').summarize(result.info)
+    result.info.generation = idx.generation
+    result.info.projectPath = idx.root
     return result.text, result.info
 end
 

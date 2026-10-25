@@ -1079,8 +1079,9 @@ spec.describe('query-time relationships', function()
         local idx = svc.refresh(tmp_root, { cache_path = cache })
         local symbols = graph.build(idx)
         local output, info = explore.run(symbols, idx, 'run net_send', { max_expanded = 1 })
-        spec.truthy(info.relationships_incomplete); spec.truthy(info.truncated)
-        spec.contains(output, 'relationships are incomplete')
+        spec.truthy(info.relationships_incomplete)
+        spec.contains(output, 'Relationships incomplete')
+        spec.truthy(require('codeoutline.coverage').summarize(info).partial)
         local lazy = graph.query(symbols)
         local control = require('codeoutline.control')
         control.callback = function() error(control.cancelled(), 0) end
@@ -1168,6 +1169,131 @@ spec.describe('explore', function()
         local _, _, stats = svc.get(tmp_root, { cache_path = cache })
         spec.equal(stats.parsed, 0)
         spec.truthy(stats.unchanged >= 4)
+    end)
+end)
+
+spec.describe('agent exploration contract', function()
+    local coverage = require('codeoutline.coverage')
+    local function project(files)
+        local records = {}
+        for path, source in pairs(files) do records[path] = ci.parse(path, source, { ordinary_bindings = true }) end
+        return graph.build({ files = records }), { root = tmp_root,
+            query_source = function(_, path) return assert(files[path]), false end }
+    end
+    spec.it('distinguishes retained function values from direct execution without changing edges', function()
+        local G, idx = project({ ['refs.ts'] = 'export function handle() {}\n'
+            .. 'export function register() { saveCallback(handle); }\nexport function invoke() { handle(); }\n' })
+        local output, info = explore.run(G, idx, 'register handle')
+        spec.contains(output, 'register -[ref]-> handle')
+        spec.contains(output, 'outgoing relationships: handle (refs.ts:1) [ref]')
+        spec.equal(output:find('calls: handle', 1, true), nil)
+        spec.equal(info.flow_edges[1][1].kind, 'ref')
+        output, info = explore.run(G, idx, 'invoke handle')
+        spec.contains(output, 'invoke -> handle'); spec.contains(output, 'calls: handle')
+        spec.equal(info.flow_edges[1][1].kind, 'call')
+        local Q = graph.query(G)
+        spec.equal(Q.out[G.by_name.register[1]][3], 'ref')
+    end)
+    spec.it('retains reference kinds on unresolved path prefixes', function()
+        local G, idx = project({ ['refs.ts'] = 'export function handle() { missing(); }\n'
+            .. 'export function register() { saveCallback(handle); }\nexport function distant() {}\n' })
+        local output, info = explore.run(G, idx, 'register distant')
+        spec.contains(output, 'register (refs.ts:2) -[ref]-> handle (refs.ts:1)')
+        local found = false
+        for _, site in ipairs(info.path_breakpoints) do
+            if site.call == 'missing' then found = true; spec.equal(site.hops[1].kind, 'ref') end
+        end
+        spec.truthy(found)
+    end)
+    spec.it('checks rendered source and pointers without reading hundreds of hidden matches', function()
+        local files, reads = {}, {}
+        for i = 1, 600 do files[string.format('candidate%04d.lua', i)] = 'function SharedLabel() end\n' end
+        local G, idx = project(files)
+        idx.query_source = function(_, path)
+            reads[path] = true
+            if path == 'candidate0600.lua' then error('source changed during query: hidden') end
+            return assert(files[path]), false
+        end
+        local output, info = explore.run(G, idx, 'SharedLabel', { budget = 4096 })
+        spec.contains(output, 'candidate0018.lua'); spec.equal(info.query_stats.sources.files, 18)
+        spec.equal(reads['candidate0600.lua'], nil)
+        spec.truthy(info.seed_selection_limited); spec.equal(info.truncated, false)
+        spec.contains(table.concat(coverage.summarize(info).reasons, ','), 'seed_selection_limited')
+        local query_source = idx.query_source
+        idx.query_source = function(self, path)
+            if path == 'candidate0018.lua' then error('source changed during query: visible pointer') end
+            return query_source(self, path)
+        end
+        local ok, err = pcall(explore.run, G, idx, 'SharedLabel', { budget = 4096 })
+        spec.equal(ok, false); spec.contains(err, 'visible pointer')
+        -- This pointer falls outside the retained byte prefix under a tiny budget.
+        output, info = explore.run(G, idx, 'SharedLabel', { budget = 256 })
+        spec.truthy(#output <= 256); spec.truthy(info.truncated)
+        spec.truthy(info.query_stats.sources.files < 18)
+    end)
+    spec.it('aborts late encoding repairs before publishing locations based on old IDs', function()
+        local G, idx = project({ ['encoding.lua'] = 'function encoded_entry() end\n' })
+        idx.query_source = function() return 'function encoded_entry() end\n', true end
+        local output, info = explore.run(G, idx, 'encoded_entry')
+        spec.equal(output, nil); spec.equal(info.encoding_retry, true)
+    end)
+    spec.it('reports unsupported event syntax independently of output and resource limits', function()
+        local G, idx = project({
+            ['bus.ts'] = "import { EventEmitter } from 'events'; export const bus = new EventEmitter();\n",
+            ['sub.ts'] = "import { bus } from './bus'; bus.on('saved', () => {});\n",
+            ['pub.ts'] = "import { bus } from './bus'; export function publish() { bus.emit('saved'); }\n",
+        })
+        local output, info = explore.run(G, idx, 'publish')
+        spec.contains(output, 'shared_events.unsupported_syntax')
+        spec.equal(info.relationships_incomplete, true); spec.equal(info.truncated, false)
+        spec.equal(output:find('Results truncated', 1, true), nil)
+        local status = coverage.summarize(info)
+        spec.equal(status.partial, true); spec.equal(status.output_truncated, false)
+        spec.equal(status.reasons[1], 'shared_events.unsupported_syntax')
+    end)
+    spec.it('provides compact sorted coverage and retryable snapshot errors', function()
+        local status = coverage.summarize({ truncated = true, path_search_limited = true,
+            relationships_incomplete = true, query_stats = { events = { shared = { incomplete_reasons = { file_limit = true } } } } })
+        spec.equal(table.concat(status.reasons, ','), 'output_truncated,path_search_limit,shared_events.file_limit')
+        spec.equal(coverage.summarize({}).partial, false)
+        spec.equal(coverage.error('source changed during query; retry').retryable, true)
+        spec.equal(coverage.error('queue is full').code, 'busy')
+        spec.equal(coverage.error('unknown failure').retryable, false)
+    end)
+    spec.it('preserves structured query errors and queue rejection through MCP', function()
+        local failure, rejected = 'source changed during query; retry', false
+        local mcp = require('codeoutline.mcp').new({ project = tmp_root, roots = { tmp_root }, workdir = tmp_root },
+            function(_, done)
+                if rejected then return nil, 'worker queue is full' end
+                done(false, failure); return 'test-job'
+            end, function() end)
+        local response
+        local function call(message)
+            message.jsonrpc = '2.0'; mcp:dispatch(message, function(value) response = value end)
+        end
+        call({ id = 1, method = 'initialize', params = { protocolVersion = '2025-06-18', capabilities = {},
+            clientInfo = { name = 'contract-test', version = '1' } } })
+        call({ method = 'notifications/initialized' })
+        local request = { id = 2, method = 'tools/call', params = { name = 'codeoutline_explore', arguments = { query = 'run' } } }
+        call(request)
+        spec.equal(response.result.isError, true)
+        spec.equal(response.result.structuredContent.state, 'error')
+        spec.equal(response.result.structuredContent.error.code, 'source_changed')
+        spec.equal(response.result.structuredContent.error.retryable, true)
+        rejected = true; request.id = 3; call(request)
+        spec.equal(response.result.structuredContent.error.code, 'busy')
+    end)
+    spec.it('exposes the same coverage and generation through the xagent adapter', function()
+        local root = tmp_root .. '/agent_adapter'
+        write(root .. '/entry.lua', 'function adapter_entry() return 1 end\n')
+        local tool = dofile('adapters/xagent/code_explore.lua')
+        local result = tool.call({ query = 'adapter_entry' }, { cwd = root })
+        spec.contains(result.content, 'function adapter_entry()')
+        spec.equal(result.metadata.state, 'ok')
+        spec.equal(result.metadata.coverage.scope, 'indexed_static_analysis')
+        spec.equal(type(result.metadata.generation), 'number')
+        spec.equal(result.metadata.projectPath:lower(), root:lower())
+        svc.forget(root)
     end)
 end)
 

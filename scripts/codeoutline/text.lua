@@ -33,11 +33,12 @@ end
 function M.limit(s, budget, omitted)
     s = M.valid(s)
     local truncated = #s > budget or omitted
+    local kept = #s
     if truncated then
         local marker = '\n[Results truncated; narrow the query or increase budget.]'
-        s = M.prefix(s, budget - #marker) .. marker
+        s = M.prefix(s, budget - #marker); kept = #s; s = s .. marker
     end
-    return s, truncated == true
+    return s, truncated == true, kept
 end
 
 return M

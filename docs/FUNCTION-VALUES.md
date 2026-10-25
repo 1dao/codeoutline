@@ -37,3 +37,7 @@ GBK repairs still commit corrected records and retain their persistence behavior
 Callers can now include variable or field initializers that retain a function,
 in addition to callable users. Consumers must inspect `ref` versus call/delivery
 edges before interpreting a result as execution flow.
+
+Explore renders these as `register -[ref]-> handle` and labels neighbor entries
+with `[ref]`. Mixed paths use a relationship-path heading. Agent-facing coverage
+and error metadata are described in [Agent query results](AGENT-RESULTS.md).

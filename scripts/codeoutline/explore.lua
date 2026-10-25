@@ -237,9 +237,9 @@ local function find_seeds(G, query, filters, ranking)
     return list, files
 end
 
--- Shortest call path a -> b (out edges), up to depth; returns id list.
+-- Shortest dependency path a -> b, retaining edge kinds for presentation.
 local function path_between(G, a, b, depth)
-    local prev, frontier = { [a] = a }, { a }
+    local prev, frontier, via = { [a] = a }, { a }, {}
     local expansion_limited = false
     for _ = 1, depth do
         local next_frontier = {}
@@ -253,29 +253,40 @@ local function path_between(G, a, b, depth)
                 local dst = out[i]
                 if not prev[dst] then
                     prev[dst] = x
+                    via[dst] = { source = x, target = dst, kind = out[i + 2], line = out[i + 1] }
                     if dst == b then
                         local path, y = { b }, b
                         while y ~= a do y = prev[y]; table.insert(path, 1, y) end
-                        return path
+                        local hops = {}; for n = 2, #path do hops[#hops + 1] = via[path[n]] end
+                        return path, false, prev, expansion_limited, hops
                     end
                     next_frontier[#next_frontier + 1] = dst
                 end
             end
         end
         frontier = next_frontier
-        if #frontier == 0 then return nil, false, prev, expansion_limited end
-        if #frontier > 20000 then return nil, true, prev, expansion_limited end
+        if #frontier == 0 then return nil, false, prev, expansion_limited, nil, via end
+        if #frontier > 20000 then return nil, true, prev, expansion_limited, nil, via end
     end
-    return nil, #frontier > 0, prev, expansion_limited
+    return nil, #frontier > 0, prev, expansion_limited, nil, via
 end
 
-local file_cache = {}
+local file_cache, source_cache = {}, {}
+local encoding_retry = {}
+local function checked_source(idx, rel)
+    local key = idx.root .. '/' .. rel
+    if source_cache[key] then return source_cache[key] end
+    local source, repaired = idx:query_source(rel)
+    assert(source, 'cannot read source: ' .. rel)
+    if repaired then error(encoding_retry, 0) end
+    source_cache[key] = source; return source
+end
 local function file_lines(idx, rel)
     local key = idx.root .. '/' .. rel
     local lines = file_cache[key]
     if lines then return lines end
     lines = {}
-    local src = assert(idx:query_source(rel), 'cannot read source: ' .. rel)
+    local src = checked_source(idx, rel)
     if src then
         for line in (src .. '\n'):gmatch('([^\n]*)\n') do lines[#lines + 1] = (line:gsub('\r$', '')) end
     end
@@ -331,31 +342,43 @@ local function label(G, id)
     return string.format('%s %s (%s)', node.kind, node.qualified, graph.where(G, id))
 end
 
+local edge_label = require('codeoutline.query_report').edge_label
+
 local function candidate_text(G, idx, report, in_order)
     if #report.entries == 0 then return nil end
-    local lines = { '\n## Unconfirmed definition candidates',
-        'Suggestions for unresolved calls only, not call edges or verified bindings. Inspect the source before using them.' }
+    local lines, references, used = {}, {}, 0
+    local function append(line, files)
+        line = text.valid(line)
+        if files then references[#references + 1] = { at = used, files = files } end
+        lines[#lines + 1] = line; used = used + #line + 1
+    end
+    append('\n## Unconfirmed definition candidates')
+    append('Suggestions for unresolved calls only, not call edges or verified bindings. Inspect the source before using them.')
     local shown = {}
     for _, group in ipairs(report.entries) do
-        lines[#lines + 1] = string.format('- Unresolved %s at %s:%d: %s', group.call, group.path, group.line, group.resolution_reason)
+        append(string.format('- Unresolved %s at %s:%d: %s', group.call, group.path, group.line, group.resolution_reason),
+            { G.node_file[group.source] })
         for _, candidate in ipairs(group.candidates) do
             local id = candidate.id
-            lines[#lines + 1] = '  Unconfirmed candidate: ' .. label(G, id) .. '; ' .. candidate.reason
+            append('  Unconfirmed candidate: ' .. label(G, id) .. '; ' .. candidate.reason, { G.node_file[id] })
             if not in_order[id] and not shown[id] then
                 local node = G.nodes[id]
-                render_range(file_lines(idx, candidate.path), node.line, math.min(node.end_line, node.line + 7), lines)
-                if node.end_line > node.line + 7 then lines[#lines + 1] = '\t... (candidate snippet only; explore its file and name for more)' end
+                local source = file_lines(idx, candidate.path)
+                for line = node.line, math.min(#source, node.end_line, node.line + 7) do
+                    append(string.format('%d\t%s', line, source[line]), { G.node_file[id] })
+                end
+                if node.end_line > node.line + 7 then append('\t... (candidate snippet only; explore its file and name for more)') end
                 shown[id] = true
             end
         end
     end
-    if report.truncated then lines[#lines + 1] = 'Candidate lookup reached a site, source, evidence or result limit; more candidates may exist.' end
-    return table.concat(lines, '\n')
+    if report.truncated then append('Candidate lookup reached a site, source, evidence or result limit; more candidates may exist.') end
+    return table.concat(lines, '\n'), references
 end
 
 -- Run a query over symbol tables (graph.build). Returns the text and a table
 -- with what was selected; relationships resolve per query.
-function M.run(G, idx, query, opts)
+local function run(G, idx, query, opts)
     control.check()
     opts = opts or {}
     local budget = M.validate(query, opts)
@@ -365,7 +388,7 @@ function M.run(G, idx, query, opts)
     local ranking = require('codeoutline.search_ranking').policy(G.root or idx.root)
     G = graph.query(G, query_opts)
     G.stats.ranking = ranking.stats
-    file_cache = {}
+    file_cache, source_cache = {}, {}
     local filters = require('codeoutline.query_filters').parse(query)
     local ranked, named_files = find_seeds(G, filters.text, filters, ranking)
 
@@ -378,44 +401,51 @@ function M.run(G, idx, query, opts)
         local node = G.nodes[c.id]
         if node.kind ~= 'prototype' and not node.decl then defined[node.name] = true end
     end
-    local seeds, per_name = {}, {}
+    local seeds, per_name, seed_selection_limited = {}, {}, false
     for _, c in ipairs(ranked) do
         local node = G.nodes[c.id]
         local name = node.name
         if not ((node.kind == 'prototype' or node.decl) and defined[name]) then
             per_name[name] = (per_name[name] or 0) + 1
-            if per_name[name] <= 3 and #seeds < M.MAX_SEEDS then seeds[#seeds + 1] = c.id end
+            if per_name[name] <= 3 and #seeds < M.MAX_SEEDS then seeds[#seeds + 1] = c.id
+            else seed_selection_limited = true end
         end
     end
     local is_seed = {}
     for _, id in ipairs(seeds) do is_seed[id] = true end
 
     -- Spine: nodes on call paths between seeds.
-    local flows, spine, on_spine = {}, {}, {}
+    local flows, spine, on_spine, flow_edges, flow_files, non_call_paths = {}, {}, {}, {}, {}, false
     local reports = require('codeoutline.query_report')
     local searches, missed, connected = {}, {}, {}
     local path_limited = false
     for _, a in ipairs(seeds) do
         for _, b in ipairs(seeds) do
             if a ~= b then
-                local p, limited, prev, expansion_limited = path_between(G, a, b, M.PATH_DEPTH)
+                local p, limited, prev, expansion_limited, hops, via = path_between(G, a, b, M.PATH_DEPTH)
                 path_limited = path_limited or limited or false
                 if p then
                     connected[a] = connected[a] or {}
                     connected[a][b] = true
-                    local names = {}
-                    for _, id in ipairs(p) do
-                        names[#names + 1] = G.nodes[id].name
+                    local names, files = {}, {}
+                    for n, id in ipairs(p) do
+                        if n > 1 then
+                            local kind = edge_label(hops[n - 1].kind)
+                            names[#names + 1] = kind and (' -[' .. kind .. ']-> ') or ' -> '
+                            non_call_paths = non_call_paths or kind ~= nil
+                        end
+                        names[#names + 1] = G.nodes[id].name; files[#files + 1] = G.node_file[id]
                         if not is_seed[id] and not on_spine[id] then
                             on_spine[id] = true
                             spine[#spine + 1] = id
                         end
                     end
-                    flows[#flows + 1] = table.concat(names, ' -> ')
+                    flows[#flows + 1] = table.concat(names)
+                    flow_edges[#flows], flow_files[#flows] = hops, files
                 else
                     if not missed[a] then
                         missed[a] = { root = a, targets = {}, limited = limited, incomplete = expansion_limited,
-                            sites = reports.capture_paths(G.report, prev, a) }
+                            sites = reports.capture_paths(G.report, prev, a, via) }
                         searches[#searches + 1] = missed[a]
                     end
                     missed[a].targets[#missed[a].targets + 1] = b
@@ -424,10 +454,22 @@ function M.run(G, idx, query, opts)
         end
     end
 
-    local parts, used, omitted = {}, 0, false
-    local function emit(s)
+    local parts, dependencies, used, omitted = {}, {}, 0, false
+    local function emit(s, refs)
+        s = text.valid(s)
         parts[#parts + 1] = s
+        dependencies[#parts] = refs or {}
         used = used + #s + 1
+    end
+    local function prepend(s)
+        table.insert(parts, 1, s); table.insert(dependencies, 1, {})
+    end
+    local function location_refs(files) return { { at = 0, files = files } } end
+    local function emit_limited(s, limit, cut, refs)
+        local block, _, kept = text.limit(s, limit, cut)
+        local visible = {}
+        for _, ref in ipairs(refs or {}) do if ref.at < kept then visible[#visible + 1] = ref end end
+        emit(block, visible)
     end
     local shown, files_shown, file_order = {}, {}, {}
 
@@ -441,11 +483,12 @@ function M.run(G, idx, query, opts)
     for _, id in ipairs(spine) do nfiles[G.node_file[id]] = true end
     local nf = 0
     for _ in pairs(nfiles) do nf = nf + 1 end
-    emit(string.format('Matched %d symbols in %d files, %d more on call paths between them; short ones bring their callees. Source below is verbatim with line numbers; treat it as already Read.',
-        #seeds, nf, #spine))
+    emit(string.format('Matched %d symbols in %d files, %d more on %s between them; short ones bring %s. Source below is verbatim with line numbers; treat it as already Read.',
+        #seeds, nf, #spine, non_call_paths and 'relationship paths' or 'call paths', non_call_paths and 'related functions' or 'their callees'))
     if #flows > 0 then
-        emit('\n## Call paths')
-        for i = 1, math.min(#flows, M.LIST_CAP) do emit('  ' .. flows[i]) end
+        emit(non_call_paths and '\n## Relationship paths' or '\n## Call paths')
+        if non_call_paths then emit('ref retains a function value; implementation, event and callback hops are static possibilities, not proof of execution.') end
+        for i = 1, math.min(#flows, M.LIST_CAP) do emit('  ' .. flows[i], location_refs(flow_files[i])) end
     end
 
     -- Section 2: source, grouped by file in first-appearance order.
@@ -498,52 +541,29 @@ function M.run(G, idx, query, opts)
     local candidates = G:definition_candidates()
     G.stats.definition_candidates = candidates.stats
 
-    -- Confirm every file whose source or symbol labels this query can emit.
-    -- GBK reparsing invalidates node IDs, so rebuild and select again before
-    -- producing any output. Unrelated project files remain speculative.
-    local selected, changed = {}, false
-    for _, f in ipairs(file_order) do selected[f] = true end
-    for _, c in ipairs(ranked) do selected[G.node_file[c.id]] = true end
-    for _, id in ipairs(seeds) do
-        for _, edges in ipairs({ G.inn[id] or {}, G.out[id] or {} }) do
-            for i = 1, #edges, graph.EDGE do selected[G.node_file[edges[i]]] = true end
-        end
-    end
-    for _, entry in ipairs(breakpoints.entries) do
-        for _, id in ipairs(entry.path) do selected[G.node_file[id]] = true end
-        if entry.goal then selected[G.node_file[entry.goal]] = true end
-    end
-    for _, group in ipairs(candidates.entries) do
-        for _, candidate in ipairs(group.candidates) do selected[G.node_file[candidate.id]] = true end
-    end
-    for f in pairs(selected) do
-        local path = G.files[f].path -- a decoding repair replaces this file ID
-        local source, repaired = idx:query_source(path)
-        assert(source, 'cannot read source: ' .. path)
-        changed = repaired or changed
-    end
-    if changed then return nil, { encoding_retry = true } end
-
-    local evidence_text = reports.render(G.report, G)
+    -- Build output as a transaction. Check rendered locations before returning;
+    -- an encoding repair aborts immediately and retries with fresh node IDs.
+    local evidence_text, evidence_refs = reports.render(G.report, G)
     local evidence_budget = math.min(4096, math.floor(budget / 4))
-    local breakpoint_text = reports.render_breakpoints(breakpoints, G)
+    local breakpoint_text, breakpoint_refs = reports.render_breakpoints(breakpoints, G)
     local breakpoint_budget = breakpoint_text and math.floor(evidence_budget / 2) or 0
     evidence_budget = evidence_budget - breakpoint_budget
     local breakpoint_cut = breakpoint_text and (#breakpoint_text > breakpoint_budget or breakpoints.truncated) or false
-    if breakpoint_budget >= 256 then emit(text.limit(breakpoint_text, breakpoint_budget, breakpoints.truncated))
+    if breakpoint_budget >= 256 then emit_limited(breakpoint_text, breakpoint_budget, breakpoints.truncated, breakpoint_refs)
     elseif breakpoint_text then breakpoint_cut = true end
     omitted = omitted or breakpoint_cut
     local evidence_cut = #evidence_text > evidence_budget
     if evidence_budget >= 256 then
-        emit(text.limit(evidence_text, evidence_budget, G.report.truncated))
+        emit_limited(evidence_text, evidence_budget, G.report.truncated, evidence_refs)
     else evidence_cut = #G.report.entries > 0 end
     omitted = omitted or evidence_cut or G.report.truncated or #flows > M.LIST_CAP
 
-    local candidate_block = candidate_text(G, idx, candidates, in_order)
     local candidate_budget = math.min(3072, math.floor(budget / 5))
+    local candidate_block, candidate_refs
+    if candidate_budget >= 256 then candidate_block, candidate_refs = candidate_text(G, idx, candidates, in_order) end
     local candidate_cut = candidate_block and (#candidate_block > candidate_budget or candidates.truncated) or candidates.truncated
-    if candidate_block and candidate_budget >= 256 then emit(text.limit(candidate_block, candidate_budget, candidates.truncated))
-    elseif candidate_block then candidate_cut = true end
+    if candidate_block then emit_limited(candidate_block, candidate_budget, candidates.truncated, candidate_refs)
+    elseif #candidates.entries > 0 then candidate_cut = true end
     omitted = omitted or candidate_cut
 
     local reserve = math.floor(budget * 0.15)     -- keep room for sections 3-4
@@ -553,7 +573,8 @@ function M.run(G, idx, query, opts)
         local items = by_file[f]
         table.sort(items, function(a, b) return G.nodes[a.id].line < G.nodes[b.id].line end)
         local wrote_header = false
-        if items.outline then
+        if items.outline and used + #header + 16 < budget - reserve then
+            checked_source(idx, rec.path)
             local ol = {}
             for _, node in ipairs(rec.nodes) do
                 if not node.parent and node.kind ~= 'macro' and require('codeoutline.query_filters').node(filters, rec, node) then
@@ -562,21 +583,22 @@ function M.run(G, idx, query, opts)
                 if #ol >= 60 then ol[#ol + 1] = '\t...'; break end
             end
             local block = header .. ' (outline)\n' .. table.concat(ol, '\n')
-            if used + #block < budget - reserve then emit(block); wrote_header = true else omitted = true end
-        end
+            if used + #block < budget - reserve then emit(block, location_refs({ f })); wrote_header = true else omitted = true end
+        elseif items.outline then omitted = true end
         for _, item in ipairs(items) do
-            if not shown[item.id] then
+            if not shown[item.id] and used + #header + 16 < budget - reserve then
                 local block, source_cut = node_block(G, idx, item.id, item.full)
                 omitted = omitted or source_cut
                 local need = #block + (wrote_header and 0 or #header + 1) + 1
                 if used + need < budget - reserve then
-                    if not wrote_header then emit(header); wrote_header = true end
-                    emit(block)
+                    if not wrote_header then emit(header, location_refs({ f })); wrote_header = true end
+                    emit(block, location_refs({ f }))
                     shown[item.id] = true
                     files_shown[f] = true
                 else
                     pointers[#pointers + 1] = item.id
                 end
+            elseif not shown[item.id] then pointers[#pointers + 1] = item.id
             end
         end
     end
@@ -586,77 +608,106 @@ function M.run(G, idx, query, opts)
     for _, id in ipairs(seeds) do
         local callers, callees = {}, {}
         local seen_in, seen_out = {}, {}
+        local caller_files, callee_files, incoming_special, outgoing_special = {}, {}, false, false
         local inn, out = G.inn[id] or {}, G.out[id] or {}
         for i = 1, #inn, graph.EDGE do
             local src = inn[i]
-            if not seen_in[src] and #callers < M.LIST_CAP then
-                seen_in[src] = true
+            local tag, key = edge_label(inn[i + 2]), src .. ':' .. inn[i + 2]
+            if not seen_in[key] and #callers < M.LIST_CAP then
+                seen_in[key] = true; caller_files[#caller_files + 1] = G.node_file[src]
+                incoming_special = incoming_special or tag ~= nil
                 callers[#callers + 1] = string.format('%s (%s:%d)', G.nodes[src].name, G.files[G.node_file[src]].path, inn[i + 1])
-                    .. (inn[i + 2]:match('^indirect:') and (' [' .. inn[i + 2] .. ']') or '')
-            elseif not seen_in[src] then omitted = true
+                    .. (tag and (' [' .. tag .. ']') or '')
+            elseif not seen_in[key] then omitted = true
             end
         end
         for i = 1, #out, graph.EDGE do
             local dst = out[i]
-            if not seen_out[dst] and #callees < M.LIST_CAP then
-                seen_out[dst] = true
+            local tag, key = edge_label(out[i + 2]), dst .. ':' .. out[i + 2]
+            if not seen_out[key] and #callees < M.LIST_CAP then
+                seen_out[key] = true; callee_files[#callee_files + 1] = G.node_file[dst]
+                outgoing_special = outgoing_special or tag ~= nil
                 callees[#callees + 1] = G.nodes[dst].name .. ' (' .. graph.where(G, dst) .. ')'
-                    .. (out[i + 2]:match('^indirect:') and (' [' .. out[i + 2] .. ']') or '')
-            elseif not seen_out[dst] then omitted = true
+                    .. (tag and (' [' .. tag .. ']') or '')
+            elseif not seen_out[key] then omitted = true
             end
         end
         if #callers > 0 or #callees > 0 then
             local nsites = math.floor(#inn / graph.EDGE)
-            rel[#rel + 1] = string.format('%s:\n  called by%s: %s\n  calls: %s', G.nodes[id].qualified,
-                nsites > #callers and string.format(' (%d call sites)', nsites) or '',
-                #callers > 0 and table.concat(callers, ', ') or '-',
-                #callees > 0 and table.concat(callees, ', ') or '-')
+            rel[#rel + 1] = { line = G.nodes[id].qualified .. ':', files = { G.node_file[id] } }
+            rel[#rel + 1] = { line = string.format('  %s%s: %s', incoming_special and 'incoming relationships' or 'called by',
+                nsites > #callers and string.format(incoming_special and ' (%d sites)' or ' (%d call sites)', nsites) or '',
+                #callers > 0 and table.concat(callers, ', ') or '-'), files = caller_files }
+            rel[#rel + 1] = { line = '  ' .. (outgoing_special and 'outgoing relationships' or 'calls') .. ': '
+                .. (#callees > 0 and table.concat(callees, ', ') or '-'), files = callee_files }
         end
     end
     if #rel > 0 then
-        local block = '\n## Callers / callees\n' .. table.concat(rel, '\n')
-        emit(block)
+        emit('\n## Callers / callees')
+        for _, entry in ipairs(rel) do emit(entry.line, location_refs(entry.files)) end
     end
 
     -- Section 4: pointers for everything that matched but was not shown.
     local more = {}
-    for _, id in ipairs(pointers) do more[#more + 1] = '  ' .. label(G, id) end
+    for _, id in ipairs(pointers) do if #more < 15 then more[#more + 1] = id end end
     local extra = 0
     for _, c in ipairs(ranked) do
         if not shown[c.id] and not is_seed[c.id] then
             extra = extra + 1
-            if #more < 15 then more[#more + 1] = '  ' .. label(G, c.id) end
+            if #more < 15 then more[#more + 1] = c.id end
         end
     end
     if #more > 0 then
-        local block = '\n## Not shown (explore these by name for their source)\n' .. table.concat(more, '\n')
-        if extra + #pointers > #more then block = block .. string.format('\n  ... %d more', extra + #pointers - #more) end
-        if used + #block <= budget + 400 then emit(block) else omitted = true end
+        emit('\n## Not shown (explore these by name for their source)')
+        for _, id in ipairs(more) do emit('  ' .. label(G, id), location_refs({ G.node_file[id] })) end
+        if extra + #pointers > #more then emit(string.format('  ... %d more', extra + #pointers - #more)) end
     end
 
     if G.incomplete then
-        table.insert(parts, 1, 'Call-path expansion limit reached; relationships are incomplete.')
-        omitted = true
+        local reasons = require('codeoutline.coverage').relations({ relationships_incomplete = true, query_stats = G.stats })
+        prepend('Relationships incomplete: ' .. table.concat(reasons, ', ') .. '.')
     end
     if path_limited then
-        table.insert(parts, 1, 'Call-path search reached its depth/frontier limit; no path found is not proof of no runtime connection.')
+        prepend('Call-path search reached its depth/frontier limit; no path found is not proof of no runtime connection.')
     end
     if evidence_cut or G.report.truncated then
-        table.insert(parts, 1, 'Relationship explanations omitted due to evidence/output limits.')
+        prepend('Relationship explanations omitted due to evidence/output limits.')
     end
     if breakpoint_cut then
-        table.insert(parts, 1, 'Call-path breakpoint explanations omitted due to site/evidence/output limits.')
+        prepend('Call-path breakpoint explanations omitted due to site/evidence/output limits.')
     end
-    if filters.seed_limit_reached then table.insert(parts, 1, 'Seed selection stopped after 512 matching candidates; narrow the query filters.') end
-    if candidate_cut then table.insert(parts, 1, 'Unconfirmed definition candidates were limited or omitted; they are not call edges.') end
-    local result, truncated = text.limit(table.concat(parts, '\n'), budget, omitted or #pointers > 0)
-    return result, { seeds = seeds, spine = spine, shown = shown, flows = flows, truncated = truncated,
+    if filters.seed_limit_reached then prepend('Seed selection stopped after 512 matching candidates; narrow the query filters.') end
+    if seed_selection_limited then prepend('Starting-symbol selection limited to eight symbols and three definitions per name; refine name/path filters for other matches.') end
+    if candidate_cut then prepend('Unconfirmed definition candidates were limited or omitted; they are not call edges.') end
+    local result, truncated, kept = text.limit(table.concat(parts, '\n'), budget, omitted or #pointers > 0)
+    -- Validate locations retained by section budgets and the final byte cut.
+    -- Encoding repair aborts this transaction before any text is returned.
+    local selected, offset = {}, 0
+    for i, part in ipairs(parts) do
+        if offset >= kept then break end
+        for _, ref in ipairs(dependencies[i]) do
+            if offset + ref.at < kept then for _, f in ipairs(ref.files) do selected[f] = true end end
+        end
+        offset = offset + #part + 1
+    end
+    for f in pairs(selected) do checked_source(idx, G.files[f].path) end
+    local source_files = 0; for _ in pairs(source_cache) do source_files = source_files + 1 end
+    G.stats.sources = { files = source_files }
+    return result, { seeds = seeds, spine = spine, shown = shown, flows = flows, flow_edges = flow_edges, truncated = truncated,
         relationships_incomplete = G.incomplete or false, query_stats = G.stats,
         seed_limit_reached = filters.seed_limit_reached or false,
+        seed_selection_limited = seed_selection_limited,
         evidence = G.report.entries, evidence_truncated = evidence_cut or G.report.truncated,
         unresolved_candidates = candidates.entries, unresolved_candidates_truncated = candidate_cut or false,
         path_search_limited = path_limited, evidence_scope = G.report.scope,
         path_breakpoints = breakpoints.entries, path_breakpoints_truncated = breakpoint_cut }
+end
+
+function M.run(...)
+    local ok, output, info = pcall(run, ...)
+    if not ok and output == encoding_retry then return nil, { encoding_retry = true } end
+    if not ok then error(output, 0) end
+    return output, info
 end
 
 return M

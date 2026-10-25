@@ -32,7 +32,14 @@ test('official SDK stdio: discovery, source, incremental refresh, rebuild and er
         await c.connect(transport);
         assert.equal((await c.listTools()).tools.length, 6);
         const query = (query) => c.callTool({ name: 'codeoutline_explore', arguments: { query } });
-        assert.match((await query('greet')).content[0].text, /你好世界/);
+        const greeting = await query('greet');
+        assert.match(greeting.content[0].text, /你好世界/);
+        assert.equal(greeting.structuredContent.state, 'ok');
+        assert.equal(greeting.structuredContent.operation, 'codeoutline_explore');
+        assert.equal(greeting.structuredContent.coverage.scope, 'indexed_static_analysis');
+        assert.deepEqual(greeting.structuredContent.coverage.reasons, []);
+        assert.equal(typeof greeting.structuredContent.generation, 'number');
+        assert.equal(greeting.content.length, 1);
         assert.match((await query('lang:lua path:sample.lua greet')).content[0].text, /你好世界/);
         assert.match((await query('lang:python greet')).content[0].text, /No symbols matched/);
         await assert.rejects(query('lang:unknown greet'), /unsupported query language/);
@@ -48,6 +55,8 @@ test('official SDK stdio: discovery, source, incremental refresh, rebuild and er
         const batch = await c.callTool({ name: 'codeoutline_affected', arguments: { files: ['sample.lua', 'caller.lua', 'missing.lua'] } });
         assert.match(batch.content[0].text, /Changed 2 indexed file/);
         assert.match(batch.content[0].text, /Unresolved file.*missing.lua/);
+        assert.equal(batch.structuredContent.state, 'partial');
+        assert.ok(batch.structuredContent.coverage.reasons.includes('unresolved_files'));
         await assert.rejects(c.callTool({ name: 'codeoutline_affected', arguments: { files: [] } }), /files/);
         await assert.rejects(c.callTool({ name: 'codeoutline_affected', arguments: { files: ['../outside.lua'] } }), /inside the project/);
         await assert.rejects(c.callTool({ name: 'codeoutline_callers', arguments: { query: 'greet', depth: 0 } }), /depth/);
@@ -75,6 +84,26 @@ test('official SDK stdio: discovery, source, incremental refresh, rebuild and er
         await rm(join(f.project, 'sample.lua'));
         assert.equal(JSON.parse((await c.callTool({ name: 'codeoutline_status' })).content[0].text).files, 0);
         assert.match(logs, /loading main script/);
+    } finally { await c.close(); await f.cleanup(); }
+});
+
+test('official SDK reports unsupported event syntax separately from output truncation', { timeout: 30000 }, async () => {
+    const f = await fixture();
+    await writeFile(join(f.project, 'bus.ts'), "import { EventEmitter } from 'events'; export const bus = new EventEmitter();\n");
+    await writeFile(join(f.project, 'sub.ts'), "import { bus } from './bus'; bus.on('saved', () => {});\n");
+    await writeFile(join(f.project, 'pub.ts'), "import { bus } from './bus'; export function publish() { bus.emit('saved'); }\n");
+    const transport = new StdioClientTransport({ command: defaultRuntime,
+        args: [main, 'STDIO=1', `PROJECT=${f.project}`], cwd: tmpdir(), stderr: 'pipe' });
+    transport.stderr?.resume();
+    const c = client();
+    try {
+        await c.connect(transport);
+        const result = await c.callTool({ name: 'codeoutline_explore', arguments: { query: 'publish' } });
+        assert.notEqual(result.isError, true);
+        assert.equal(result.structuredContent.state, 'partial');
+        assert.equal(result.structuredContent.coverage.output_truncated, false);
+        assert.ok(result.structuredContent.coverage.reasons.includes('shared_events.unsupported_syntax'));
+        assert.doesNotMatch(result.content[0].text, /Results truncated|expansion limit reached/);
     } finally { await c.close(); await f.cleanup(); }
 });
 
@@ -201,7 +230,7 @@ test('official SDK static registries: inferred flows, callers and registration e
         ]) {
             const flow = await c.callTool({ name: 'codeoutline_explore', arguments: { query: `${entry} ${leaf}` } });
             assert.notEqual(flow.isError, true);
-            assert.ok(flow.content[0].text.includes(`${entry} -> ${leaf}`));
+            assert.ok(flow.content[0].text.includes(`${entry} -[${relation}]-> ${leaf}`));
             assert.match(flow.content[0].text, /registered at/);
             const callers = await c.callTool({ name: 'codeoutline_callers', arguments: { query: leaf } });
             assert.notEqual(callers.isError, true);
@@ -238,7 +267,7 @@ test('official SDK call-path breakpoints explain dynamic sites without adding ca
         await writeFile(join(f.project, 'boundary.lua'), source.replace('handlers[key]()', 'handlers.go()'));
         const updated = await query();
         assert.notEqual(updated.isError, true);
-        assert.match(updated.content[0].text, /boundaryStart -> boundaryMiddle -> boundaryLeaf/);
+        assert.match(updated.content[0].text, /boundaryStart -> boundaryMiddle -\[indirect:registry\]-> boundaryLeaf/);
         assert.doesNotMatch(updated.content[0].text, /## Call-path breakpoints/);
     } finally { await c.close(); await f.cleanup(); }
 });
@@ -256,7 +285,7 @@ test('official SDK Lua registry aliases resolve callers and refresh after reassi
         await c.connect(transport);
         const flow = await c.callTool({ name: 'codeoutline_explore', arguments: { query: 'aliasRun aliasLeaf' } });
         assert.notEqual(flow.isError, true);
-        assert.match(flow.content[0].text, /aliasRun -> aliasLeaf/);
+        assert.match(flow.content[0].text, /aliasRun -\[indirect:registry\]-> aliasLeaf/);
         assert.match(flow.content[0].text, /registered at aliases.lua:3/);
         const query = () => c.callTool({ name: 'codeoutline_callers', arguments: { query: 'aliasLeaf' } });
         const callers = await query();
@@ -295,7 +324,8 @@ test('official SDK unified rules follow multilingual aliases and refresh callbac
         for (const prefix of ['lua', 'ts', 'py', 'c']) {
             const result = await c.callTool({ name: 'codeoutline_explore', arguments: { query: `${prefix}AliasRun ${prefix}AliasLeaf` } });
             assert.notEqual(result.isError, true);
-            assert.match(result.content[0].text, new RegExp(`${prefix}AliasRun -> ${prefix}AliasLeaf`));
+            const kind = prefix === 'c' ? 'indirect:callback#2' : 'indirect:event#1';
+            assert.ok(result.content[0].text.includes(`${prefix}AliasRun -[${kind}]-> ${prefix}AliasLeaf`));
             const callers = await c.callTool({ name: 'codeoutline_callers', arguments: { query: `${prefix}AliasLeaf` } });
             assert.notEqual(callers.isError, true);
             assert.match(callers.content[0].text, new RegExp(`Depth 1: ${prefix}AliasRun`));

@@ -167,7 +167,10 @@ end
 
 function M.context(G, ctx, report)
     if ctx.shared_event_context then return ctx.shared_event_context end
-    local C = { incomplete = false, stats = { files = 0, bytes = 0, sites = 0, links = 0, identities = 0 } }
+    local reasons = {}
+    local C = { incomplete = false, stats = { files = 0, bytes = 0, sites = 0, links = 0, identities = 0,
+        incomplete_reasons = reasons } }
+    local function incomplete(reason) C.incomplete = true; reasons[reason] = true end
     ctx.shared_event_context = C
     local js = require('codeoutline.js_resolution')
     local cache, identities, buses, started = {}, {}, {}, nil
@@ -197,7 +200,7 @@ function M.context(G, ctx, report)
     end
     local function allowed()
         control.check(); started = started or xtimer.now_ms()
-        if xtimer.now_ms() - started > M.MAX_MS then C.incomplete = true; return false end
+        if xtimer.now_ms() - started > M.MAX_MS then incomplete('time_limit'); return false end
         return true
     end
     local function data(f)
@@ -205,11 +208,14 @@ function M.context(G, ctx, report)
         local rec = G.files[f]
         if not supported(rec) or not allowed() then return end
         local size = ctx.ordinary.source_size(f) or 0
-        if C.stats.files >= M.MAX_FILES or size > M.MAX_FILE_BYTES or C.stats.bytes + size > M.MAX_BYTES then C.incomplete = true; return end
+        if C.stats.files >= M.MAX_FILES then incomplete('file_limit'); return end
+        if size > M.MAX_FILE_BYTES then incomplete('file_size_limit'); return end
+        if C.stats.bytes + size > M.MAX_BYTES then incomplete('source_byte_limit'); return end
         C.stats.files, C.stats.bytes = C.stats.files + 1, C.stats.bytes + size
         local d = ctx.ordinary.data(f).shared_events
-        if d and (d.incomplete or d.unsupported) then C.incomplete = true; d = nil end
-        if d and C.stats.sites + #d.sites + #d.entities > M.MAX_SITES then C.incomplete = true; d = nil end
+        if d and d.unsupported then incomplete('unsupported_syntax'); d = nil end
+        if d and d.incomplete then incomplete('site_limit'); d = nil end
+        if d and C.stats.sites + #d.sites + #d.entities > M.MAX_SITES then incomplete('site_limit'); d = nil end
         if d then C.stats.sites = C.stats.sites + #d.sites + #d.entities end
         cache[f] = d or false; return d
     end
@@ -225,10 +231,11 @@ function M.context(G, ctx, report)
         end
     end
     identity = function(f, name, seen, depth)
-        if depth > M.MAX_DEPTH or not allowed() then C.incomplete = true; return end
+        if depth > M.MAX_DEPTH then incomplete('depth_limit'); return end
+        if not allowed() then return end
         local key = f .. '\0' .. name
         if identities[key] ~= nil then return identities[key] or nil end
-        if seen[key] then C.incomplete = true; return end
+        if seen[key] then incomplete('cyclic_export'); return end
         seen[key] = true; C.stats.identities = C.stats.identities + 1
         local entries, explicit, found, ambiguous = G.files[f].js_exports or {}, false, nil, false
         for _, e in ipairs(entries) do if e.name == name then explicit = true end end
@@ -248,7 +255,7 @@ function M.context(G, ctx, report)
             end
         end
         seen[key] = nil
-        if ambiguous then C.incomplete = true; found = nil end
+        if ambiguous then incomplete('ambiguous_binding'); found = nil end
         identities[key] = found or false; return found
     end
     local function handler(f, value)
@@ -290,7 +297,7 @@ function M.context(G, ctx, report)
                     local source = G.id_of[emit.file][emit.site.from]
                     local key = source .. ':' .. ids[1] .. ':' .. emit.site.line
                     if not seen[key] then
-                        if C.stats.links >= M.MAX_TARGETS then C.incomplete = true; buses[owner.key] = {}; return {} end
+                        if C.stats.links >= M.MAX_TARGETS then incomplete('target_limit'); buses[owner.key] = {}; return {} end
                         seen[key] = true; C.stats.links = C.stats.links + 1
                         out[#out + 1] = { source = source, target = ids[1], line = emit.site.line,
                             kind = 'automatic:event', site = emit.site, registered_at = G.files[reg.file].path .. ':' .. reg.site.line }

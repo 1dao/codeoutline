@@ -63,7 +63,8 @@ local function execute(req)
     elseif req.method == 'explore' or req.method == 'callers' or req.method == 'type_hierarchy' or req.method == 'affected' then
         local text, info = service[req.method](root, req.method == 'affected' and req.files or req.query, { budget = req.budget, depth = req.depth,
             max_nodes = req.max_nodes, direction = req.direction })
-        return { text = text, truncated = info.truncated or false, refresh = info.refresh }
+        return { text = text, truncated = info.truncated or false, coverage = info.coverage,
+            generation = info.generation, refresh = info.refresh }
     elseif req.method == 'status' then return service.status(root)
     elseif req.method == 'rebuild' then return service.rebuild(root)
     else error('unknown operation') end

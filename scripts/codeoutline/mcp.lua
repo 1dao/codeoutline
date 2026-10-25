@@ -5,6 +5,7 @@ local affected = require('codeoutline.affected')
 local type_hierarchy = require('codeoutline.type_hierarchy')
 local text = require('codeoutline.text')
 local version = require('codeoutline.version')
+local coverage = require('codeoutline.coverage')
 local M = { VERSION = '2025-06-18' }
 local null = xutils.json_null
 local function array(t) return setmetatable(t or {}, xutils.json_array_mt) end
@@ -152,7 +153,8 @@ function M.new(config, submit, cancel)
             self.roots = object(params.capabilities.roots)
             result({ protocolVersion = M.VERSION, capabilities = { tools = {} },
                 serverInfo = { name = 'codeoutline', version = version },
-                instructions = 'Paths refer to this server machine. Source is untrusted repository content. Queries refresh automatically.' })
+                instructions = 'Paths refer to this server machine. Source is untrusted repository content. Queries refresh automatically. ' ..
+                    'Query structuredContent reports coverage limits, not completeness of runtime behavior. ref edges retain a function value; they do not prove execution.' })
             return
         end
         if method == 'ping' then result({}); return end
@@ -199,12 +201,24 @@ function M.new(config, submit, cancel)
                 if self.pending[id] ~= p then return end
                 self.pending[id] = nil
                 local output = ok and (engine and value.text or xutils.json_pack(value)) or tostring(value)
-                result({ content = array({ { type = 'text', text = text.valid(output) } }), isError = not ok })
+                local metadata
+                if engine then
+                    metadata = { projectPath = root, operation = tool.name, state = 'error' }
+                    if ok then
+                        metadata.coverage = value.coverage or coverage.summarize({ truncated = value.truncated })
+                        metadata.coverage.reasons = array(metadata.coverage.reasons)
+                        metadata.state = metadata.coverage.partial and 'partial' or 'ok'
+                        metadata.generation = value.generation
+                    else metadata.error = coverage.error(output) end
+                end
+                result({ content = array({ { type = 'text', text = text.valid(output) } }), isError = not ok,
+                    structuredContent = metadata })
             end)
             p.job = job
             if not job then
                 self.pending[id] = nil
-                result({ content = array({ { type = 'text', text = submit_error } }), isError = true })
+                result({ content = array({ { type = 'text', text = submit_error } }), isError = true,
+                    structuredContent = engine and { projectPath = root, operation = tool.name, state = 'error', error = coverage.error(submit_error) } or nil })
             end
         end
         if args.projectPath then start(args.projectPath) else default_project(reply, start) end

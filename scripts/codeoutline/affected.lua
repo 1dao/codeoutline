@@ -124,7 +124,8 @@ function M.run(symbols, idx, files, opts)
     if result.node_limit_reached then lines[#lines + 1] = 'Node limit reached; affected symbols were omitted.' end
     if result.depth_limit_reached then lines[#lines + 1] = 'Depth limit reached; deeper relationships were not checked.' end
     if result.time_limit_reached then lines[#lines + 1] = 'Time limit reached; verified paths from the scanned portion are returned.' end
-    if result.relationships_incomplete then lines[#lines + 1] = 'Relationship candidate limit reached; potential relationships were omitted.' end
+    if result.relationships_incomplete then lines[#lines + 1] = 'Relationships incomplete: '
+        .. table.concat(require('codeoutline.coverage').relations(result), ', ') .. '.' end
     for _, entry in ipairs(result.callers) do
         local chain = {}
         for _, hop in ipairs(entry.path) do
@@ -135,7 +136,8 @@ function M.run(symbols, idx, files, opts)
     end
     lines[#lines + 1] = 'Affected files:\n' .. table.concat(result.files, '\n')
     lines[#lines + 1] = 'Test candidates (naming heuristic):\n' .. (#tests > 0 and table.concat(tests, '\n') or '(none identified)')
-    local output, cut = text.limit(table.concat(lines, '\n'), require('codeoutline.explore').validate('affected', opts), result.incomplete)
+    local output, cut = text.limit(table.concat(lines, '\n'), require('codeoutline.explore').validate('affected', opts),
+        limited or result.node_limit_reached)
     result.truncated = cut
     return output, result
 end

@@ -179,12 +179,14 @@ function M.new(config, emit, submit, cancel, stop, await_worker)
             if self.synced[uri] == version then self.synced[uri] = nil end
         end
     end
-    local function schedule_warm(uri, focused, delay)
-        local enabled = false
+    local function navigation_enabled()
         for name, value in pairs(self.features) do
-            if value and name ~= 'documentSymbol' and name ~= 'workspaceSymbol' then enabled = true; break end
+            if value and name ~= 'documentSymbol' and name ~= 'workspaceSymbol' then return true end
         end
-        if not enabled then return end
+        return false
+    end
+    local function schedule_warm(uri, focused, delay)
+        if not navigation_enabled() then return end
         if focused then focused_uri = uri end
         if focused_uri and self.documents[focused_uri] and focused_uri ~= uri then return end
         local doc = self.documents[uri]
@@ -206,7 +208,7 @@ function M.new(config, emit, submit, cancel, stop, await_worker)
         self.scans[root] = job
         if not self.ready[root] then self:begin_index(root) end
         local id, err = submit({ method = 'lsp_refresh', projectPath = root, allowedRoots = self.roots,
-            paths = hints }, function(ok, result)
+            paths = hints, prepare_navigation = navigation_enabled() }, function(ok, result)
             if self.scans[root] ~= job then return end
             self.scans[root] = nil
             self.ready[root] = ok or nil

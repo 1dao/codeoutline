@@ -30,6 +30,10 @@ edits and cache reloads use fresh query contexts.
 Alias lookup can cache a lightweight declaration-only parse and upgrades it to
 full binding evidence only when needed; macro summaries remain independently
 available. Both forms share the same bounded cache and source validation.
+Within one query, compact validated alias lists can survive eviction from that
+cache, up to 256 files and approximately 1 MiB. This avoids reparsing the same
+transitive headers for each name. These summaries retain no source text, tokens
+or full binding records, and the next query validates source again.
 Each query admits at most 16 evidence files, 8 MiB of evidence source, depth 12,
 256 candidates per lookup and a 400 ms soft deadline. Reaching a bound reports
 incomplete results. Native parsing and existing include/name lookup retain their

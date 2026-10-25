@@ -399,6 +399,23 @@ spec.describe('LSP sessions', function()
         complete(true, true)
         send('textDocument/rename', 4); spec.equal(output.error.code, -32601)
     end)
+    spec.it('prepares symbol tables before navigation readiness while keeping symbol-only clients lazy', function()
+        for _, enabled in ipairs({ true, false }) do
+            local submitted
+            local session = lsp.new({}, function() end, function(req)
+                submitted = req; return 'scan'
+            end, function() end, function() end)
+            local features = {}
+            for _, name in ipairs(lsp.FEATURES) do
+                features[name] = enabled or name == 'documentSymbol' or name == 'workspaceSymbol'
+            end
+            session:accept(xutils.json_pack({ jsonrpc = '2.0', id = 1, method = 'initialize', params = {
+                rootUri = docs.uri(root), capabilities = {}, initializationOptions = { features = features } } }))
+            session:accept(xutils.json_pack({ jsonrpc = '2.0', method = 'initialized', params = {} }))
+            spec.equal(submitted.method, 'lsp_refresh'); spec.equal(submitted.prepare_navigation, enabled)
+            spec.equal(next(session.ready), nil, 'readiness waits for symbol preparation to finish')
+        end
+    end)
 
     spec.it('handles progress responses independently from client request IDs', function()
         local output = {}
@@ -518,8 +535,11 @@ spec.describe('shared entry and worker lifecycle', function()
             spec.equal(cancelled.ok, false); spec.contains(cancelled.result, 'cancelled')
             spec.equal(control.callback, nil)
             graph.build = saved.build
+            spec.truthy(run('navigation-ready', { method = 'lsp_refresh', prepare_navigation = true }).ok)
+            local _, prepared = service.resident(root); spec.truthy(prepared)
             spec.contains(service.explore(root, 'worker_only'), 'worker_only')
             local _, built = service.resident(root); spec.truthy(built)
+            spec.equal(built, prepared, 'navigation reuses symbol tables prepared before readiness')
             graph.build = function() error('built symbol tables are updated per file, not rebuilt') end
             write(root .. '/a.lua', 'function after_graph() end\n')
             spec.truthy(run('changed', { method = 'lsp_refresh', paths = { real .. '/a.lua' } }).ok)
@@ -2797,6 +2817,53 @@ void MacroNavUnknown(void) { MACRO_NAV(3); }
         end)
         navigation.close('missing-macro-context')
         for _, dir in ipairs({ 'macroDef1', 'macroDef2', 'macroDef3', 'macroDef4', 'macroUse' }) do assert(xutils.rmtree(nav_root .. '/' .. dir)) end
+        service.refresh(nav_root, options); assert(ok, err)
+    end)
+    spec.it('falls back to ordinary definitions after uncertain macros without leaking proxy macros or call edges', function()
+        for _, dir in ipairs({ 'fallbackOne', 'fallbackTwo', 'fallbackOther', 'fallbackUse' }) do
+            assert(xutils.mkdir_p(nav_root .. '/' .. dir))
+        end
+        nav_write('fallbackOne/api.h', 'void FallbackOrdinary();\nvoid FallbackDeclaration();\n')
+        nav_write('fallbackTwo/api.h', 'void FallbackOrdinary();\nvoid FallbackDeclaration();\n')
+        nav_write('fallbackOther/proxy.h', '#define FallbackOrdinary proxy->call\n#define FallbackDeclaration proxy->decl\n')
+        nav_write('fallbackOther/body.c', 'void FallbackOrdinary() {}\nstatic void FallbackDeclaration() {}\n')
+        local source = '#include <api.h>\nvoid FallbackCaller() { FallbackOrdinary(); FallbackDeclaration(); }\n'
+        for _, extension in ipairs({ 'c', 'cpp' }) do nav_write('fallbackUse/use.' .. extension, source) end
+        local options = { cache_path = nav_root .. '/cache.idx', lister = 'walk' }
+        service.refresh(nav_root, options)
+        local ok, err = pcall(function()
+            for _, extension in ipairs({ 'c', 'cpp' }) do
+                local doc = docs.read(nav_root .. '/fallbackUse/use.' .. extension)
+                local function jump(name, extra)
+                    local req = { method = 'lsp_definition', uri = doc.uri,
+                        position = doc:position(assert(source:find(name .. '();', 1, true)) - 1) }
+                    for k, v in pairs(extra or {}) do req[k] = v end
+                    return nav(req)
+                end
+                local found, out = jump('FallbackOrdinary')
+                spec.equal(#found, 1); spec.equal(out.incomplete, false)
+                spec.equal(found[1].uri, nav_uri('fallbackOther/body.c'))
+                spec.equal(range_text('fallbackOther/body.c', found[1].range), 'FallbackOrdinary')
+                found = jump('FallbackDeclaration')
+                spec.equal(#found, 2, 'keep declarations when no eligible implementation exists')
+                spec.equal(found[1].uri, nav_uri('fallbackOne/api.h'))
+                spec.equal(found[2].uri, nav_uri('fallbackTwo/api.h'))
+                spec.equal(#jump('FallbackOrdinary', { method = 'lsp_references' }), 0)
+                found = jump('FallbackDeclaration', { includePaths = { 'fallbackTwo' } })
+                spec.equal(#found, 1, 'a configured visible declaration still resolves normally')
+                found = jump('FallbackOrdinary', { includePaths = { 'missing-explicit-path' } })
+                spec.equal(#found, 0, 'an explicit include policy must not be bypassed')
+                local macros = require('codeoutline.cpp_macros')
+                local before = macros.MAX_FILES; macros.MAX_FILES = 0
+                local success, limited, response = pcall(jump, 'FallbackOrdinary')
+                macros.MAX_FILES = before; assert(success, limited)
+                spec.equal(#limited, 1); spec.equal(limited[1].uri, nav_uri('fallbackOther/body.c'))
+                spec.equal(response.incomplete, true, 'tag fallback must preserve exhausted macro evidence')
+            end
+        end)
+        for _, dir in ipairs({ 'fallbackOne', 'fallbackTwo', 'fallbackOther', 'fallbackUse' }) do
+            assert(xutils.rmtree(nav_root .. '/' .. dir))
+        end
         service.refresh(nav_root, options); assert(ok, err)
     end)
     spec.it('prefers actual implementations over repeated API declarations before limiting candidate sources', function()

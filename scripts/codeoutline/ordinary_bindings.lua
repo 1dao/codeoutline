@@ -17,7 +17,26 @@ function M.context(G, ctx, source, options)
     while #order > 0 and (#order > max_files or storage.bytes > max_bytes) do
         local old = table.remove(order, 1); storage.bytes = storage.bytes - cache[old].weight; cache[old] = nil
     end
-    local C = { stats = { parses = 0, files = 0, bytes = 0 } }
+    local C = { stats = { parses = 0, files = 0, bytes = 0, alias_files = 0, alias_bytes = 0 } }
+    -- A query may visit more headers than the shared full-evidence FIFO holds.
+    -- Retain only their small, validated alias lists for this query, so looking
+    -- up another name does not repeatedly parse the same evicted headers.
+    local query_aliases = {}
+    local max_alias_files, max_alias_bytes = options.max_alias_files or 256, options.max_alias_bytes or 1048576
+    local function alias_list(rec, list)
+        list = list or {}
+        if not query_aliases[rec.nodes] then
+            local weight = 64 + #list * 128
+            for _, alias in ipairs(list) do
+                weight = weight + #(alias.name or '') + #(alias.target or '') + #(alias.scope or '')
+            end
+            if C.stats.alias_files < max_alias_files and C.stats.alias_bytes + weight <= max_alias_bytes then
+                query_aliases[rec.nodes] = list
+                C.stats.alias_files, C.stats.alias_bytes = C.stats.alias_files + 1, C.stats.alias_bytes + weight
+            end
+        end
+        return list
+    end
     function C.available(f)
         local rec = G.files[f]
         return rec.ordinary_bindings or rec.size ~= nil or source ~= nil
@@ -84,10 +103,11 @@ function M.context(G, ctx, source, options)
         local rec = G.files[f]
         if rec.ordinary_bindings or not G.root and not source then return rec.cpp_aliases or {} end
         local cached = cached_data(rec)
-        if cached then return cached.cpp_aliases or {} end
+        if cached then return alias_list(rec, cached.cpp_aliases) end
+        if query_aliases[rec.nodes] then return query_aliases[rec.nodes] end
         local raw = read_source(f)
         cached = cached_data(rec, raw)
-        if cached then return cached.cpp_aliases or {} end
+        if cached then return alias_list(rec, cached.cpp_aliases) end
         local parsed = assert(require('codeoutline.parse').parse(rec.path, raw,
             { ranges = false, omit_signatures = true, cpp_aliases_only = true, language = rec.language }))
         assert(#parsed.nodes == #rec.nodes, 'source changed; refresh index before alias query: ' .. rec.path)
@@ -97,7 +117,7 @@ function M.context(G, ctx, source, options)
         end
         local data = remember(rec, raw, { cpp_aliases = parsed.cpp_aliases, cpp_aliases_only = true },
             #raw + #(parsed.cpp_aliases or {}) * 256)
-        return data.cpp_aliases or {}
+        return alias_list(rec, data.cpp_aliases)
     end
     function C.macros(f)
         local rec = G.files[f]

@@ -13,7 +13,14 @@ local function normalized(name) return (name:gsub('::', '.'):gsub(':', '.'):gsub
 
 function M.allowed(site)
     if not site or site.decl or not site.name or not site.name:match('^[%a_$][%w_$]*$') then return false end
-    if not reasons[site.reason] and not (site.reason or ''):match('^ambiguous name candidates') then return false end
+    -- Uncertain preprocessing may hide an ordinary function even when the only
+    -- same-name macro is in an unrelated header. Definition suggestions can
+    -- inspect ordinary tags after the macro declaration pass found nothing.
+    -- This does not establish a call edge or permit guessing macro definitions.
+    local macro_unknown = site.kind == 'call' and site.reason == 'unknown or unsupported macro visibility'
+        and (site.macro_state == 'uncertain' or site.macro_state == 'limited')
+    if not macro_unknown and not reasons[site.reason]
+        and not (site.reason or ''):match('^ambiguous name candidates') then return false end
     -- A known binding that failed is a barrier, not permission to guess another
     -- imported value, local, receiver type, package, or constructor.
     if site.evidence ~= nil and site.evidence ~= ''
@@ -23,7 +30,8 @@ function M.allowed(site)
 end
 
 function M.find(G, f, site, ctx)
-    local info = { truncated = false, scanned = 0, reason = 'exact name; binding unconfirmed' }
+    local info = { truncated = site and site.macro_state == 'limited' or false,
+        scanned = 0, reason = 'exact name; binding unconfirmed' }
     if not M.allowed(site) then return {}, info end
     local language = G.files[f].language
     -- These languages have package/project visibility that a name-only search
@@ -78,7 +86,7 @@ function M.find(G, f, site, ctx)
             hits[#hits + 1] = { id = id, score = score }
         end
     end
-    info.truncated = #list > M.MAX_SCAN
+    info.truncated = info.truncated or #list > M.MAX_SCAN
     -- Prefer implementations over repeated API declarations. A declaration is
     -- still useful when the project has no matching implementation at all.
     local defined = {}
@@ -132,6 +140,11 @@ function M.suggest(G, report, ctx)
                     ids = sites or {}
                     info = { reason = 'possible macro declaration; binding unconfirmed',
                         truncated = macro_ctx.cpp_macro_context and macro_ctx.cpp_macro_context.incomplete or false, scanned = 0 }
+                    if #ids == 0 then
+                        local truncated = info.truncated
+                        ids, info = M.find(G, f, site, ctx)
+                        info.truncated = info.truncated or truncated
+                    end
                 else ids, info = M.find(G, f, site, ctx) end
                 result.stats.scanned = result.stats.scanned + info.scanned
                 result.truncated = result.truncated or info.truncated or #ids > M.MAX_RESULTS

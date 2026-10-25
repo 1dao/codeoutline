@@ -55,7 +55,10 @@ local function execute(req)
     assert(paths.allowed(req.allowedRoots, root), 'project path is outside allowed roots')
     if req.method == 'lsp_refresh' then
         service.configure({ max_projects = lsp.MAX_ROOTS })
-        service.refresh(root, { full_interval = 45, paths = req.paths })
+        local idx = service.refresh(root, { full_interval = 45, paths = req.paths })
+        -- Ready navigation must not leave a whole-project symbol-table build
+        -- on the first definition request. Symbol-only clients retain lazy data.
+        if req.prepare_navigation then idx:symbols() end
         return true
     elseif req.method == 'explore' or req.method == 'callers' or req.method == 'type_hierarchy' or req.method == 'affected' then
         local text, info = service[req.method](root, req.method == 'affected' and req.files or req.query, { budget = req.budget, depth = req.depth,

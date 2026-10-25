@@ -208,13 +208,22 @@ overlay never writes to the resident tables.
   Suggestions exclude call sites, unrelated private locals and source-file statics.
   If no macro declaration is visible and there is no explicit undef or uncertain
   macro state, definition lookup may suggest same-name macro definitions elsewhere
-  in the project. Implementations take precedence over repeated API declarations;
+  in the project. If uncertain or exhausted macro analysis yields no macro
+  declaration targets, lookup can still suggest ordinary function definitions or
+  declarations. An unrelated same-name macro therefore does not suppress tag
+  fallback. Explicit include policies remain authoritative; uncertain macro
+  definitions are never guessed globally. Agent explore uses the same ordinary
+  candidates as unconfirmed suggestions without adding call edges.
+  Implementations take precedence over repeated API declarations;
   declarations remain available when no implementation is indexed.
   Lookup checks at most 256 same-name entries and selects at most eight targets;
   exact source positions are limited to four files, 2 MiB and a 500 ms soft budget.
   References, rename, hover, implementations and call hierarchy do not use this
   fallback. Multiple definition results are candidates for inspection, not proof
   of a runtime binding.
+- When navigation features are enabled, initial indexing prepares the shared
+  symbol tables before reporting Ready, so their construction does not delay the
+  first definition request. Symbol-only clients keep symbol-table construction lazy.
 - Unknown suffixes use the editor's supported language ID, or conservative source
   detection when no supported ID is supplied. The chosen language is retained for
   binding extraction, completion and position lookup. These documents remain session

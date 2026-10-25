@@ -1783,6 +1783,32 @@ void UseTrailing() { Trailing()->Run(); }
         spec.equal(ok, false); spec.contains(err, 'source changed')
         svc.forget(root)
     end)
+    spec.it('reuses bounded query alias summaries after full-evidence eviction and validates them in the next query', function()
+        local root = tmp_root .. '/cpp_alias_eviction'
+        for i = 1, 24 do write(root .. '/h' .. i .. '.hpp', 'struct Type' .. i .. ' {}; using Alias' .. i .. ' = Type' .. i .. ';\n') end
+        local idx, G = svc.get(root, { cache_path = root .. '/cache.idx', lister = 'walk' })
+        local ordinary = require('codeoutline.ordinary_bindings')
+        local storage = { entries = {}, order = {}, bytes = 0 }
+        local C = ordinary.context(G, {}, nil, { cache = storage, max_files = 1 })
+        for round = 1, 3 do
+            for i = 1, 24 do
+                local aliases = C.cpp_aliases(G.file_index['h' .. i .. '.hpp'])
+                spec.equal(aliases[1].name, 'Alias' .. i)
+            end
+        end
+        spec.equal(C.stats.parses, 24); spec.equal(C.stats.alias_files, 24)
+        spec.truthy(C.stats.alias_bytes <= 1048576); spec.equal(#storage.order, 1)
+        local bounded = ordinary.context(G, {}, nil, { max_files = 1, max_alias_files = 1, max_alias_bytes = 512 })
+        for round = 1, 2 do for i = 1, 24 do bounded.cpp_aliases(G.file_index['h' .. i .. '.hpp']) end end
+        spec.equal(bounded.stats.alias_files, 1); spec.truthy(bounded.stats.alias_bytes <= 512)
+        spec.truthy(bounded.stats.parses > 24, 'uncached aliases remain correct after the query summary cap')
+        write(root .. '/h1.hpp', 'struct Changed {}; using Alias1 = Changed;\n')
+        local fresh = ordinary.context(G, {}, nil, { cache = storage })
+        local ok, err = pcall(fresh.cpp_aliases, G.file_index['h1.hpp'])
+        spec.equal(ok, false); spec.contains(err, 'source changed')
+        for _, rec in pairs(idx.files) do spec.nil_value(rec.cpp_aliases) end
+        svc.forget(root)
+    end)
     spec.it('preserves const qualification when continuing through returned-object fields', function()
         local G = build({ ['a.cpp'] = [[struct Leaf { void Run() {} };
 struct Holder { Leaf child; Leaf* pointer; };
@@ -4566,6 +4592,30 @@ spec.describe('unconfirmed exploration candidates', function()
         end
         spec.contains(output, '#define AgentProxy proxy->call'); spec.equal(#info.flows, 0)
         spec.equal(#graph.query(G).out[G.by_name.AgentProxyStart[1]], 0)
+    end)
+    spec.it('suggests ordinary definitions when ambiguous includes and unrelated macros block execution lookup', function()
+        local G, idx = project({
+            ['one/api.h'] = 'void AgentOrdinaryTag();\n',
+            ['two/api.h'] = 'void AgentOrdinaryTag();\n',
+            ['other/proxy.h'] = '#define AgentOrdinaryTag proxy->call\n',
+            ['other/body.c'] = 'void AgentOrdinaryTag() {}\n',
+            ['other/private.c'] = 'static void AgentOrdinaryTag() {}\n',
+            ['use/start.cpp'] = '#include <api.h>\nvoid AgentOrdinaryStart() { AgentOrdinaryTag(); }\n',
+        })
+        local output, info = explore.run(G, idx, 'AgentOrdinaryStart')
+        spec.equal(#info.unresolved_candidates, 1)
+        local group = info.unresolved_candidates[1]
+        spec.equal(#group.candidates, 1); spec.equal(group.candidates[1].path, 'other/body.c')
+        spec.equal(group.candidates[1].status, 'unconfirmed'); spec.equal(group.candidates[1].kind, 'function')
+        spec.contains(output, 'void AgentOrdinaryTag() {}'); spec.equal(#info.flows, 0)
+        spec.equal(#graph.query(G).out[G.by_name.AgentOrdinaryStart[1]], 0)
+        local macros = require('codeoutline.cpp_macros')
+        local before = macros.MAX_FILES; macros.MAX_FILES = 0
+        local ok, limited_output, limited_info = pcall(explore.run, G, idx, 'AgentOrdinaryStart')
+        macros.MAX_FILES = before; assert(ok, limited_output)
+        spec.equal(#limited_info.unresolved_candidates, 1)
+        spec.equal(limited_info.unresolved_candidates[1].candidates[1].path, 'other/body.c')
+        spec.equal(limited_info.unresolved_candidates_truncated, true)
     end)
     spec.it('suggests unseen macro definitions without turning API uses into graph edges', function()
         local G, idx = project({ ['use/start.cpp'] = 'void AgentMacroOnlyStart() { AgentMacroOnly(); }\n',

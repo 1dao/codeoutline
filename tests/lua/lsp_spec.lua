@@ -2749,6 +2749,40 @@ int luaopen_native_test(lua_State *L) { luaL_setfuncs(L, methods, 0); luaL_newli
             initializationOptions = { includePaths = { 1 } } } }))
         spec.equal(replies[1].error.code, -32602)
     end)
+    spec.it('navigates shared emitter literal events and invalidates changed bus and event drafts', function()
+        assert(xutils.mkdir_p(nav_root .. '/sharedEvents'))
+        local bus = "import { EventEmitter } from 'node:events'; export const bus = new EventEmitter();\n"
+        local sub = "import { bus } from './bus'; export function eventHandled() {} bus.on('saved', eventHandled);\n"
+        local pub = "import { bus } from './bus';\nexport function eventPublish() { bus.emit('saved'); }\n"
+        nav_write('sharedEvents/bus.ts', bus); nav_write('sharedEvents/sub.ts', sub); nav_write('sharedEvents/pub.ts', pub)
+        local options = { cache_path = nav_root .. '/cache.idx', lister = 'walk' }
+        service.refresh(nav_root, options)
+        local uri = nav_uri('sharedEvents/pub.ts')
+        local function jump(text, extra)
+            local doc = docs.new(uri, text, 1, 'typescript')
+            local req = { method = 'lsp_definition', uri = uri, session = 'shared-events',
+                position = doc:position(assert(text:find('saved', 1, true)) - 1) }
+            for k, v in pairs(extra or {}) do req[k] = v end
+            return nav(req)
+        end
+        local ok, err = pcall(function()
+            local found = jump(pub); spec.equal(#found, 1); spec.equal(found[1].uri, nav_uri('sharedEvents/sub.ts'))
+            spec.equal(range_text('sharedEvents/sub.ts', found[1].range), 'eventHandled')
+            local provider = nav_uri('sharedEvents/bus.ts')
+            navigation.sync({ session = 'shared-events', open = { [provider] = 1 }, changed = {
+                [provider] = { version = 1, language = 'typescript', source = 'export const bus = custom();\n' } } })
+            spec.equal(#jump(pub), 0)
+            navigation.close('shared-events'); spec.equal(#jump(pub), 1)
+            local draft = pub:gsub("emit%('saved'%)", "emit('other')")
+            navigation.sync({ session = 'shared-events', open = { [uri] = 1 }, changed = {
+                [uri] = { version = 2, language = 'typescript', source = draft } } })
+            -- Same byte offset, now a different event string.
+            spec.equal(#jump(pub), 0)
+        end)
+        navigation.close('shared-events')
+        assert(xutils.rmtree(nav_root .. '/sharedEvents')); service.refresh(nav_root, options)
+        assert(ok, err)
+    end)
     spec.it('navigates conditional macro declarations without weakening execution barriers', function()
         local source = [[void MACRO_NAV(int x);
 #define MACRO_NAV(x) 0

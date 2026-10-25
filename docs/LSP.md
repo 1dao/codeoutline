@@ -194,6 +194,9 @@ overlay never writes to the resident tables.
   Alternative headers are evaluated independently within the existing query limits;
   configured include order still selects one header. These navigation candidates
   do not create execution edges in the call graph.
+- JS/TS definition requests on a literal event in `emit` can navigate to named
+  handlers registered on the same shared imported Node EventEmitter. Ordinary
+  identifier lookup is unchanged. See [supported shared-event cases and limits](SHARED-EVENTS.md).
 - Go declared receivers and non-generic embedded methods use the same method-set
   resolver as agent queries. Implementation lookup checks whole interface contracts,
   including parameter/result types and pointer/value method sets. Completion and

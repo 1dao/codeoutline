@@ -134,6 +134,8 @@ end
 
 function M.context(G, ctx, report)
     local C = { incomplete = false, stats = { files = 0, sites = 0, links = 0 } }
+    local shared = require('codeoutline.shared_events').context(G, ctx, report)
+    C.stats.shared = shared.stats
     local cache, js = {}, require('codeoutline.js_resolution')
     local function data(f)
         if cache[f] then return cache[f] end
@@ -173,7 +175,11 @@ function M.context(G, ctx, report)
         end
     end
     function C.outgoing(id)
-        local out = {}; scan(G.node_file[id], id, nil, out); return out[id] or {}
+        local out = {}; scan(G.node_file[id], id, nil, out)
+        out[id] = out[id] or {}
+        for _, edge in ipairs(shared.outgoing(id)) do out[id][#out[id] + 1] = edge end
+        C.incomplete = C.incomplete or shared.incomplete
+        return out[id]
     end
     function C.incoming(wanted)
         local out, relevant = {}, false
@@ -183,6 +189,11 @@ function M.context(G, ctx, report)
         -- Reuse the ordinary binding import closure instead of opening every emitter.
         local candidates = ctx.ordinary.candidates(wanted)
         for _, f in ipairs(G.file_order) do control.check(); if candidates[f] then scan(f, nil, wanted, out) end end
+        for source, edges in pairs(shared.incoming(wanted)) do
+            out[source] = out[source] or {}
+            for _, edge in ipairs(edges) do out[source][#out[source] + 1] = edge end
+        end
+        C.incomplete = C.incomplete or shared.incomplete
         return out
     end
     return C

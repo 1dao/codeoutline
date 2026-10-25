@@ -3909,6 +3909,99 @@ function handler() {} bus.on('go', handler); function run() { bus.emit('go'); }
         idx, G = svc.get(root, options); spec.equal(events(G, 'eventPublish'), '')
         svc.forget(root)
     end)
+    spec.it('links shared imported emitters through named, default and re-export bindings with receiver isolation', function()
+        local G = build({
+            ['bus.ts'] = "import { EventEmitter as E } from 'node:events'; const bus = new E(); export { bus }; export default bus;\nexport const other = new E();\n",
+            ['barrel.ts'] = "export { bus as shared, other } from './bus';\n",
+            ['handler.ts'] = 'export function handled() {}\nexport function wrong() {}\n',
+            ['subscribe.ts'] = "import { shared as sink, other } from './barrel'; import { handled, wrong } from './handler';\nsink.on('saved', handled); other.on('saved', wrong);\n",
+            ['publish.ts'] = "import sender from './bus'; const alias = sender;\nexport function publishShared() { alias.emit('saved'); }\n",
+        })
+        local found, Q = events(G, 'publishShared'); spec.equal(found, 'handled')
+        spec.contains(require('codeoutline.query_report').render(Q.report, G), 'shared imported Node EventEmitter')
+        spec.equal(#Q.inn[G.by_name.handled[1]], graph.EDGE)
+        spec.equal(G.nodes[Q.inn[G.by_name.handled[1]][1]].name, 'publishShared')
+        spec.truthy(Q.stats.events.shared.files <= 32); spec.equal(Q.incomplete, false)
+        local plain = ci.parse('plain.ts', "import { call } from './api'; export function run() { call(); }", { ordinary_bindings = true })
+        spec.nil_value(plain.shared_events, 'ordinary queries without event roles need no shared-event analysis')
+    end)
+    spec.it('rejects shared emitter shadows, escapes, removal, dynamic keys and unknown callback scopes', function()
+        local base = {
+            ['bus.ts'] = "import { EventEmitter } from 'events'; export const bus = new EventEmitter();\n",
+            ['subscribe.ts'] = "import { bus } from './bus'; function handled() {} bus.on('saved', handled);\n",
+            ['publish.ts'] = "import { bus } from './bus'; function publishShared() { bus.emit('saved'); }\n",
+        }
+        local variants = {
+            { 'publish.ts', "import { bus } from './bus'; function publishShared(bus) { bus.emit('saved'); }" },
+            { 'publish.ts', "import { bus } from './bus'; function publishShared() { consume(bus); bus.emit('saved'); }" },
+            { 'publish.ts', "import { bus } from './bus'; function publishShared() { bus.emit(event); }" },
+            { 'subscribe.ts', "import { bus } from './bus'; bus.on('saved', () => {});" },
+            { 'subscribe.ts', "import { bus } from './bus'; function handled() {} function setup() { bus.on('saved', handled); }" },
+            { 'remove.ts', "import { bus } from './bus'; bus.removeAllListeners();" },
+            { 'bus.ts', "import { EventEmitter } from './custom'; export const bus = new EventEmitter();" },
+        }
+        for _, variant in ipairs(variants) do
+            local files = {}; for k,v in pairs(base) do files[k] = v end; files[variant[1]] = variant[2]
+            spec.equal(events(build(files), 'publishShared'), '', variant[2])
+        end
+    end)
+    spec.it('bounds shared event work and never reuses partial bus edges after a limit', function()
+        local G = build({
+            ['bus.ts'] = "import { EventEmitter } from 'events'; export const bus = new EventEmitter();",
+            ['sub.ts'] = "import { bus } from './bus'; function handled() {} bus.on('saved', handled);",
+            ['pub.ts'] = "import { bus } from './bus'; function publishShared() { bus.emit('saved'); }",
+        })
+        local shared = require('codeoutline.shared_events')
+        for _, key in ipairs({ 'MAX_FILES', 'MAX_TARGETS', 'MAX_MS', 'MAX_DEPTH' }) do
+            local before = shared[key]; shared[key] = -1
+            local ok, found, Q = pcall(events, G, 'publishShared')
+            shared[key] = before; assert(ok, found)
+            spec.equal(found, '', key); spec.equal(Q.incomplete, true)
+            spec.equal(#Q.out[G.by_name.publishShared[1]], 0)
+        end
+        local H = build({
+            ['bus.ts'] = "import { EventEmitter } from 'events'; export const bus = new EventEmitter();",
+            ['sub.ts'] = "import { bus } from './bus'; function one() {} function two() {} bus.on('saved', one); bus.on('saved', two);",
+            ['pub.ts'] = "import { bus } from './bus'; function publishShared() { bus.emit('saved'); }",
+        })
+        local before = shared.MAX_TARGETS; shared.MAX_TARGETS = 1
+        local ok, found, Q = pcall(events, H, 'publishShared')
+        shared.MAX_TARGETS = before; assert(ok, found)
+        spec.equal(found, ''); spec.equal(Q.incomplete, true)
+        spec.equal(#Q.inn[H.by_name.one[1]], 0, 'a limited bus cannot leak its first candidate through the cache')
+    end)
+    spec.it('persists only event role bits and refreshes shared identities after source edits', function()
+        local root = tmp_root .. '/shared_events'
+        local files = {
+            ['bus.ts'] = "import { EventEmitter } from 'node:events'; export const bus = new EventEmitter();\n",
+            ['sub.ts'] = "import { bus } from './bus'; export function handled() {} bus.on('saved', handled);\n",
+            ['pub.ts'] = "import { bus } from './bus'; export function publishShared() { bus.emit('saved'); }\n",
+            ['unrelated.ts'] = 'export function unrelated() {}\n',
+        }
+        for path, source in pairs(files) do write(root .. '/' .. path, source) end
+        local options = { cache_path = root .. '/cache.idx', lister = 'walk' }
+        local idx, G = svc.get(root, options); idx:save(); svc.forget(root)
+        idx, G = svc.get(root, options); spec.truthy(idx.cache_loaded)
+        write(root .. '/unrelated.ts', 'export function changedWithoutRefresh() {}\n')
+        local found, Q = events(G, 'publishShared'); spec.equal(found, 'handled')
+        spec.equal(Q.stats.events.shared.files, 3)
+        local output, info = explore.run(G, idx, 'publishShared handled')
+        spec.contains(output, 'shared imported Node EventEmitter'); spec.truthy(#info.flows > 0)
+        local _, incoming = require('codeoutline.callers').run(G, idx, 'handled')
+        local caller = false
+        for _, entry in ipairs(incoming.callers) do if entry.name == 'publishShared' then caller = true end end
+        spec.truthy(caller, 'recursive callers reuse shared emitter identities')
+        for _, rec in pairs(idx.files) do spec.nil_value(rec.shared_events); spec.nil_value(rec.automatic_events) end
+        spec.equal(idx.files['pub.ts'].event_roles, 1); spec.equal(idx.files['sub.ts'].event_roles, 2)
+        spec.equal(idx.files['bus.ts'].event_roles, 8); spec.nil_value(idx.files['unrelated.ts'].event_roles)
+        write(root .. '/sub.ts', files['sub.ts']:gsub("'saved'", "'other'"))
+        idx, G = svc.get(root, options); spec.equal(events(G, 'publishShared'), '')
+        write(root .. '/sub.ts', files['sub.ts'])
+        idx, G = svc.get(root, options); spec.equal(events(G, 'publishShared'), 'handled')
+        write(root .. '/bus.ts', 'export const bus = make_custom_bus();\n')
+        idx, G = svc.get(root, options); spec.equal(events(G, 'publishShared'), '')
+        svc.forget(root)
+    end)
     spec.it('reports automatic event candidate and target limits', function()
         local G = build({ ['events.js'] = [[import { EventEmitter } from 'events'; const bus = new EventEmitter();
 function one() {} function two() {} bus.on('go', one); bus.on('go', two); function run() { bus.emit('go'); }

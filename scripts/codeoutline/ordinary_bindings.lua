@@ -162,6 +162,7 @@ function M.context(G, ctx, source, options)
         data.cpp_receivers = parsed.cpp_receivers
         data.cpp_macros = parsed.cpp_macros
         data.automatic_events = parsed.automatic_events
+        data.shared_events = parsed.shared_events
         data.lua_callback_loops = parsed.lua_callback_loops
         data.rust_imports, data.rust_public = parsed.rust_imports, parsed.rust_public
         local weight = #raw + #parsed.refs.name * 128 + #(parsed.js_exports or {}) * 256
@@ -174,6 +175,7 @@ function M.context(G, ctx, source, options)
                 + (parsed.go_methods.receiver_weight or 0)) or 0)
             + (parsed.cpp_receivers and parsed.cpp_receivers.weight or 0)
             + #(parsed.automatic_events or {}) * 512
+            + (parsed.shared_events and parsed.shared_events.weight or 0)
             + (parsed.lua_callback_loops and parsed.lua_callback_loops.weight or 0)
         return remember(rec, raw, data, weight)
     end

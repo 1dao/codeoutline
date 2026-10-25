@@ -1147,6 +1147,14 @@ end
 function handlers.lsp_definition(req)
     local V, doc, c, targets, f, offset = at(req)
     if not V then return false end
+    if not c and (V.files[f].language == 'javascript' or V.files[f].language == 'typescript') then
+        local events = require('codeoutline.shared_events').context(V, V.js_context)
+        local found, recognized = events.definition(f, offset, doc:position(offset).line + 1)
+        if recognized then
+            local result = {}; for _, id in ipairs(found) do result[#result + 1] = (location(V, id)) end
+            return result, events.incomplete or V.js_context.workspace_incomplete
+        end
+    end
     local configured, incomplete
     -- Rule arguments are strings or referenced values, never the name of a
     -- call/declaration itself. Avoid collecting dispatch sites for ordinary F12.

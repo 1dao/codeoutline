@@ -113,6 +113,36 @@ const indexed = async (client) => {
     assert.ok(client.notifications.some((msg) => msg.params?.value?.kind === 'end'), client.logs());
 };
 
+test('LSP follows literal events on a shared imported emitter and invalidates provider drafts', { timeout: 30000 }, async (t) => {
+    const client = await start(t);
+    const bus = "import { EventEmitter } from 'node:events';\nexport const bus = new EventEmitter();\nexport const other = new EventEmitter();\n";
+    await writeFile(join(client.project, 'bus.ts'), bus);
+    await writeFile(join(client.project, 'handlers.ts'), 'export function handled() {}\nexport function wrong() {}\n');
+    await writeFile(join(client.project, 'subscribe.ts'), "import { bus, other } from './bus';\n"
+        + "import { handled, wrong } from './handlers';\nbus.on('saved', handled);\nother.on('saved', wrong);\n");
+    const text = "import { bus as sender } from './bus';\nexport function publish() { sender.emit('saved'); }\n";
+    const path = join(client.project, 'publish.ts'), uri = pathToFileURL(path).href;
+    await writeFile(path, text);
+    await initialize(client, [client.project]); await indexed(client);
+    const character = text.split('\n')[1].indexOf('saved');
+    const definition = () => client.request('textDocument/definition', { textDocument: { uri }, position: { line: 1, character } });
+    for (let i = 0; i < 7; i++) {
+        const started = performance.now(), targets = await definition();
+        assert.ok(performance.now() - started < 1000);
+        assert.equal(targets.length, 1); assert.equal(fileURLToPath(targets[0].uri), join(client.project, 'handlers.ts'));
+        assert.equal(targets[0].range.start.line, 0);
+    }
+    const provider = pathToFileURL(join(client.project, 'bus.ts')).href;
+    client.notify('textDocument/didOpen', { textDocument: { uri: provider, languageId: 'typescript', version: 1,
+        text: 'export const bus = custom();\nexport const other = custom();\n' } });
+    assert.deepEqual(await definition(), []);
+    client.notify('textDocument/didClose', { textDocument: { uri: provider } });
+    assert.equal((await definition()).length, 1);
+    client.notify('textDocument/didOpen', { textDocument: { uri, languageId: 'typescript', version: 1,
+        text: text.replace("emit('saved')", "emit('other')") } });
+    assert.deepEqual(await definition(), []);
+});
+
 test('LSP resolves cached Lua modules and extracted loader members without unrelated fallbacks', { timeout: 30000 }, async (t) => {
     const client = await start(t);
     await writeFile(join(client.project, 'router.lua'), "local M = rawget(_G, 'router')\n"

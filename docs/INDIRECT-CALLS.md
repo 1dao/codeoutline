@@ -107,7 +107,9 @@ Named, default and namespace ES imports from `events` or `node:events` identify 
 constructor. The object must be an unexported, single-name `const` initialized with a zero-argument
 constructor in this file. Registrations accept `on`, `once` and `addListener`, with a named
 function, variable-bound arrow function, lexical function alias or resolvable imported export.
-Imported handlers reuse module/re-export/workspace resolution; emitter objects do not cross files.
+Imported handlers reuse module/re-export/workspace resolution. This closed-local
+pass keeps emitter objects in one file. A separate query-time pass supports
+explicitly exported/imported Node emitters; see [shared events](SHARED-EVENTS.md).
 
 Registration and emission must be standalone calls. Emissions require an indexed callable source;
 file-scope emissions are not synthesized as file nodes. Registration must occur at module scope

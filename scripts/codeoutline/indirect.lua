@@ -75,6 +75,8 @@ function M.collect(r, T)
     for name in pairs(calls) do names[#names + 1] = name end
     table.sort(names)
     if #names > 0 then r.dispatch_calls = names end
+    local roles = require('codeoutline.shared_events').roles(r, calls)
+    if roles ~= 0 then r.event_roles = roles end
     if r.collect_dispatch then r.dispatch_sites = sites end
 end
 

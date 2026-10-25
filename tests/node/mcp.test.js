@@ -37,6 +37,7 @@ test('official SDK stdio: discovery, source, incremental refresh, rebuild and er
         assert.equal(greeting.structuredContent.state, 'ok');
         assert.equal(greeting.structuredContent.operation, 'codeoutline_explore');
         assert.equal(greeting.structuredContent.coverage.scope, 'indexed_static_analysis');
+        assert.equal(greeting.structuredContent.resolution.unresolved_sites, 0);
         assert.deepEqual(greeting.structuredContent.coverage.reasons, []);
         assert.equal(typeof greeting.structuredContent.generation, 'number');
         assert.equal(greeting.content.length, 1);
@@ -104,6 +105,31 @@ test('official SDK reports unsupported event syntax separately from output trunc
         assert.equal(result.structuredContent.coverage.output_truncated, false);
         assert.ok(result.structuredContent.coverage.reasons.includes('shared_events.unsupported_syntax'));
         assert.doesNotMatch(result.content[0].text, /Results truncated|expansion limit reached/);
+    } finally { await c.close(); await f.cleanup(); }
+});
+
+test('official SDK reports unresolved calls and excludes unrelated private Lua targets', { timeout: 30000 }, async () => {
+    const f = await fixture();
+    await writeFile(join(f.project, 'private.lua'), 'local function hidden_target() end\n');
+    await writeFile(join(f.project, 'use.lua'), 'function unknown_entry() hidden_target() end\n');
+    const transport = new StdioClientTransport({ command: defaultRuntime,
+        args: [main, 'STDIO=1', `PROJECT=${f.project}`], cwd: tmpdir(), stderr: 'pipe' });
+    transport.stderr?.resume();
+    const c = client();
+    try {
+        await c.connect(transport);
+        const result = await c.callTool({ name: 'codeoutline_explore', arguments: { query: 'unknown_entry' } });
+        assert.equal(result.structuredContent.state, 'partial');
+        assert.equal(result.structuredContent.resolution.unresolved_sites, 1);
+        assert.ok(result.structuredContent.coverage.reasons.includes('unresolved_calls'));
+        assert.doesNotMatch(result.content[0].text, /calls: hidden_target/);
+        const callers = await c.callTool({ name: 'codeoutline_callers', arguments: { query: 'hidden_target' } });
+        assert.match(callers.content[0].text, /0 potential callers/);
+        await writeFile(join(f.project, 'use.lua'), 'local function leaf() end\nlocal handlers = { go = leaf }\n'
+            + 'function unknown_entry(key) handlers[key]() end\n');
+        const dynamic = await c.callTool({ name: 'codeoutline_explore', arguments: { query: 'unknown_entry' } });
+        assert.equal(dynamic.structuredContent.state, 'partial');
+        assert.equal(dynamic.structuredContent.resolution.unresolved_sites, 1);
     } finally { await c.close(); await f.cleanup(); }
 });
 

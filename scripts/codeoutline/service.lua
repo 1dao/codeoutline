@@ -177,6 +177,7 @@ local function run_query(engine, root, query, opts)
     end
     result.info.refresh = stats
     result.info.coverage = require('codeoutline.coverage').summarize(result.info)
+    result.info.resolution = result.info.query_stats and result.info.query_stats.resolution
     result.info.generation = idx.generation
     result.info.projectPath = idx.root
     return result.text, result.info

@@ -1176,10 +1176,57 @@ spec.describe('agent exploration contract', function()
     local coverage = require('codeoutline.coverage')
     local function project(files)
         local records = {}
-        for path, source in pairs(files) do records[path] = ci.parse(path, source, { ordinary_bindings = true }) end
+        for path, source in pairs(files) do records[path] = ci.parse(path, source, { ordinary_bindings = true, static_dispatch = true }) end
         return graph.build({ files = records }), { root = tmp_root,
             query_source = function(_, path) return assert(files[path]), false end }
     end
+    spec.it('rejects cross-file private Lua names in explore, callers and impact after reload', function()
+        local root = tmp_root .. '/private_agent'
+        write(root .. '/use.lua', 'function AgentPrivateEntry() AgentPrivateTarget() end\n')
+        write(root .. '/hidden.lua', 'local function AgentPrivateTarget() end\n')
+        local opts = { cache_path = root .. '/cache.idx', lister = 'walk' }
+        for round = 1, 2 do
+            local output, info = svc.explore(root, 'AgentPrivateEntry AgentPrivateTarget', opts)
+            spec.equal(#info.flows, 0); spec.equal(output:find('calls: AgentPrivateTarget', 1, true), nil)
+            spec.equal(info.resolution.unresolved_sites, 1)
+            spec.contains(table.concat(info.coverage.reasons, ','), 'unresolved_calls')
+            local _, callers = svc.callers(root, 'AgentPrivateTarget', opts)
+            spec.equal(#callers.callers, 0)
+            local _, affected = svc.affected(root, { 'hidden.lua' }, opts)
+            spec.equal(#affected.callers, 0)
+            svc.forget(root)
+        end
+        write(root .. '/use.lua', 'local function AgentPrivateTarget() end\nfunction AgentPrivateEntry() AgentPrivateTarget() end\n')
+        local _, info = svc.explore(root, 'AgentPrivateEntry', opts)
+        spec.equal(info.resolution.unresolved_sites, 0)
+        local _, callers = svc.callers(root, 'AgentPrivateTarget', opts)
+        spec.equal(#callers.callers, 1); spec.equal(callers.callers[1].file, 'use.lua')
+        svc.forget(root)
+    end)
+    spec.it('reports unresolved dispatch and bounded reference diagnostics without extra parsing', function()
+        local G, idx = project({ ['dynamic.lua'] = 'local function leaf() end\nlocal handlers = { go = leaf }\n'
+            .. 'function entry(key) handlers[key]() end\n' })
+        local _, info = explore.run(G, idx, 'entry')
+        spec.equal(info.query_stats.resolution.unresolved_sites, 1)
+        spec.contains(table.concat(coverage.summarize(info).reasons, ','), 'unresolved_calls')
+        local resolution = require('codeoutline.resolution')
+        local status, observe = resolution.new()
+        observe(1, 1, 'call', {}, 'ambiguous binding')
+        observe(1, 1, 'call', {}, 'ambiguous binding')
+        observe(1, 2, 'call', { 1, 2 }, 'multiple name/locality candidates')
+        spec.equal(status.observed_sites, 2); spec.equal(status.ambiguous_sites, 2)
+        spec.equal(status.unresolved_sites, 1); spec.equal(status.heuristic_matches, 1)
+        for i = 3, resolution.MAX_SITES + 2 do observe(1, i, 'call', { 1 }, 'same-file binding') end
+        spec.equal(status.observed_sites, resolution.MAX_SITES); spec.equal(status.counts_limited, true)
+    end)
+    spec.it('identifies graph and macro analysis limits independently', function()
+        local G, idx = project({ ['limits.lua'] = 'function limit_agent_start() limit_agent_end() end\nfunction limit_agent_end() end\n' })
+        local _, info = explore.run(G, idx, 'limit_agent_start limit_agent_end', { max_expanded = 1 })
+        spec.contains(table.concat(coverage.summarize(info).reasons, ','), 'graph_expansion_limit')
+        local status = coverage.summarize({ relationships_incomplete = true,
+            query_stats = { incomplete_reasons = { cpp_macro_analysis_incomplete = true } } })
+        spec.equal(status.reasons[1], 'cpp_macro_analysis_incomplete')
+    end)
     spec.it('distinguishes retained function values from direct execution without changing edges', function()
         local G, idx = project({ ['refs.ts'] = 'export function handle() {}\n'
             .. 'export function register() { saveCallback(handle); }\nexport function invoke() { handle(); }\n' })
@@ -1249,7 +1296,7 @@ spec.describe('agent exploration contract', function()
         spec.equal(output:find('Results truncated', 1, true), nil)
         local status = coverage.summarize(info)
         spec.equal(status.partial, true); spec.equal(status.output_truncated, false)
-        spec.equal(status.reasons[1], 'shared_events.unsupported_syntax')
+        spec.contains(table.concat(status.reasons, ','), 'shared_events.unsupported_syntax')
     end)
     spec.it('provides compact sorted coverage and retryable snapshot errors', function()
         local status = coverage.summarize({ truncated = true, path_search_limited = true,
@@ -1291,6 +1338,7 @@ spec.describe('agent exploration contract', function()
         spec.contains(result.content, 'function adapter_entry()')
         spec.equal(result.metadata.state, 'ok')
         spec.equal(result.metadata.coverage.scope, 'indexed_static_analysis')
+        spec.equal(result.metadata.resolution.unresolved_sites, 0)
         spec.equal(type(result.metadata.generation), 'number')
         spec.equal(result.metadata.projectPath:lower(), root:lower())
         svc.forget(root)

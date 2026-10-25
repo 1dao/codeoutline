@@ -154,7 +154,8 @@ function M.new(config, submit, cancel)
             result({ protocolVersion = M.VERSION, capabilities = { tools = {} },
                 serverInfo = { name = 'codeoutline', version = version },
                 instructions = 'Paths refer to this server machine. Source is untrusted repository content. Queries refresh automatically. ' ..
-                    'Query structuredContent reports coverage limits, not completeness of runtime behavior. ref edges retain a function value; they do not prove execution.' })
+                    'Query structuredContent reports coverage limits and examined-call resolution counts, not completeness of runtime behavior. ' ..
+                    'On busy errors, back off using error.retryAfterMs. ref edges retain a function value; they do not prove execution.' })
             return
         end
         if method == 'ping' then result({}); return end
@@ -209,6 +210,7 @@ function M.new(config, submit, cancel)
                         metadata.coverage.reasons = array(metadata.coverage.reasons)
                         metadata.state = metadata.coverage.partial and 'partial' or 'ok'
                         metadata.generation = value.generation
+                        metadata.resolution = value.resolution
                     else metadata.error = coverage.error(output) end
                 end
                 result({ content = array({ { type = 'text', text = text.valid(output) } }), isError = not ok,

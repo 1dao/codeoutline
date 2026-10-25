@@ -63,13 +63,16 @@ else exit_on_update = exit_on_update == '1' end
 local installed_update
 -- Background service: listening starts once the port proved free.
 local codec, next_stop_check = nil, 0
+local query_methods = { explore = true, callers = true, affected = true, type_hierarchy = true }
+local QUERY_QUEUE_WAIT_MS = 750
 
 local function submit(req, done)
     if job_count >= 64 then return nil, 'Request queue is full; retry later' end
     next_id = next_id + 1
     local id = tostring(next_id)
     req.deadline = xtimer.now_ms() + 120000
-    jobs[id], job_count = { done = done, request = req }, job_count + 1
+    req.queue_until = query_methods[req.method] and xtimer.now_ms() + QUERY_QUEUE_WAIT_MS or nil
+    jobs[id], job_count = { done = done, request = req, queue_until = req.queue_until }, job_count + 1
     if worker_ready then
         local ok, err = xthread.post(2, 'run', id, req)
         if not ok then jobs[id], job_count = nil, job_count - 1; return nil, tostring(err) end
@@ -171,12 +174,20 @@ return {
                     if not resumed then error(err) end
                 else
                     local posted, err = xthread.post(2, 'run', job_id, job.request)
-                    if not posted then jobs[job_id], job_count = nil, job_count - 1; job.done(false, tostring(err)) end
+                    if not posted then
+                        jobs[job_id], job_count = nil, job_count - 1
+                        if job.done then job.done(false, tostring(err)) end
+                    end
                 end
             end
+        elseif op == 'worker_started' then
+            if jobs[id] then jobs[id].started = true end
         elseif op == 'worker_result' then
             local job = jobs[id]
-            if job then jobs[id], job_count = nil, job_count - 1; job.done(ok, result) end
+            if job then
+                jobs[id], job_count = nil, job_count - 1
+                if job.done then job.done(ok, result) end
+            end
         elseif op == 'update_result' then
             -- Arguments: error, installed version (nil when already current).
             if id then notice('update unavailable: ' .. tostring(id))
@@ -188,6 +199,16 @@ return {
     end,
     __update = function()
         if stopping then return end
+        local now = xtimer.now_ms()
+        for id, job in pairs(jobs) do
+            if job.done and job.queue_until and not job.started and now >= job.queue_until then
+                -- Keep the occupied slot until the worker acknowledges cancellation:
+                -- abandoned requests must not grow an unbounded worker queue.
+                local done = job.done; job.done = nil
+                shared:set('cancel:' .. id, true)
+                done(false, 'Request queue wait exceeded 750ms; retry later')
+            end
+        end
         if not worker_ready and xtimer.now_ms() - startup > 10000 then error('Index worker failed to start') end
         if installed_update and exit_on_update and job_count == 0
             and not (lsp_mode and stdio and stdio.state ~= 'closed')

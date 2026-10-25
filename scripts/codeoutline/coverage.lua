@@ -4,6 +4,7 @@ local M = {}
 function M.relations(info)
     local result = {}
     local stats = info.query_stats or {}
+    for reason in pairs(stats.incomplete_reasons or {}) do result[#result + 1] = reason end
     local shared = stats.events and stats.events.shared
     for reason in pairs(shared and shared.incomplete_reasons or {}) do
         result[#result + 1] = 'shared_events.' .. reason
@@ -33,6 +34,12 @@ function M.summarize(info)
     if info.on_demand_rejected and #info.on_demand_rejected > 0 then add('on_demand_rejected') end
     if info.unresolved and #info.unresolved > 0 then add('unresolved_types') end
     if info.query_stats and (info.query_stats.reverse_unresolved or 0) > 0 then add('unresolved_reverse_types') end
+    local resolution = info.query_stats and info.query_stats.resolution
+    if resolution then
+        if resolution.unresolved_sites > 0 then add('unresolved_calls') end
+        if resolution.ambiguous_sites > 0 then add('ambiguous_calls') end
+        if resolution.counts_limited then add('resolution_count_limit') end
+    end
     if info.incomplete and #reasons == 0 then add('analysis_incomplete') end
     table.sort(reasons)
     return { scope = 'indexed_static_analysis', partial = #reasons > 0, reasons = reasons,
@@ -46,9 +53,9 @@ function M.error(message)
     if message:find('source changed', 1, true) or message:find('source snapshot changed', 1, true) then
         code, retryable = 'source_changed', true
     elseif message:find('deadline exceeded', 1, true) then code, retryable = 'deadline_exceeded', true
-    elseif message:find('queue is full', 1, true) then code, retryable = 'busy', true
+    elseif message:find('queue is full', 1, true) or message:find('queue wait exceeded', 1, true) then code, retryable = 'busy', true
     elseif message:lower():find('cancelled', 1, true) then code = 'cancelled' end
-    return { code = code, retryable = retryable }
+    return { code = code, retryable = retryable, retryAfterMs = code == 'busy' and 250 or nil }
 end
 
 return M

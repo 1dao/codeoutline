@@ -64,7 +64,7 @@ local function execute(req)
         local text, info = service[req.method](root, req.method == 'affected' and req.files or req.query, { budget = req.budget, depth = req.depth,
             max_nodes = req.max_nodes, direction = req.direction })
         return { text = text, truncated = info.truncated or false, coverage = info.coverage,
-            generation = info.generation, refresh = info.refresh }
+            resolution = info.resolution, generation = info.generation, refresh = info.refresh }
     elseif req.method == 'status' then return service.status(root)
     elseif req.method == 'rebuild' then return service.rebuild(root)
     else error('unknown operation') end
@@ -76,6 +76,7 @@ end
 local queue, active = {}, nil
 
 local function run(id, req, reply)
+    if req.queue_until then assert(xthread.post(1, 'worker_started', id)) end
     -- Draft text applies even to a cancelled request: the session counts it as sent.
     if req.session and req.open then
         local synced, err = pcall(navigation.sync, req)

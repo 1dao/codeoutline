@@ -39,6 +39,6 @@ return {
                 metadata = { state = 'error', error = require('codeoutline.coverage').error(text) } }
         end
         return { content = text, metadata = { state = info.coverage.partial and 'partial' or 'ok',
-            coverage = info.coverage, projectPath = info.projectPath, generation = info.generation } }
+            coverage = info.coverage, resolution = info.resolution, projectPath = info.projectPath, generation = info.generation } }
     end,
 }

@@ -88,6 +88,47 @@ test('cancelling a queued request leaves the active request and worker intact', 
     } finally { await worker.close(); await rm(root, { recursive: true, force: true }); }
 });
 
+test('queued queries return retryable busy within one second without interrupting indexing', { timeout: 30000 }, async (t) => {
+    const root = await mkdtemp(join(tmpdir(), 'codeoutline-busy-'));
+    const small = join(root, 'small'), large = join(root, 'large');
+    await mkdir(small); await mkdir(large);
+    await writeFile(join(small, 'small.lua'), 'function quick_target() return 1 end\n');
+    const source = Array.from({ length: 16000 }, (_, i) => `function busy_${i}() return ${i} end\n`).join('');
+    for (let i = 0; i < 36; i++) await writeFile(join(large, `${i}.lua`), source);
+    const endpoint = await startHttp(null, await configurePaths({ project: small, allowedRoots: [root] }));
+    const client = new Client({ name: 'busy-test', version: '1' });
+    const abort = new AbortController();
+    let running;
+    try {
+        await client.connect(new StreamableHTTPClientTransport(new URL(endpoint.url)));
+        await client.callTool({ name: 'codeoutline_status' });
+        let complete = false;
+        running = client.callTool({ name: 'codeoutline_rebuild', arguments: { projectPath: large } }, undefined, { signal: abort.signal });
+        running.then(() => { complete = true; }, () => { complete = true; });
+        await delay(50);
+        for (let round = 0; round < 2; round++) {
+            const started = Date.now();
+            const result = await client.callTool({ name: 'codeoutline_explore', arguments: { query: 'quick_target' } });
+            const elapsed = Date.now() - started;
+            t.diagnostic(`queued query busy response: ${elapsed}ms`);
+            assert.equal(result.isError, true);
+            assert.equal(result.structuredContent.error.code, 'busy');
+            assert.equal(result.structuredContent.error.retryable, true);
+            assert.equal(result.structuredContent.error.retryAfterMs, 250);
+            assert.ok(elapsed < 1000, `queue response took ${elapsed}ms`);
+            assert.equal(complete, false, 'active indexing continues');
+        }
+        abort.abort(new Error('test cancelled')); await assert.rejects(running, /cancel|abort/i);
+        // Status waits until the active job has acknowledged cancellation.
+        await client.callTool({ name: 'codeoutline_status' });
+        const next = await client.callTool({ name: 'codeoutline_explore', arguments: { query: 'quick_target' } });
+        assert.notEqual(next.isError, true); assert.match(next.content[0].text, /return 1/);
+    } finally {
+        abort.abort(new Error('cleanup')); await running?.catch(() => {});
+        await client.close(); await endpoint.close(); await rm(root, { recursive: true, force: true });
+    }
+});
+
 test('cancellation during startup closes the process and allows another request', { timeout: 10000 }, async () => {
     const root = await mkdtemp(join(tmpdir(), 'codeoutline-startup-'));
     const worker = new LuaWorker();

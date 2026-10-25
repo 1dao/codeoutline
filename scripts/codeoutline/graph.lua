@@ -410,15 +410,6 @@ local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired, accept,
         end
     end
     if not cands then return nil, 'no indexed target', macro_state end
-    -- A published Lua global can share its spelling with private helpers.
-    -- Keep lexical same-file matches and real global definitions, but do not
-    -- let unrelated private functions make a known export ambiguous.
-    local published = false
-    if G.files[f].language == 'lua' and kind == 'call' and not recv and #cands > 1 then
-        for i = 1, math.min(#cands, M.MAX_CANDIDATES) do
-            if lua_bindings.exported(G.nodes[cands[i]], name, G.lua_global_export_tables) then published = true; break end
-        end
-    end
     -- Score first: score() rejects other languages and statics of other
     -- files, so "is there a real definition?" is only asked among the
     -- candidates this call could actually reach. (Asking it over all
@@ -435,7 +426,7 @@ local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired, accept,
         local cid = cands[i]
         local node = G.nodes[cid]
         if cid ~= src_id and accept[node.kind]
-            and (not published or not node['local'] or G.node_file[cid] == f
+            and (G.files[f].language ~= 'lua' or not node['local'] or G.node_file[cid] == f
                 or lua_bindings.exported(node, name, G.lua_global_export_tables))
             and (not local_only or (locality(G, f, G.node_file[cid], node, deps, paired) or 0) > 0) then
             local s = score(G, f, src_id, kind, recv, cid, deps, paired, owner)
@@ -631,6 +622,10 @@ function M.query(symbols, opts)
         'max_expanded must be a positive integer')
     local Q = setmetatable({ out = {}, inn = {},
         stats = { expanded = 0, incoming_scans = 0, resolved_refs = 0 }, incomplete = false }, { __index = symbols })
+    local reasons = {}; Q.stats.incomplete_reasons = reasons
+    local function incomplete(reason) Q.incomplete = true; reasons[reason] = true end
+    local resolution, observe = require('codeoutline.resolution').new()
+    Q.stats.resolution = resolution
     local dependencies, references = {}, {}
     local js_context = js_resolution.context(symbols)
     js_context.include_paths = opts.include_paths
@@ -644,6 +639,17 @@ function M.query(symbols, opts)
     Q.stats.rust = js_context.rust_stats
     local report = opts.explain and require('codeoutline.query_report').new() or nil
     Q.report = report
+    if report then
+        local add = report.add
+        function report:add(entry)
+            -- Ordinary sites carry a reference index and are counted below.
+            -- Dispatch collectors can instead report an unresolved synthetic site.
+            if entry.reason and not entry.target and not entry.reference then
+                observe('dispatch:' .. entry.source, (entry.line or 0) .. ':' .. (entry.call or ''), 'call', nil, entry.reason)
+            end
+            return add(self, entry)
+        end
+    end
     local indirect = require('codeoutline.indirect').query(symbols, opts.dispatch_rules, report)
     local static_dispatch = require('codeoutline.static_dispatch').query(symbols, report)
     local implementations = require('codeoutline.implementations').context(symbols, js_context, report)
@@ -652,11 +658,19 @@ function M.query(symbols, opts)
     Q.stats.events = events.stats
     local callback_loops = require('codeoutline.lua_callback_loops').context(symbols, js_context, report)
     Q.stats.callback_loops = callback_loops.stats
+    local function context_limits()
+        if js_context.include_incomplete then incomplete('include_closure_limit') end
+        if js_context.workspace_incomplete then incomplete('js_workspace_analysis_incomplete') end
+        if js_context.go_incomplete then incomplete('go_module_analysis_incomplete') end
+        if js_context.go_methods_incomplete then incomplete('go_method_set_analysis_incomplete') end
+        if js_context.cpp_receivers_incomplete then incomplete('cpp_receiver_analysis_incomplete') end
+        if js_context.rust_incomplete then incomplete('rust_resolution_incomplete') end
+    end
     local function deps(f)
         local entry = dependencies[f]
         if not entry then
             local direct, paired, incomplete = M.visible_dependencies(symbols, f, js_context)
-            if incomplete then Q.incomplete = true end
+            if incomplete then Q.incomplete = true; reasons.include_closure_limit = true end
             entry = { direct, paired }; dependencies[f] = entry
         end
         return entry[1], entry[2]
@@ -664,7 +678,7 @@ function M.query(symbols, opts)
     local function targets(f, i, explain)
         if static_dispatch.handles(f, i) or symbols.files[f].language == 'lua'
             and symbols.files[f].refs.kind[i] == 'call' and callback_loops.handles(f, i) then
-            if callback_loops.incomplete then Q.incomplete = true end
+            if callback_loops.incomplete then incomplete('lua_callback_analysis_incomplete') end
             return {}
         end
         local rec, ids = symbols.files[f], symbols.id_of[f]
@@ -674,9 +688,11 @@ function M.query(symbols, opts)
         local evidence = js_context.ordinary.evidence(f, i)
         local found, reason, macro_state = resolve_ref(symbols, f, ids[refs.from[i]], refs.name[i], refs.kind[i],
             refs.recv[i] or nil, direct, paired, nil, evidence, js_context, refs.line[i])
-        if macros.incomplete then Q.incomplete = true end
-        if js_context.workspace_incomplete or js_context.go_incomplete or js_context.go_methods_incomplete
-            or js_context.cpp_receivers_incomplete or js_context.rust_incomplete then Q.incomplete = true end
+        observe(f, i, refs.kind[i], found, reason)
+        if reason and reason:find('candidate scan limit reached', 1, true) then incomplete('candidate_scan_limit') end
+        if reason and reason:find('tied candidate limit reached', 1, true) then incomplete('tied_candidate_limit') end
+        if macros.incomplete then incomplete('cpp_macro_analysis_incomplete') end
+        context_limits()
         if report and explain and (refs.kind[i] == 'call' or refs.kind[i] == 'member_call') then
             if (not found or #found == 0) and explain == true then
                 report:add({ source = ids[refs.from[i]], line = refs.line[i], call = refs.name[i], reason = reason or 'unresolved reference',
@@ -698,7 +714,7 @@ function M.query(symbols, opts)
     end
     setmetatable(Q.out, { __index = function(cache, id)
         control.check()
-        if Q.stats.expanded >= limit then Q.incomplete = true; return nil end
+        if Q.stats.expanded >= limit then incomplete('graph_expansion_limit'); return nil end
         Q.stats.expanded = Q.stats.expanded + 1
         local f = assert(symbols.node_file[id], 'unknown symbol')
         local rec, ids = symbols.files[f], symbols.id_of[f]
@@ -717,7 +733,7 @@ function M.query(symbols, opts)
             edges[#edges + 1] = symbols.nodes[id].line
             edges[#edges + 1] = 'implementation'
         end
-        if implementations.incomplete then Q.incomplete = true end
+        if implementations.incomplete then incomplete('implementation_analysis_incomplete') end
         for _, edge in ipairs(indirect.outgoing(id)) do
             edges[#edges + 1] = edge.target
             edges[#edges + 1] = edge.line
@@ -733,13 +749,13 @@ function M.query(symbols, opts)
             edges[#edges + 1] = edge.line
             edges[#edges + 1] = edge.kind
         end
-        if events.incomplete then Q.incomplete = true end
+        if events.incomplete then incomplete('automatic_event_analysis_incomplete') end
         for _, edge in ipairs(callback_loops.outgoing(id)) do
             edges[#edges + 1] = edge.target
             edges[#edges + 1] = edge.line
             edges[#edges + 1] = edge.kind
         end
-        if callback_loops.incomplete then Q.incomplete = true end
+        if callback_loops.incomplete then incomplete('lua_callback_analysis_incomplete') end
         for _, i in ipairs(grouped[id] or {}) do
             control.check()
             for _, dst in ipairs(targets(f, i, true) or {}) do
@@ -784,16 +800,16 @@ function M.query(symbols, opts)
         -- A bounded impact query may retain verified edges from a completed
         -- prefix of the scan. They never enter the normal incoming cache.
         if progress then progress(incoming) end
-        if implementations.incomplete then Q.incomplete = true end
+        if implementations.incomplete then incomplete('implementation_analysis_incomplete') end
         local indirect_incoming = indirect.incoming(wanted)
         for src, edges in pairs(callback_loops.incoming(wanted)) do
             for _, edge in ipairs(edges) do push3(incoming, edge.target, src, edge.line, edge.kind) end
         end
-        if callback_loops.incomplete then Q.incomplete = true end
+        if callback_loops.incomplete then incomplete('lua_callback_analysis_incomplete') end
         for src, edges in pairs(events.incoming(wanted)) do
             for _, edge in ipairs(edges) do push3(incoming, edge.target, src, edge.line, edge.kind) end
         end
-        if events.incomplete then Q.incomplete = true end
+        if events.incomplete then incomplete('automatic_event_analysis_incomplete') end
         for src, edges in pairs(static_dispatch.incoming(wanted)) do
             for _, edge in ipairs(edges) do push3(incoming, edge.target, src, edge.line, edge.kind) end
         end
@@ -836,8 +852,7 @@ function M.query(symbols, opts)
         -- selective name test first. Checkpoints run per file and per chunk.
         local files = symbols.files
         local candidates = js_context.ordinary.candidates(wanted)
-        if js_context.workspace_incomplete or js_context.go_incomplete or js_context.go_methods_incomplete
-            or js_context.cpp_receivers_incomplete then Q.incomplete = true end
+        context_limits()
         for _, f in ipairs(symbols.file_order) do
             control.check()
             local language = files[f].language
@@ -882,7 +897,7 @@ function M.query(symbols, opts)
             ::next_incoming_file::
         end
         -- Interrupted scans never publish partial caller lists.
-        if js_context.rust_incomplete then self.incomplete = true end
+        context_limits()
         for id, edges in pairs(incoming) do rawset(self.inn, id, edges) end
     end
     setmetatable(Q.inn, { __index = function(cache, id)

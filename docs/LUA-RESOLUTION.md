@@ -120,6 +120,13 @@ Bare calls prefer a known published function over unrelated private functions
 with that spelling; same-file local definitions still take precedence. Direct
 definitions such as `g_exports.aaa = function() end` use the same export evidence.
 
+Name fallback always excludes another file's `local` functions unless explicit
+global-export evidence publishes that name. An unresolved global call cannot
+borrow a private helper merely because its spelling is unique in the project.
+This rule is shared by exploration, callers, impact analysis and navigation;
+same-file lexical bindings and resolved module/global export aliases retain
+their existing paths.
+
 Aliases use the existing name index for definitions, references and callers.
 Configuration is reread on the next query/request, including unsaved documents.
 Changing the list rebuilds symbol tables from cached records without reparsing

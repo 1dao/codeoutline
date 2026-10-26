@@ -502,7 +502,7 @@ function Completion:types(name, f, scope, at)
 end
 
 function Completion:expired()
-    if os.clock() > self.deadline then self.incomplete = true; return true end
+    if xtimer.now_ms() > self.deadline then self.incomplete = true; return true end
     return false
 end
 
@@ -863,7 +863,8 @@ function Completion:entries(target)
     if target.cpp_namespace then
         local bindings, result = require('codeoutline.cpp_types'), {}
         local any = setmetatable({}, { __index = function() return true end })
-        for _, entry in ipairs(bindings.namespace_members(self.V, self.f, target.cpp_namespace, self.V.js_context, self.offset)) do
+        for _, entry in ipairs(bindings.namespace_members(self.V, self.f, target.cpp_namespace, self.V.js_context, self.offset,
+            nil, nil, function() return self:expired() end)) do
             if self:expired() then break end
             local ids = bindings.resolve(self.V, self.f, '::' .. target.cpp_namespace .. '::' .. entry.name,
                 { context = self.V.js_context, at = self.offset, accept = any })
@@ -981,7 +982,7 @@ function M.complete(req)
     local V = navigation.view(req.session, req.root, req.includePaths)
     local f = V.add(doc)
     if not f then return { items = {} } end
-    local self = setmetatable({ V = V, f = f, doc = doc, deadline = os.clock() + M.BUDGET_SECONDS,
+    local self = setmetatable({ V = V, f = f, doc = doc, deadline = xtimer.now_ms() + M.BUDGET_SECONDS * 1000,
         incomplete = false }, Completion)
     self.rec, self.T = full(V, f)
     if not self.rec or not self.T then return { items = {} } end
@@ -998,6 +999,8 @@ function M.complete(req)
     self.rust_static = self.language == 'rust' and is_member and text_of(T, op) == '::'
     if req.trigger and not is_member then return { items = {} } end
     self.fn, self.owner = self:scope()
+    local prefix = t and T.k[t] == 'id' and T.e[t] >= offset
+        and doc.source:sub(T.s[t], offset):lower() or ''
     self.aliases = module_aliases(T, self.language)
     if self.language == 'go' then self.aliases = require('codeoutline.go_modules').aliases(V, f, V.js_context) end
     local entries = {}
@@ -1035,13 +1038,6 @@ function M.complete(req)
                 detail = entry.type and (entry.type .. ' ' .. entry.name) or nil }
         end
         for alias in pairs(self.aliases) do entries[#entries + 1] = { name = alias, kind = 'namespace', detail = 'module' } end
-        if self.language == 'cpp' then
-            local owner = self.fn and self.rec.nodes[self.fn] or self.owner and self.rec.nodes[self.owner]
-            local scope = owner and (CALLABLE[owner.kind] and owner.qualified:match('^(.*)::[^:]+$') or owner.qualified)
-            for _, entry in ipairs(require('codeoutline.cpp_types').imported_members(V, f, scope, offset, V.js_context)) do
-                entries[#entries + 1] = entry
-            end
-        end
         if self.language == 'csharp' then
             local bindings = require('codeoutline.csharp_bindings')
             for _, entry in ipairs(bindings.usings(V, f, self.offset, V.js_context)) do
@@ -1099,6 +1095,12 @@ function M.complete(req)
                 end
             end
         end
+        if self.language == 'cpp' and not self:expired() then
+            local owner = self.fn and self.rec.nodes[self.fn] or self.owner and self.rec.nodes[self.owner]
+            local scope = owner and (CALLABLE[owner.kind] and owner.qualified:match('^(.*)::[^:]+$') or owner.qualified)
+            for _, entry in ipairs(require('codeoutline.cpp_types').imported_members(V, f, scope, offset, V.js_context,
+                function() return self:expired() end, prefix)) do entries[#entries + 1] = entry end
+        end
         if self.owner or self.fn then
             local ids = self:self_types()
             for _, entry in ipairs(self:members(ids)) do entries[#entries + 1] = entry end
@@ -1106,8 +1108,6 @@ function M.complete(req)
     end
     -- Preserve editor-side fuzzy filtering, but keep prefix matches ahead of
     -- unrelated items when a large include tree exceeds the response limit.
-    local prefix = t and T.k[t] == 'id' and T.e[t] >= offset
-        and doc.source:sub(T.s[t], offset):lower() or ''
     if prefix ~= '' and #entries > M.MAX_ITEMS then
         local ordered = {}
         for _, entry in ipairs(entries) do

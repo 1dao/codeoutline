@@ -84,7 +84,8 @@ local function view(session, root, include_paths, only)
     V.js_context.lua = require('codeoutline.lua_bindings').context(V)
     V.js_context.ordinary = require('codeoutline.ordinary_bindings').context(V, V.js_context, function(f)
         return V.drafts[f] and V.drafts[f].source
-    end, { cache = binding_cache })
+    end, { cache = binding_cache, parsed = function(f) return M.full(V, f) end })
+    V.js_context.lua.ordinary = V.js_context.ordinary
     for _, name in ipairs({ 'files', 'nodes', 'node_file', 'id_of', 'file_index', 'file_dir' }) do
         V[name] = setmetatable({}, { __index = G[name] })
     end
@@ -190,7 +191,7 @@ end
 -- Targets of one occurrence of name in file f, enclosed by node index from.
 local function resolve_site(V, f, from, name, kind, recv, evidence, offset, index, cursor_line)
     if kind == 'type' then
-        local site = index and (V.js_context.ordinary.data(f).type_sites or {})[index]
+        local site = type(evidence) == 'table' and evidence
         if not site then return {}, 'unsupported type position' end
         return require('codeoutline.type_references').resolve(V, f, from > 0 and V.id_of[f][from] or nil, site, V.js_context)
     end
@@ -257,12 +258,18 @@ local function resolve_site(V, f, from, name, kind, recv, evidence, offset, inde
 end
 
 -- What the cursor names: a declaration, an indexed reference, or another identifier.
-local function find_cursor(doc, offset, strict)
-    local rec = doc:parse()
+local function find_cursor(doc, offset, strict, parsed)
+    local rec = parsed or doc:parse()
     local function inside(a, b) return a <= offset and (offset < b or (not strict and offset == b)) end
     for n, node in ipairs(rec.nodes) do
         if node.name_start and inside(node.name_start, node.name_end) then
             return { decl = n, name = node.name, first = node.name_start, last = node.name_end }
+        end
+    end
+    for _, site in ipairs(rec.type_sites or {}) do
+        if inside(site.first, site.last) then
+            return { from = site.from, name = site.name, kind = 'type', recv = site.recv, evidence = site,
+                first = site.first, last = site.last }
         end
     end
     local refs = rec.refs
@@ -280,9 +287,12 @@ end
 
 local function cursor(doc, offset, V, f, include_inactive)
     local found = find_cursor(doc, offset, true) or find_cursor(doc, offset, false)
-    if found then return found end
+    if found and found.decl then return found end
     local rec, T
     if V then rec, T = M.full(V, f) end
+    local typed = rec and (find_cursor(doc, offset, true, rec) or find_cursor(doc, offset, false, rec))
+    if typed then return typed end
+    if found then return found end
     rec = rec or doc:parse()
     T = T or doc:tokens()
     if not T then return nil end
@@ -362,7 +372,7 @@ function M.full(V, f, native)
         local entry = draft.full
         if not entry.rec or native and not entry.foreign then
             entry.rec, entry.tokens = parse.parse_tokens(draft.path or V.files[f].path, draft.source,
-                { foreign = native, language = draft:parse().language })
+                { foreign = native, language = draft:parse().language, ordinary_bindings = true })
             entry.foreign = native
         end
         return entry.rec, entry.tokens, draft
@@ -374,7 +384,8 @@ function M.full(V, f, native)
         local doc = source_doc(V, f)
         -- Read/parse failures are transient, unlike a successful empty result.
         if not doc then return nil end
-        local rec, tokens = parse.parse_tokens(key.path, doc.source, { foreign = native, language = key.language })
+        local rec, tokens = parse.parse_tokens(key.path, doc.source,
+            { foreign = native, language = key.language, ordinary_bindings = true })
         if not rec then return nil end
         entry = { rec = rec, tokens = tokens, foreign = native }
         cache_full(key, entry)
@@ -553,6 +564,11 @@ local function scan(V, targets, name)
     local wanted = { [name] = true }
     for id in pairs(targets) do
         for _, alias in ipairs(require('codeoutline.lua_bindings').aliases(V.nodes[id], V.lua_global_export_tables)) do wanted[alias] = true end
+        local f = V.node_file[id]
+        if V.files[f].language == 'lua' then
+            local n = id - V.id_of[f][1] + 1
+            for alias, index in pairs(V.files[f].lua_exports or {}) do if index == n then wanted[alias] = true end end
+        end
     end
     local files = {}
     for i, f in ipairs(V.file_order) do files[i] = f end
@@ -565,6 +581,12 @@ local function scan(V, targets, name)
             for i in pairs(require('codeoutline.rust_resolution').alias_refs(V, f, targets, V.js_context)) do alias_refs[i] = true end
         end
         local refs = V.files[f].refs
+        local lua_evidence = refs.lua_binding
+        if V.files[f].language == 'lua' and not lua_evidence then
+            for _, imp in ipairs(V.files[f].lua_imports or {}) do
+                if imp.member and wanted[imp.member] then lua_evidence = V.js_context.ordinary.data(f).refs.lua_binding; break end
+            end
+        end
         local names = refs.name
         local aliases = {}
         if V.files[f].language == 'kotlin' then
@@ -576,7 +598,7 @@ local function scan(V, targets, name)
             if i % 4096 == 0 then control.check() end
             if wanted[names[i]] or aliases[names[i]] or aliases[refs.recv[i]]
                 or alias_refs[i]
-                or (refs.lua_binding and refs.lua_binding[i] ~= '') then
+                or (lua_evidence and lua_evidence[i] ~= '') then
                 if os.clock() > deadline then return hits, true end
                 for _, dst in ipairs(resolve_site(V, f, refs.from[i], names[i], refs.kind[i], refs.recv[i], nil, refs.start and refs.start[i] or nil, i)) do
                     if targets[dst] then hits[#hits + 1] = { f, i }; break end
@@ -1120,8 +1142,8 @@ function handlers.lsp_warm(req)
         if not rec then return false end
         files, bytes = files + 1, bytes + size
         local lang = rec.language
-        if lang == 'cpp' or lang == 'csharp' or lang == 'python' or lang == 'javascript'
-            or lang == 'typescript' or lang == 'arkts' then V.js_context.ordinary.data(target) end
+        if require('codeoutline.type_uses').languages[lang] or lang == 'python' or lang == 'javascript'
+            or lang == 'lua' then V.js_context.ordinary.data(target) end
         return true
     end
     warm(f)
@@ -1175,7 +1197,7 @@ function handlers.lsp_definition(req)
         if definitions and #definitions > 0 then targets = definitions end
     end
     -- Selecting a loader's member asks for that value, not the imported file.
-    if #targets == 0 and c and c.evidence and c.evidence:match('^lua%-value:') then return {} end
+    if #targets == 0 and c and type(c.evidence) == 'string' and c.evidence:match('^lua%-value:') then return {} end
     local importer = false
     if c and not c.decl then
         -- `require`/`dofile` themselves name the file they load, not a same-named project function.
@@ -1425,7 +1447,8 @@ function handlers.lsp_references(req)
         end
         local details = engine.query(V, { query_source = function(_, path)
             local source = source_doc(V, V.file_index[path]); return source and source.source, false
-        end }, type_ids, { cache = binding_cache, max_nodes = M.MAX_RESULTS, include_paths = req.includePaths })
+        end }, type_ids, { cache = binding_cache, max_nodes = M.MAX_RESULTS, include_paths = req.includePaths,
+            time_limit_ms = 600, max_files = 16 })
         local result = {}
         if req.includeDeclaration then for _, target in ipairs(details.targets) do result[#result + 1] = location(V, target.id) end end
         for _, ref in ipairs(details.references) do

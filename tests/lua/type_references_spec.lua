@@ -14,6 +14,33 @@ local function project(files)
     return graph.build({ files = records }), { root = root, query_source = function(_, path) return assert(files[path]), false end }
 end
 spec.describe('explicit type references', function()
+    spec.it('keeps derived type, receiver, local and registry evidence out of compact records', function()
+        local cases = {
+            { 'a.cpp', 'struct User {}; User run(User arg) { User local; return arg; }' },
+            { 'a.ts', 'export class User {}\nexport function run(arg: User): User { return arg; }' },
+            { 'a.lua', 'local M = {}\nfunction M.run() end\nM.run()\nreturn M\n' },
+        }
+        local collector = require('codeoutline.type_uses')
+        local original, count = collector.collect, 0
+        collector.collect = function(...) count = count + 1; return original(...) end
+        local ok, err = pcall(function()
+            for _, case in ipairs(cases) do
+                local compact = parse.parse(case[1], case[2], { ranges = false })
+                spec.equal(compact.type_sites, nil); spec.equal(compact.type_parameters, nil)
+                spec.equal(compact.lua_locals, nil); spec.equal(compact.static_dispatch, nil)
+                spec.equal(compact.refs.lua_binding, nil); spec.equal(compact.refs.js_receiver, nil)
+                for _, kind in ipairs(compact.refs.kind) do spec.truthy(kind ~= 'type') end
+                local full = parse.parse(case[1], case[2], { ordinary_bindings = true })
+                spec.equal(#full.refs.name, #compact.refs.name, case[1])
+                for i, name in ipairs(compact.refs.name) do
+                    spec.equal(full.refs.name[i], name); spec.equal(full.refs.kind[i], compact.refs.kind[i])
+                end
+            end
+            spec.equal(count, #cases, 'only query parses may collect type positions')
+        end)
+        collector.collect = original
+        if not ok then error(err, 0) end
+    end)
     for _, case in ipairs({
         { 'a.cpp', 'struct User {}; User run(User arg) { User local; return arg; }', 3 },
         { 'A.java', 'class User {} class Work { User run(User arg) { User local; return arg; } }', 3 },
@@ -151,12 +178,27 @@ one::User run(two::User wrong) { one::User local; const char* text = "one::User"
             local _, info = service.type_references(folder, 'User', opts)
             spec.equal(#info.references, 2)
             local idx = service.resident(folder)
-            for _, record in pairs(idx.files) do spec.equal(record.type_sites, nil); spec.equal(record.type_parameters, nil) end
+            for _, record in pairs(idx.files) do
+                spec.equal(record.type_sites, nil); spec.equal(record.type_parameters, nil)
+                for _, kind in ipairs(record.refs.kind) do spec.truthy(kind ~= 'type') end
+            end
             idx:save(); service.forget(folder)
         end
         write('disk/use.cpp', '#include "model.hpp"\nvoid run() {}\n')
         local _, info = service.type_references(folder, 'User', opts); spec.equal(#info.references, 0)
         service.forget(folder)
+    end)
+    spec.it('reports candidate scan limits after preserving already validated references', function()
+        local files = { ['a.cpp'] = 'struct User {}; User run(User arg) { return arg; }',
+            ['z.cpp'] = 'void unrelated() {}' }
+        local records = {}; for path, source in pairs(files) do records[path] = parse.parse(path, source, { ranges = false }) end
+        local G = graph.build({ files = records })
+        local idx = { query_source = function(_, path) return assert(files[path]), false end }
+        local old = types.MAX_SCAN_FILES; types.MAX_SCAN_FILES = 0
+        local ok, output, info = pcall(types.run, G, idx, 'User')
+        types.MAX_SCAN_FILES = old
+        spec.truthy(ok, output); spec.equal(#info.references, 2)
+        spec.equal(info.query_stats.incomplete_reasons.type_reference_scan_file_limit, true)
     end)
     spec.it('keeps lightweight inheritance summaries separate from full binding evidence', function()
         local source = 'struct User {}; using Account = User; struct Work : Account { User Run(User arg) { return arg; } };'

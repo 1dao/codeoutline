@@ -47,6 +47,7 @@ end
 
 function M.collect(r, T, bm)
     r.lua_imports, r.lua_exports, r.lua_locals = {}, {}, {}
+    local details = not r.defer_analysis and (r.ranges or r.ordinary_bindings)
     local scopes, stack, params, bindings, function_scopes = {}, {}, {}, {}, {}
     for i = 1, T.n do
         if stack[#stack] and bm[stack[#stack]] == i then stack[#stack] = nil end
@@ -118,27 +119,40 @@ function M.collect(r, T, bm)
     end
     -- Query-only lexical bindings travel with the cached tokens, not the index.
     T.lua_bindings = bindings
-    for name, list in pairs(bindings) do
-        for _, b in ipairs(list) do
-            if b.hint:match('^lua%-local:') then
-                local members = M.local_members(r.nodes, scopes, name, b.token, b.a, b.b)
-                r.lua_locals[#r.lua_locals + 1] = members
-                b.hint = 'lua-local:' .. #r.lua_locals
+    if details then
+        for name, list in pairs(bindings) do
+            for _, b in ipairs(list) do
+                if b.hint:match('^lua%-local:') then
+                    local members = M.local_members(r.nodes, scopes, name, b.token, b.a, b.b)
+                    r.lua_locals[#r.lua_locals + 1] = members
+                    b.hint = 'lua-local:' .. #r.lua_locals
+                end
             end
         end
-    end
-    for _, ref in ipairs(r.refs) do
-        if not ref.lua_binding then
-            local best
-            for _, b in ipairs(bindings[ref.recv or ref.name] or {}) do
-                if b.token <= ref.tok and b.a <= ref.tok and b.b >= ref.tok
-                    and (not best or b.a > best.a or (b.a == best.a and b.token > best.token)) then best = b end
+        for _, ref in ipairs(r.refs) do
+            if not ref.lua_binding then
+                local best
+                for _, b in ipairs(bindings[ref.recv or ref.name] or {}) do
+                    if b.token <= ref.tok and b.a <= ref.tok and b.b >= ref.tok
+                        and (not best or b.a > best.a or (b.a == best.a and b.token > best.token)) then best = b end
+                end
+                if best and (ref.recv or best.imported) then
+                    local value = best.hint:match('^lua%-value:')
+                    ref.lua_binding = value and (not ref.recv and best.hint or '?') or (ref.recv and best.hint or '?')
+                end
+                if ref.recv and (T:text(ref.tok - 3) == '.' or T:text(ref.tok - 3) == ':') then ref.lua_binding = '?' end
             end
-            if best and (ref.recv or best.imported) then
-                local value = best.hint:match('^lua%-value:')
-                ref.lua_binding = value and (not ref.recv and best.hint or '?') or (ref.recv and best.hint or '?')
-            end
-            if ref.recv and (T:text(ref.tok - 3) == '.' or T:text(ref.tok - 3) == ':') then ref.lua_binding = '?' end
+        end
+    else
+        r.lua_locals = nil
+        local wanted = {}
+        for _, ref in ipairs(r.refs) do
+            local name = ref.recv or ref.name
+            if bindings[name] then wanted[name] = true end
+        end
+        if next(wanted) then
+            r.lua_binding_names = {}; for name in pairs(wanted) do r.lua_binding_names[#r.lua_binding_names + 1] = name end
+            table.sort(r.lua_binding_names)
         end
     end
 
@@ -498,7 +512,9 @@ function M.resolve(G, f, name, hint, ctx, recv)
     if hint == '?' then return {} end
     local local_index = tonumber(hint:match('^lua%-local:(%d+)$'))
     if local_index then
-        local n = ((G.files[f].lua_locals or {})[local_index] or {})[name]
+        local rec = G.files[f]
+        local locals = rec.lua_locals or ctx and ctx.ordinary and ctx.ordinary.data(f).lua_locals or {}
+        local n = (locals[local_index] or {})[name]
         return n and { G.id_of[f][n] } or {}
     end
     local value = tonumber(hint:match('^lua%-value:(%d+)$'))

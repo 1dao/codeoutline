@@ -14,7 +14,8 @@ local callable = { ['function'] = true, method = true, prototype = true, constru
 local containers = { class = true, struct = true, union = true, interface = true, record = true, enum = true }
 
 function M.collect(r, T)
-    if not M.languages[r.language] or r.cpp_aliases_only or r.dispatch_only then return end
+    if not M.languages[r.language] or r.cpp_aliases_only or r.dispatch_only or r.collect_type_uses == false
+        or not (r.ordinary_bindings or r.ranges) then return end
     local language, sites, names, seen = r.language, {}, {}, {}
     local details = r.ordinary_bindings or r.ranges
     local suffix = language == 'typescript' or language == 'arkts' or language == 'kotlin' or language == 'rust'
@@ -254,16 +255,6 @@ function M.collect(r, T)
         while T:text(a - 1) == separator and T.k[a - 2] == 'id' do a = a - 2 end
         if T:text(a - 1) == 'new' then add(i, 'construction', a, i) end
     end
-    local typed = {}; for _, site in ipairs(sites) do typed[site.tok] = site end
-    local count, kept = #r.refs, 0
-    for i = 1, count do
-        local ref = r.refs[i]
-        local site = typed[ref.tok]
-        if not site or site.type_role == 'construction' or ref.name ~= site.name then
-            kept = kept + 1; r.refs[kept] = ref
-        end
-    end
-    for i = kept + 1, count do r.refs[i] = nil end
-    for _, site in ipairs(sites) do r.refs[#r.refs + 1] = site end
+    r.type_use_refs = sites
 end
 return M

@@ -760,6 +760,40 @@ Manager* Factory();
             position = doc:position(assert(source:find('->value', 1, true)) + 2) })
         spec.equal(#result, 1); spec.equal(result[1].uri, nav_uri(prefix .. 'api.h')); spec.equal(result[1].range.start.line, 0)
     end)
+    spec.it('shares one warmed semantic parse with C, Go and Rust type navigation and completion', function()
+        for _, case in ipairs({
+            { 'WarmLazyC.c', 'c', 'struct WarmLazyCType {};\nstruct WarmLazyCType* run(struct WarmLazyCType* arg) { return arg; }\nWarmLazyC', 'WarmLazyCType' },
+            { 'WarmLazyGo.go', 'go', 'package warmed\ntype WarmLazyGoType struct {}\nfunc Run(arg *WarmLazyGoType) {}\nWarmLazyGo', 'WarmLazyGoType' },
+            { 'WarmLazyRust.rs', 'rust', 'struct WarmLazyRustType {}\nfn run(arg: WarmLazyRustType) {}\nWarmLazyRust', 'WarmLazyRustType' },
+        }) do
+            local file, language, source, name = table.unpack(case)
+            nav_write(file, source)
+            service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+            local uri, session = nav_uri(file), 'lazy-' .. language
+            navigation.sync({ session = session, open = { [uri] = 1 }, changed = {
+                [uri] = { source = source, version = 1, language = language } } })
+            local original, parses = parse.parse_tokens, 0
+            parse.parse_tokens = function(path, ...)
+                if path:match('WarmLazy') then parses = parses + 1 end
+                return original(path, ...)
+            end
+            local ok, err = pcall(function()
+                spec.truthy(nav({ method = 'lsp_warm', session = session, uri = uri }).files > 0)
+                local before, doc = parses, docs.new(uri, source, 1, language)
+                local first = assert(source:find(name, assert(source:find('\n')) + 1, true))
+                if language == 'go' then first = assert(source:find(name, first + #name, true)) end
+                local started = xtimer.now_ms()
+                local found = nav({ method = 'lsp_definition', session = session, uri = uri, position = doc:position(first - 1) })
+                spec.equal(#found, 1, file); spec.equal(found[1].uri, uri)
+                spec.truthy(xtimer.now_ms() - started < 1000)
+                local completed = nav({ method = 'lsp_completion', session = session, uri = uri, position = doc:position(#source) })
+                spec.truthy(completed and #completed.items > 0, file)
+                spec.equal(parses, before, 'warm navigation and completion must not reparse ' .. file)
+            end)
+            parse.parse_tokens = original; navigation.close(session)
+            if not ok then error(err, 0) end
+        end
+    end)
     spec.it('warms navigation caches without bypassing source validation or dependency limits', function()
         nav_write('WarmTarget.lua', 'local M = {}\nfunction M.warm_save() end\nreturn M\n')
         local source = "local api = dofile('WarmTarget.lua')\napi.warm_save()\n"
@@ -1693,6 +1727,15 @@ int luaopen_native_test(lua_State *L) { luaL_setfuncs(L, methods, 0); luaL_newli
             spec.equal(#found, 1); spec.equal(found[1].uri, nav_uri('ExtractedMisc.lua'))
             spec.equal(range_text('ExtractedMisc.lua', found[1].range), 'to_bool')
         end
+        local client_uri = nav_uri('ExtractedClient.lua')
+        local shorter = source:gsub('%.to_bool', '.to_boo')
+        navigation.sync({ session = 'extracted-values', open = { [client_uri] = 1 }, changed = {
+            [client_uri] = { version = 1, language = 'lua', source = shorter } } })
+        local changed_doc = docs.new(client_uri, shorter, 1, 'lua')
+        spec.equal(#nav({ method = 'lsp_definition', session = 'extracted-values', uri = client_uri,
+            position = changed_doc:position(assert(shorter:find(').to_boo', 1, true)) + #').to_boo' - 1) }), 0,
+            'an unresolved imported member at token end must not fall back to the module file')
+        navigation.sync({ session = 'extracted-values', open = {} })
         local refs = nav({ method = 'lsp_references', session = 'extracted-values', uri = nav_uri('ExtractedMisc.lua'),
             position = { line = 1, character = 12 }, includeDeclaration = false })
         spec.equal(#refs, 4, 'both imported values and both calls refer to the exported function')
@@ -3623,6 +3666,28 @@ spec.describe('LSP completion', function()
         completion.BUDGET_SECONDS = budget
         spec.truthy(result.isIncomplete)
         navigation.sync({ session = 'complete', open = {} })
+    end)
+    spec.it('keeps basic completions when wall time expires during C++ alias expansion', function()
+        local source = 'void WallBudgetFn() {}\nvoid use() { WallBudget }\n'
+        local path = comp_root .. '/WallBudget.cpp'
+        write(path, source)
+        service.refresh(comp_root, { cache_path = comp_root .. '/cache.idx', lister = 'walk' })
+        local doc = docs.read(path)
+        local bindings = require('codeoutline.cpp_types')
+        local original, clock, elapsed = bindings.imported_members, xtimer.now_ms, 0
+        bindings.imported_members = function(...)
+            elapsed = 1000
+            return original(...)
+        end
+        xtimer.now_ms = function() return clock() + elapsed end
+        local ok, result = pcall(navigation.execute, { method = 'lsp_completion', session = 'complete', root = comp_root,
+            uri = doc.uri, position = doc:position(assert(source:find('WallBudget }', 1, true)) - 1 + #'WallBudget') })
+        bindings.imported_members, xtimer.now_ms = original, clock
+        spec.truthy(ok, result)
+        spec.truthy(result.result.isIncomplete)
+        local found = false
+        for _, item in ipairs(result.result.items) do if item.label == 'WallBudgetFn' then found = true end end
+        spec.truthy(found, 'deadline-limited aliases must not hide known declarations')
     end)
     spec.it('reads declared types from signatures', function()
         local cases = {

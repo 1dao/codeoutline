@@ -82,6 +82,17 @@ function M.collect(r, T)
         r.static_dispatch_candidate = nil
         if not loops then return end
     end
+    -- Full indexing retains only a syntax candidate. Scope, registry writes
+    -- and resolved registrations belong to an open-file/query parse.
+    if not r.collect_static_dispatch and (r.defer_analysis or not r.ordinary_bindings and not r.ranges) then
+        local targets = {}
+        for _, i in ipairs(T:idents(1, T.n)) do
+            local prev = T:text(i - 1)
+            if prev == '=' or prev == '&' or prev == '{' or prev == ',' then targets[T:text(i)] = true end
+        end
+        r.static_dispatch_candidate = { targets = targets, syntax = true }
+        return
+    end
     local scopes, ends, stack, owners = {}, { [0] = T.n }, {}, {}
     local opens = { ['function'] = true, ['if'] = true, ['do'] = true, ['repeat'] = true }
     for i = 1, T.n do
@@ -442,7 +453,7 @@ function M.collect(r, T)
         site.registrations = valid and entries and not entries.unknown and entries or {}
         site.slots, site.binding = nil, nil
     end
-    if not r.collect_static_dispatch then
+    if not r.collect_static_dispatch and not r.ordinary_bindings and not r.ranges then
         local targets, members = {}, {}
         for _, site in ipairs(data.sites) do
             if site.name then members[site_key(site.from, site.line, site.ref_recv, site.name)] = true end
@@ -453,15 +464,26 @@ function M.collect(r, T)
     end
 end
 
-function M.query(G, report)
+function M.query(G, report, ctx)
     local graph = require('codeoutline.graph')
     local cache, entries = {}, 0
     local empty = { sites = {} }
+    local function remember(f, result)
+        entries = entries + 1 + #result.sites
+        for _, site in ipairs(result.sites) do entries = entries + #site.registrations end
+        assert(entries <= (M.max_query_entries or 100000), 'static dispatch query limit exceeded; narrow the project scope')
+        cache[f] = result
+        return result
+    end
     local function data(f)
         local rec = G.files[f]
         if rec.static_dispatch then return rec.static_dispatch end
         if not rec.static_dispatch_candidate or not G.root then return empty end
         if cache[f] then return cache[f] end
+        if ctx and ctx.ordinary then
+            local result = ctx.ordinary.data(f).static_dispatch or empty
+            return remember(f, result)
+        end
         local h = assert(io.open(G.root .. '/' .. rec.path, 'rb'), 'cannot read static dispatch source: ' .. rec.path)
         local raw = h:read('a'); h:close()
         local crc = xcompress and xcompress.crc32 and xcompress.crc32(raw) or xutils.sha256_hex(raw)
@@ -477,11 +499,7 @@ function M.query(G, report)
             assert(n.qualified == rec.nodes[i].qualified and n.line == rec.nodes[i].line, 'source encoding changed; refresh index: ' .. rec.path)
         end
         local result = parsed.static_dispatch or { sites = {} }
-        entries = entries + 1 + #result.sites
-        for _, site in ipairs(result.sites) do entries = entries + #site.registrations end
-        assert(entries <= (M.max_query_entries or 100000), 'static dispatch query limit exceeded; narrow the project scope')
-        cache[f] = result
-        return result
+        return remember(f, result)
     end
     local function scan(f, only, wanted)
         local result, deps, paired = {}
@@ -536,7 +554,7 @@ function M.query(G, report)
             local refs = G.files[f].refs
             if refs.kind[i] ~= 'member_call' then return false end
             local hint = G.files[f].static_dispatch_candidate
-            if type(hint) == 'table' then
+            if type(hint) == 'table' and hint.members then
                 return hint.members[site_key(refs.from[i], refs.line[i], refs.recv[i], refs.name[i])] == true
             end
             for _, site in ipairs(data(f).sites) do

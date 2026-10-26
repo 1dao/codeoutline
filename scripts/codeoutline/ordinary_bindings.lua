@@ -168,7 +168,8 @@ function M.context(G, ctx, source, options)
         local raw = read_source(f)
         cached = cached_data(rec, raw)
         if cached and not cached.cpp_aliases_only then return cached end
-        local parsed = assert(require('codeoutline.parse').parse(rec.path, raw,
+        local parsed = options.parsed and options.parsed(f)
+        parsed = parsed or assert(require('codeoutline.parse').parse(rec.path, raw,
             { ranges = false, ordinary_bindings = true, language = rec.language }))
         local function check(ok) assert(ok, 'source changed; refresh index before binding query: ' .. rec.path) end
         check(#parsed.nodes == #rec.nodes and #parsed.refs.name == #rec.refs.name)
@@ -180,12 +181,15 @@ function M.context(G, ctx, source, options)
                 and parsed.refs.line[i] == rec.refs.line[i] and parsed.refs.kind[i] == rec.refs.kind[i])
         end
         -- Keep only compact query evidence; source, tokens, and duplicate symbols die here.
-        local data = { refs = { binding = parsed.refs.binding, js_receiver = parsed.refs.js_receiver },
+        local data = { refs = { binding = parsed.refs.binding, js_receiver = parsed.refs.js_receiver, lua_binding = parsed.refs.lua_binding },
             js_exports = parsed.js_exports, python_imports = parsed.python_imports, cpp_aliases = parsed.cpp_aliases,
             csharp_usings = parsed.csharp_usings, csharp_statics = parsed.csharp_statics,
             csharp_scopes = parsed.csharp_scopes, csharp_parameters = parsed.csharp_parameters, csharp_access = parsed.csharp_access }
         data.implementation_evidence = parsed.implementation_evidence
+        data.lua_locals = parsed.lua_locals
+        data.static_dispatch = parsed.static_dispatch
         data.type_sites, data.type_parameters = parsed.type_sites, parsed.type_parameters
+        data.type_exclusions = parsed.type_exclusions
         data.go_methods = parsed.go_methods
         data.cpp_receivers = parsed.cpp_receivers
         data.cpp_macros = parsed.cpp_macros
@@ -194,8 +198,14 @@ function M.context(G, ctx, source, options)
         data.lua_callback_loops = parsed.lua_callback_loops
         data.rust_imports, data.rust_public = parsed.rust_imports, parsed.rust_public
         local type_count = 0; for _ in pairs(parsed.type_sites or {}) do type_count = type_count + 1 end
+        local static_count = 0
+        for _, site in ipairs(parsed.static_dispatch and parsed.static_dispatch.sites or {}) do
+            static_count = static_count + 1 + #site.registrations
+        end
         local weight = #raw + #parsed.refs.name * 128 + #(parsed.js_exports or {}) * 256
             + type_count * 256 + #(parsed.type_parameters or {}) * 96
+            + static_count * 256
+            + #(parsed.lua_locals or {}) * 256
             + #(parsed.python_imports or {}) * 256 + #(parsed.cpp_aliases or {}) * 256
             + #(parsed.csharp_usings or {}) * 256 + #(parsed.csharp_scopes or {}) * 256
             + #(parsed.csharp_parameters or {}) * 128 + #parsed.nodes * (parsed.implementation_evidence and 256 or 0)
@@ -221,10 +231,23 @@ function M.context(G, ctx, source, options)
         local kind = rec.refs.kind[i]
         if kind ~= 'call' and kind ~= 'member_call' and not (rec.language == 'csharp' and kind == 'new')
             and kind ~= 'ref' then return value end
-        -- JS already keeps receiver barriers. Only a bare blocked call can be
-        -- a newly supported lexical alias; typed/member calls need no reparse.
-        if js(rec) and kind ~= 'ref' and (kind ~= 'call' or value ~= '?') then return value end
-        if js(rec) and kind ~= 'ref' and not next(alias_hints(f)) then return value end
+        if rec.language == 'lua' then
+            if rec.refs.lua_binding then return value end
+            local wanted = rec.refs.recv[i] or rec.refs.name[i]
+            for _, imp in ipairs(rec.lua_imports or {}) do
+                if imp.member == rec.refs.name[i] then return evidence(C.data(f), i) or value end
+            end
+            for _, name in ipairs(rec.lua_binding_names or {}) do
+                if name == wanted then return evidence(C.data(f), i) or value end
+            end
+            return value
+        end
+        -- Explicit in-memory parses may already carry receiver evidence. Base
+        -- index records keep only imports/exports; their barriers are lazy.
+        if js(rec) and rec.refs.js_receiver then
+            if kind ~= 'ref' and (kind ~= 'call' or value ~= '?') then return value end
+            if kind ~= 'ref' and not next(alias_hints(f)) then return value end
+        end
         local recv = rec.refs.recv[i]
         if (rec.language == 'c' or rec.language == 'cpp') and kind == 'member_call' and not recv then
             local data = require('codeoutline.cpp_receivers').context(G, ctx).data(f)

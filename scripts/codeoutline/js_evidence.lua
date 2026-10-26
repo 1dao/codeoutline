@@ -75,6 +75,7 @@ function M.collect(r, T)
         end
     end
 
+    if r.defer_analysis or not r.ordinary_bindings and not r.ranges then return end
     -- Braces provide block lifetime; node ranges extend parameter bindings to bodies.
     local scopes, stack = {}, {}
     for i = 1, T.n do

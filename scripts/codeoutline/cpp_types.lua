@@ -362,7 +362,7 @@ end
 
 -- Namespace members are restricted to declarations visible to the requester.
 -- Overlay nodes replace the resident by_owner entries just as by_name does.
-function M.namespace_members(G, f, namespace, ctx, at, seen, depth)
+function M.namespace_members(G, f, namespace, ctx, at, seen, depth, expired)
     seen, depth = seen or {}, depth or 0
     if seen[namespace] or depth > 8 then return {} end
     seen[namespace] = true
@@ -383,13 +383,15 @@ function M.namespace_members(G, f, namespace, ctx, at, seen, depth)
     local any = setmetatable({}, { __index = function() return true end })
     for _, g in ipairs(files) do
         control.check()
+        if expired and expired() then return result end
         for _, alias in ipairs(M.aliases(G, g, ctx)) do
+            if expired and expired() then return result end
             if not alias.local_alias and alias.scope == namespace and (g ~= f or not at or alias.at <= at) then
                 if alias.kind == 'directive' and alias.target then
                     local ids = M.resolve(G, g, alias.target,
                         { scope = alias.scope, at = alias.at, exclude = alias.at, context = ctx, accept = { namespace = true } })
                     for _, id in ipairs(ids) do
-                        for _, entry in ipairs(M.namespace_members(G, f, G.nodes[id].qualified, ctx, at, seen, depth + 1)) do
+                        for _, entry in ipairs(M.namespace_members(G, f, G.nodes[id].qualified, ctx, at, seen, depth + 1, expired)) do
                             result[#result + 1] = entry
                         end
                     end
@@ -406,7 +408,7 @@ function M.namespace_members(G, f, namespace, ctx, at, seen, depth)
     return result
 end
 
-function M.imported_members(G, f, scope, at, ctx)
+function M.imported_members(G, f, scope, at, ctx, expired, prefix)
     local deps = require('codeoutline.graph').visible_dependencies(G, f, ctx)
     local result, names = {}, {}
     local any = setmetatable({}, { __index = function() return true end })
@@ -419,19 +421,29 @@ function M.imported_members(G, f, scope, at, ctx)
     table.sort(files, function(a, b) return G.files[a].path < G.files[b].path end)
     for _, g in ipairs(files) do
         control.check()
+        if expired and expired() then break end
         for _, alias in ipairs(M.aliases(G, g, ctx)) do
+            if expired and expired() then break end
             if active(alias, g) then
                 if alias.kind == 'directive' and alias.target then
                     local ids = M.resolve(G, g, alias.target,
                         { scope = alias.scope, at = alias.at, exclude = alias.at, context = ctx, accept = { namespace = true } })
                     for _, id in ipairs(ids) do
-                        for _, entry in ipairs(M.namespace_members(G, f, G.nodes[id].qualified, ctx, at)) do names[entry.name] = true end
+                        for _, entry in ipairs(M.namespace_members(G, f, G.nodes[id].qualified, ctx, at, nil, nil, expired)) do names[entry.name] = true end
                     end
                 else names[alias.name] = true end
             end
         end
     end
+    local ordered, rest = {}, {}
     for name in pairs(names) do
+        local bucket = prefix and name:sub(1, #prefix):lower() == prefix and ordered or rest
+        bucket[#bucket + 1] = name
+    end
+    table.sort(ordered); table.sort(rest)
+    for _, name in ipairs(rest) do ordered[#ordered + 1] = name end
+    for _, name in ipairs(ordered) do
+        if expired and expired() then break end
         local ids = M.resolve(G, f, name, { scope = scope, at = at, context = ctx, accept = any })
         for _, id in ipairs(ids) do
             local n = G.nodes[id]

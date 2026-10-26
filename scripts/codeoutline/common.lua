@@ -27,6 +27,8 @@ function M.new(path, language, opts)
         ranges = not opts or opts.ranges ~= false, collect_dispatch = opts and opts.dispatch,
         dispatch_only = opts and opts.dispatch_only, collect_static_dispatch = opts and opts.static_dispatch,
         cpp_aliases_only = opts and opts.cpp_aliases_only,
+        collect_type_uses = opts and opts.type_uses,
+        defer_analysis = opts and opts.analysis == false or nil,
         ordinary_bindings = opts and opts.ordinary_bindings,
         collect_foreign = opts and opts.foreign, omit_signatures = opts and opts.omit_signatures }
 end
@@ -43,7 +45,8 @@ end
 -- ti/tj: token range the node covers (used for ref attribution, then dropped).
 -- ni/nj: declaration name tokens; range_end overrides a synthetic block end.
 function M.add_node(r, T, f)
-    if r.language ~= 'lua' and r.language ~= 'python' and r.language ~= 'javascript' then f.type_token = f.ni or f.ti end
+    if not r.defer_analysis and r.collect_type_uses ~= false and (r.ranges or r.ordinary_bindings)
+        and r.language ~= 'lua' and r.language ~= 'python' and r.language ~= 'javascript' then f.type_token = f.ni or f.ti end
     if r.ordinary_bindings and (r.language == 'c' or r.language == 'cpp') then
         r.cpp_declaration_tokens = r.cpp_declaration_tokens or {}
         r.cpp_declaration_tokens[#r.nodes + 1] = f.ni or f.ti
@@ -148,12 +151,13 @@ function M.finish(r, T)
         return r
     end
     if T then require('codeoutline.function_values').collect(r, T) end
-    if T then require('codeoutline.type_uses').collect(r, T) end
+    if T and not r.defer_analysis and r.collect_type_uses ~= false and (r.ranges or r.ordinary_bindings) then require('codeoutline.type_uses').collect(r, T) end
     if T and r.collect_foreign and (r.language == 'c' or r.language == 'cpp') then
         require('codeoutline.foreign').collect(r, T)
     end
     r.collect_foreign = nil
     M.assign_refs(r)
+    if r.type_use_refs then M.assign_refs({ nodes = r.nodes, refs = r.type_use_refs }) end
     if T then require('codeoutline.static_dispatch').collect(r, T) end
     r.collect_static_dispatch = nil
     -- Query-only parse: preserve normal declaration/call attribution, but do
@@ -167,7 +171,7 @@ function M.finish(r, T)
     if T and r.ordinary_bindings then
         require('codeoutline.cpp_macros').collect(r, T)
         require('codeoutline.python_bindings').collect(r, T)
-        require('codeoutline.cpp_bindings').collect(r, T)
+        require('codeoutline.cpp_bindings').collect(r, T, r.type_use_refs)
         require('codeoutline.cpp_receivers').collect(r, T)
         if r.language == 'csharp' then require('codeoutline.csharp_bindings').collect(r, T) end
         require('codeoutline.implementations').collect(r, T)
@@ -176,29 +180,43 @@ function M.finish(r, T)
     end
     if T then require('codeoutline.indirect').collect(r, T) end
     r.collect_dispatch = nil
+    local original_refs = r.refs
     local name, from, kind, line, recv = {}, {}, {}, {}, {}
-    local js_receiver = r.js_imports and {}
-    local lua_binding = r.lua_imports and {}
+    local js_receiver = not r.defer_analysis and r.js_imports and (r.ranges or r.ordinary_bindings) and {}
+    local lua_binding = not r.defer_analysis and r.lua_imports and (r.ranges or r.ordinary_bindings) and {}
     local binding = (r.python_imports or r.has_bindings) and {}
     r.has_bindings = nil
     local start, stop = r.ranges and T and {}, r.ranges and T and {}
-    local type_sites = (r.ordinary_bindings or r.ranges) and {} or nil
     for i, ref in ipairs(r.refs) do
         name[i], from[i], kind[i], line[i], recv[i] = ref.name, ref.from, ref.kind, ref.line, ref.recv or false
         if js_receiver then js_receiver[i] = ref.js_receiver or '' end
         if lua_binding then lua_binding[i] = ref.lua_binding or '' end
         if binding then binding[i] = ref.binding or '' end
-        if type_sites and ref.type_use then type_sites[i] = ref.type_use end
         if start then
             local named = T:text(ref.tok) == ref.name
             start[i], stop[i] = named and T.s[ref.tok] - 1 or false, named and T.e[ref.tok] or false
         end
     end
     r.refs = { name = name, from = from, kind = kind, line = line, recv = recv, start = start or nil, stop = stop or nil }
-    r.refs.js_receiver = js_receiver
-    r.refs.lua_binding = lua_binding
+    r.refs.js_receiver = js_receiver or nil
+    r.refs.lua_binding = lua_binding or nil
     r.refs.binding = binding
-    r.type_sites = type_sites and next(type_sites) and type_sites or nil
+    if r.type_use_refs and #r.type_use_refs > 0 then
+        r.type_sites = {}
+        local positions = {}
+        for i, ref in ipairs(r.type_use_refs) do
+            local site = ref.type_use
+            site.name, site.from, site.recv = ref.name, ref.from, ref.recv
+            r.type_sites[i] = site
+            if site.role ~= 'construction' then positions[ref.tok] = ref.name end
+        end
+        for i, ref in ipairs(original_refs) do
+            if positions[ref.tok] == ref.name then
+                r.type_exclusions = r.type_exclusions or {}; r.type_exclusions[i] = true
+            end
+        end
+    end
+    r.type_use_refs, r.collect_type_uses = nil, nil
     for i, n in ipairs(r.nodes) do
         n.ti, n.tj, n.type_token = nil, nil, nil
         if not r.ranges then
@@ -213,7 +231,7 @@ function M.finish(r, T)
             r.nodes[i] = compact
         end
     end
-    r.ranges, r.omit_signatures = nil, nil
+    r.ranges, r.omit_signatures, r.defer_analysis = nil, nil, nil
     r.prefix, r.skip_calls = nil, nil
     return r
 end

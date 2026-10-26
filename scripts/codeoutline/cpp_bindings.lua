@@ -8,11 +8,16 @@ local boundary = { [';'] = true, ['{'] = true, ['}'] = true, ['('] = true, [',']
 local primitive = { auto = true, int = true, double = true, float = true, char = true, bool = true,
     long = true, short = true, unsigned = true, signed = true, void = true }
 
-function M.collect(r, T)
+function M.collect(r, T, type_refs)
     if r.language ~= 'cpp' and r.language ~= 'c' then return end
     require('codeoutline.cpp_types').collect(r, T)
+    local refs = r.refs
+    if type_refs and #type_refs > 0 then
+        refs = {}; for _, ref in ipairs(r.refs) do refs[#refs + 1] = ref end
+        for _, ref in ipairs(type_refs) do refs[#refs + 1] = ref end
+    end
     local wanted = {}
-    for _, ref in ipairs(r.refs) do
+    for _, ref in ipairs(refs) do
         if ref.kind == 'type' and not ref.recv then wanted[ref.name] = true
         elseif r.language == 'c' then -- ordinary C call resolution is unchanged
         elseif ref.kind == 'call' or ref.kind == 'ref' or ref.kind == 'member_call' and T:text(ref.tok - 1) == '::' then
@@ -62,7 +67,7 @@ function M.collect(r, T)
             end
         end
     end
-    for _, ref in ipairs(r.refs) do
+    for _, ref in ipairs(refs) do
         local bare = (r.language == 'cpp' and (ref.kind == 'call' or ref.kind == 'ref')) or ref.kind == 'type' and not ref.recv
         if bare or ref.kind == 'member_call' and ref.recv and T:text(ref.tok - 1) ~= '::' then
             local best

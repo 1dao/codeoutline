@@ -93,7 +93,8 @@ effect on the next query without building another index.
 
 Full and incremental indexing skip this additional JS alias, Python import and
 C++ declared-receiver analysis. Existing symbols, references, imports and JS
-receiver metadata remain resident. No new binding evidence or Python import
+import/export descriptors remain resident. Lua local-member maps and per-site
+Lua/JS receiver bindings are also generated on demand. No detailed binding evidence or Python import
 descriptors are serialized. Parser checksums invalidate older disk caches.
 
 Explore, callers and LSP share a query-local loader. It parses relevant files
@@ -102,7 +103,10 @@ Disk sources must match the indexed size/checksum and symbol/reference identitie
 a changed source requires a refresh and retry. Temporary evidence uses a FIFO
 cache bounded to 16 files and an estimated 8 MiB; source, tokens and duplicate
 symbols are discarded. Evicted evidence can be regenerated without losing edges.
-The cache is released with the query, so a later query pays the analysis cost again.
+Agent graph queries release their query-owned cache afterward. LSP prewarming,
+navigation and completion share a bounded cache across requests. Its loader
+can reuse the already validated full-file parse, rather than parsing the same
+source separately for bindings. Source and reference identities are still checked.
 
 Reverse queries retain reference-name filtering. Renamed calls additionally use
 existing import paths and alias hints to select plausible files, then resolve

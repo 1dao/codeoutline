@@ -5532,7 +5532,8 @@ end
         local idx = svc.get(root, opts)
         local hint = idx.files['a.lua'].static_dispatch_candidate
         spec.truthy(hint.targets.alias_handler)
-        spec.equal(hint.targets.callback, nil)
+        spec.truthy(hint.syntax)
+        spec.truthy(hint.targets.callback, 'syntax hints are candidates, not resolved aliases')
         spec.equal(idx.files['a.lua'].static_dispatch, nil)
         local _, info = svc.callers(root, 'alias_handler', opts)
         spec.equal(#info.callers, 1)

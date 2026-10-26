@@ -73,18 +73,20 @@ registration location in explore's relationship evidence. They describe static
 potential execution, not proof that a registration or call runs at runtime.
 Recognized indirect sites suppress ordinary same-name call guesses.
 
-Indexing collects compact target-name and dispatch-position hints only for files with
-recognized dispatch sites. Files without executable declarations are skipped;
+Indexing collects conservative target-name syntax hints only for candidate files.
+It does not resolve aliases, scopes or registration sites to construct those hints.
+Files without executable declarations are skipped;
 a token prefilter requires a local table and matching receiver call in Lua, or
 a named struct/class pointer field and matching member call in C/C++, before
-detailed scope and registration analysis. This filter does not infer edges.
+detailed scope and registration analysis at query time. This filter does not infer edges.
 Incoming queries filter files by target name before
 parsing. Query parsing validates source checksums and node identities, then
 retains lightweight site/registration summaries (including empty results) for
 the query lifetime. Each candidate is parsed at most once per query; source,
 tokens and inferred edges are not saved in the disk index. A query exceeding
 100,000 combined file/site/registration entries fails explicitly instead of
-silently dropping edges. This trades additional indexing work for cheaper queries.
+silently dropping edges. The graph query shares its ordinary binding cache with
+registry analysis; opened files can reuse the same warmed semantic evidence.
 Embeddings without a project root can parse with `{ static_dispatch = true }`
 to supply the transient data explicitly. LSP definition navigation is unchanged;
 this addition feeds the shared graph used by exploration and caller queries.

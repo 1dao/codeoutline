@@ -1,6 +1,7 @@
 -- Query explicit type sites without a separate resident type-use graph.
 local graph, control = require('codeoutline.graph'), require('codeoutline.control')
-local M = { MAX_FILES = 16, MAX_BYTES = 8 * 1024 * 1024, MAX_NAMES = 32, MAX_SITES = 4096, TIME_MS = 600 }
+local M = { MAX_FILES = 64, MAX_BYTES = 8 * 1024 * 1024, MAX_NAMES = 32, MAX_SITES = 4096,
+    MAX_SCAN_FILES = 20000, MAX_SCAN_BYTES = 256 * 1024 * 1024, TIME_MS = 5000 }
 M.kinds = { class = true, struct = true, union = true, interface = true, enum = true, record = true, typedef = true, annotation_type = true, trait = true }
 local languages = require('codeoutline.type_uses').languages
 function M.validate(query, opts)
@@ -88,7 +89,7 @@ function M.query(G, idx, targets, opts)
     local ctx = require('codeoutline.js_resolution').context(G); ctx.include_paths = opts.include_paths
     local function source(f)
         if not loaded[f] then
-            if stats.source_files >= M.MAX_FILES then limited('type_reference_file_limit') end
+            if stats.source_files >= (opts.max_files or M.MAX_FILES) then limited('type_reference_file_limit') end
             if stats.source_bytes + (G.files[f].size or 0) > M.MAX_BYTES then limited('type_reference_source_limit') end
             loaded[f] = true; stats.source_files = stats.source_files + 1; stats.source_bytes = stats.source_bytes + (G.files[f].size or 0)
         end
@@ -115,6 +116,43 @@ function M.query(G, idx, targets, opts)
         return summaries[f]
     end
     local function matches(ids) for _, id in ipairs(ids) do if roots[id] then return roots[id] end end end
+    -- Type occurrences are not in the persistent graph. Scan candidate text,
+    -- then parse only relevant files through the validated shared FIFO.
+    local function candidate(f)
+        check()
+        local rec = G.files[f]
+        local cached = summaries[f] or rec
+        if cached.type_sites then
+            for _, site in ipairs(cached.type_sites) do if names[site.name] then return true end end
+            return false
+        end
+        if (stats.candidate_files or 0) >= M.MAX_SCAN_FILES then limited('type_reference_scan_file_limit') end
+        if (stats.candidate_bytes or 0) + (rec.size or 0) > M.MAX_SCAN_BYTES then limited('type_reference_scan_byte_limit') end
+        local raw, repaired
+        if idx and idx.abs then
+            local file = assert(io.open(idx:abs(rec.path), 'rb'), 'cannot read type candidate: ' .. rec.path)
+            raw = file:read(M.MAX_SCAN_BYTES - (stats.candidate_bytes or 0) + 1); file:close()
+            local crc = xcompress and xcompress.crc32 and xcompress.crc32(raw) or xutils.sha256_hex(raw)
+            assert(#raw == rec.size and crc == rec.crc, 'source snapshot changed during type query: ' .. rec.path)
+        elseif idx then raw, repaired = idx:query_source(rec.path)
+        elseif G.root then
+            local file = assert(io.open(G.root .. '/' .. rec.path, 'rb')); raw = file:read('a'); file:close()
+            local crc = xcompress and xcompress.crc32 and xcompress.crc32(raw) or xutils.sha256_hex(raw)
+            assert(#raw == rec.size and crc == rec.crc, 'source snapshot changed during type query: ' .. rec.path)
+        else
+            for _, site in ipairs(data(f).type_sites or {}) do if names[site.name] then return true end end
+            return false
+        end
+        if repaired then error(opts.retry, 0) end
+        assert(raw, 'cannot read type candidate: ' .. rec.path)
+        stats.candidate_files, stats.candidate_bytes = (stats.candidate_files or 0) + 1, (stats.candidate_bytes or 0) + #raw
+        if stats.candidate_bytes > M.MAX_SCAN_BYTES then limited('type_reference_scan_byte_limit') end
+        for name in pairs(names) do
+            local escaped = name:gsub('([^%w])', '%%%1')
+            if raw:find('%f[%w_$]' .. escaped .. '%f[^%w_$]') then return true end
+        end
+        return false
+    end
     local ok, err = pcall(function()
         for _, id in ipairs(targets) do roots[id] = id; root_files[G.node_file[id]] = true; add_name(G.nodes[id].name) end
         for _, id in ipairs(targets) do
@@ -125,7 +163,7 @@ function M.query(G, idx, targets, opts)
             if G.nodes[id].kind == 'typedef' then
                 local f, n = G.node_file[id], id - G.id_of[G.node_file[id]][1] + 1
                 for i, site in pairs(data(f).type_sites or {}) do
-                    if G.files[f].refs.from[i] == n and site.role == 'alias' and site.alias_name then
+                    if site.from == n and site.role == 'alias' and site.alias_name then
                         local resolved = M.resolve(G, f, id, site, ctx, data(f))
                         if #resolved == 1 then roots[resolved[1]] = id; root_files[G.node_file[resolved[1]]] = true end
                     end
@@ -172,36 +210,31 @@ function M.query(G, idx, targets, opts)
                 if languages[G.files[f].language] then
                     stats.scanned_files = stats.scanned_files + 1
                     if stats.scanned_files % 128 == 0 then check() end
-                    local rec, refs = G.files[f], G.files[f].refs
-                    for i, name in ipairs(refs.name) do
-                        if i % 1024 == 0 then check() end
-                        if refs.kind[i] == 'type' and names[name] then
-                            if eligible[f] == nil then
-                                eligible[f] = true
-                                if rec.language == 'c' or rec.language == 'cpp' then
-                                    eligible[f] = root_files[f] or false
-                                    if not eligible[f] then
-                                        local visible, paired = graph.visible_dependencies(G, f, ctx)
-                                        for root in pairs(root_files) do if visible[root] or paired[root] then eligible[f] = true; break end end
-                                    end
-                                end
+                    local rec = G.files[f]
+                    if candidate(f) then
+                        if rec.language == 'c' or rec.language == 'cpp' then
+                            eligible[f] = root_files[f] or false
+                            if not eligible[f] then
+                                local visible, paired = graph.visible_dependencies(G, f, ctx)
+                                for root in pairs(root_files) do if visible[root] or paired[root] then eligible[f] = true; break end end
                             end
-                            if not eligible[f] then break end
-                            local key = f .. ':' .. i
-                            if not positions[key] then
-                                if stats.scanned_sites >= M.MAX_SITES then limited('type_reference_site_limit') end
-                                positions[key] = true; stats.scanned_sites = stats.scanned_sites + 1
-                                local site = (data(f).type_sites or {})[i]
-                                if site then
-                                    local from = refs.from[i] > 0 and G.id_of[f][refs.from[i]] or nil
+                        else eligible[f] = true end
+                        if eligible[f] then
+                            for i, site in ipairs(data(f).type_sites or {}) do
+                                if i % 1024 == 0 then check() end
+                                local key = f .. ':' .. i
+                                if names[site.name] and not positions[key] then
+                                    if stats.scanned_sites >= M.MAX_SITES then limited('type_reference_site_limit') end
+                                    positions[key] = true; stats.scanned_sites = stats.scanned_sites + 1
+                                    local from = site.from > 0 and G.id_of[f][site.from] or nil
                                     local ids, reason = M.resolve(G, f, from, site, ctx, data(f))
                                     if ctx.include_incomplete or ctx.workspace_incomplete or ctx.go_incomplete or ctx.go_methods_incomplete or ctx.rust_incomplete then limited('type_reference_binding_incomplete') end
                                     local target = matches(ids)
                                     if #ids == 1 and target then
                                         if #result.references >= (opts.max_nodes or 200) then result.node_limit_reached = true; limited('type_reference_result_limit') end
-                                        result.references[#result.references + 1] = { file = rec.path, line = refs.line[i], first = site.first, last = site.last,
+                                        result.references[#result.references + 1] = { file = rec.path, line = site.line, first = site.first, last = site.last,
                                             role = site.role, written = site.written, target = target, source = from }
-                                        local node = refs.from[i] > 0 and rec.nodes[refs.from[i]]
+                                        local node = site.from > 0 and rec.nodes[site.from]
                                         if site.role == 'alias' and site.alias_name and node and node.kind == 'typedef' then
                                             roots[from] = target; root_files[f] = true; add_name(node.name)
                                         end
@@ -239,7 +272,7 @@ local function run(G, idx, query, opts, retry)
     local options = {}; for key, value in pairs(opts or {}) do options[key] = value end; options.retry = retry
     local result = M.query(G, idx, ids, options)
     local lines = { string.format('Matched %d type(s); %d explicit type references.', #result.targets, #result.references),
-        'Scope: indexed explicit type positions; no inference, runtime reflection or complete build coverage is claimed.' }
+        'Scope: explicit type positions parsed on demand in indexed files; no inference, runtime reflection or complete build coverage is claimed.' }
     for _, target in ipairs(result.targets) do lines[#lines + 1] = string.format('Target: %s (%s:%d)', target.name, target.file, target.line) end
     for _, ref in ipairs(result.references) do lines[#lines + 1] = string.format('- %s:%d [%s] %s', ref.file, ref.line, ref.role, ref.written) end
     if #ids == 0 then lines[#lines + 1] = 'No supported type matched; use an exact type name or qualified name.' end

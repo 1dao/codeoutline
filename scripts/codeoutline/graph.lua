@@ -631,6 +631,7 @@ function M.query(symbols, opts)
     js_context.include_paths = opts.include_paths
     js_context.lua = lua_bindings.context(symbols)
     js_context.ordinary = require('codeoutline.ordinary_bindings').context(symbols, js_context)
+    js_context.lua.ordinary = js_context.ordinary
     Q.stats.ordinary = js_context.ordinary.stats
     local macros = require('codeoutline.cpp_macros').context(symbols, js_context)
     Q.stats.macros = macros.stats
@@ -651,7 +652,7 @@ function M.query(symbols, opts)
         end
     end
     local indirect = require('codeoutline.indirect').query(symbols, opts.dispatch_rules, report)
-    local static_dispatch = require('codeoutline.static_dispatch').query(symbols, report)
+    local static_dispatch = require('codeoutline.static_dispatch').query(symbols, report, js_context)
     local implementations = require('codeoutline.implementations').context(symbols, js_context, report)
     Q.stats.implementations = implementations.stats
     local events = require('codeoutline.automatic_events').context(symbols, js_context, report)
@@ -689,6 +690,16 @@ function M.query(symbols, opts)
         local evidence = js_context.ordinary.evidence(f, i)
         local found, reason, macro_state = resolve_ref(symbols, f, ids[refs.from[i]], refs.name[i], refs.kind[i],
             refs.recv[i] or nil, direct, paired, nil, evidence, js_context, refs.line[i])
+        if refs.kind[i] == 'call' and found then
+            local nominal = false
+            for _, id in ipairs(found) do
+                local kind = symbols.nodes[id].kind
+                if kind == 'class' or kind == 'struct' or kind == 'interface' then nominal = true; break end
+            end
+            if nominal then
+                if (js_context.ordinary.data(f).type_exclusions or {})[i] then return {} end
+            end
+        end
         observe(f, i, refs.kind[i], found, reason)
         if reason and reason:find('candidate scan limit reached', 1, true) then incomplete('candidate_scan_limit') end
         if reason and reason:find('tied candidate limit reached', 1, true) then incomplete('tied_candidate_limit') end
@@ -838,7 +849,8 @@ function M.query(symbols, opts)
             if rec.language == 'lua' then
                 local local_index = id - symbols.id_of[f][1] + 1
                 for name, n in pairs(rec.lua_exports or {}) do if n == local_index then lua_names[name] = true end end
-                for _, members in ipairs(rec.lua_locals or {}) do
+                local locals = rec.lua_locals or rec.lua_binding_names and js_context.ordinary.data(f).lua_locals or {}
+                for _, members in ipairs(locals) do
                     for name, n in pairs(members) do if n == local_index then lua_names[name] = true end end
                 end
             end
@@ -877,6 +889,17 @@ function M.query(symbols, opts)
             for index, imp in ipairs(files[f].lua_imports or {}) do
                 if imp.member and (native_targets or lua_names[imp.member]) then lua_values['lua-value:' .. index] = true end
             end
+            local lua_evidence = refs.lua_binding
+            local imported_native = false
+            if native_targets and not lua_evidence then
+                for _, imp in ipairs(files[f].lua_imports or {}) do
+                    for _, target in ipairs(lua_bindings.modules(symbols, imp, js_context.lua)) do
+                        if checked_native[target] then imported_native = true; break end
+                    end
+                    if imported_native then break end
+                end
+            end
+            if (next(lua_values) or imported_native) and not lua_evidence then lua_evidence = js_context.ordinary.data(f).refs.lua_binding end
             local ref_names, froms = refs.name, refs.from
             local count = #ref_names
             for first = 1, count, 4096 do
@@ -885,8 +908,8 @@ function M.query(symbols, opts)
                     if (file_names[ref_names[i]] or private_names and private_names[ref_names[i]]
                         or aliases[ref_names[i]] or aliases[refs.recv[i]]
                         or alias_refs[i]
-                        or (refs.lua_binding and refs.lua_binding[i] ~= '' and
-                            (native_targets or lua_names[ref_names[i]] or lua_values[refs.lua_binding[i]]))) and froms[i] > 0 then
+                        or (lua_evidence and lua_evidence[i] ~= '' and
+                            (native_targets or lua_names[ref_names[i]] or lua_values[lua_evidence[i]]))) and froms[i] > 0 then
                         for _, dst in ipairs(targets(f, i, wanted) or {}) do
                             if wanted[dst] then
                                 push3(incoming, dst, symbols.id_of[f][froms[i]], refs.line[i], refs.kind[i])

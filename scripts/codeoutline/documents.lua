@@ -129,7 +129,8 @@ end
 
 function Doc:parse()
     if self.parsed then return self.parsed end
-    self.parsed = parse.parse(parser_name(self), self.source, { language = self.indexed_language or self.language, detect = true }) or { nodes = {} }
+    self.parsed = parse.parse(parser_name(self), self.source,
+        { language = self.indexed_language or self.language, detect = true, type_uses = false, analysis = false }) or { nodes = {} }
     return self.parsed
 end
 

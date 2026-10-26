@@ -224,6 +224,17 @@ overlay never writes to the resident tables.
   References, rename, hover, implementations and call hierarchy do not use this
   fallback. Multiple definition results are candidates for inspection, not proof
   of a runtime binding.
+- Unresolved bare C/C++ function calls can also navigate to declarations in
+  reachable external headers. Lookup follows selected include paths and literal
+  forwarding includes, so `<stdlib.h>` can lead to a declaration in another SDK
+  header. Unconfigured projects reuse the existing environment/compiler/Windows
+  SDK directory discovery. Configured misses do not silently select another SDK.
+  External headers are read only when queried; their declarations never enter
+  the project index or create call/reference edges. The source-validated FIFO
+  holds at most 32 headers/about 8 MiB. Each lookup admits at most 64 external
+  headers, 128 project headers, 4 MiB and a 500ms cooperative budget; known
+  local/receiver binding barriers remain authoritative. Repeated requests check
+  source size/checksum before reusing declarations, including same-size edits.
 - When navigation features are enabled, initial indexing prepares the shared
   symbol tables before reporting Ready, so their construction does not delay the
   first definition request. Symbol-only clients keep symbol-table construction lazy.

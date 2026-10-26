@@ -1213,6 +1213,17 @@ function handlers.lsp_definition(req)
         end
     end
     if #targets == 0 then
+        if C_FAMILY[V.files[f].language] then
+            local entries, info = require('codeoutline.external_headers').find(V, f, c, V.js_context, probe_includes)
+            if #entries > 0 then
+                local result = {}
+                for _, entry in ipairs(entries) do
+                    local header = documents.new(documents.uri(entry.file), entry.source)
+                    result[#result + 1] = { uri = header.uri, range = header:range(entry.node.name_start, entry.node.name_end) }
+                end
+                return result, info.truncated
+            end
+        end
         local ids, info = require('codeoutline.definition_candidates').find(V, f, c, V.js_context)
         local result, seen, bytes, started = {}, {}, 0, os.clock()
         local count = 0

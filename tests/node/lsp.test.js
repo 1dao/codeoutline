@@ -166,6 +166,35 @@ test('LSP references recognize Rust trait declarations as type targets', { timeo
     assert.equal(result[0].range.start.character, 17);
 });
 
+test('LSP follows external forwarding headers without indexing the SDK and refreshes edited declarations', { timeout: 30000 }, async (t) => {
+    const client = await start(t);
+    const sdk = join(client.project, '..', 'fake-sdk'); await mkdir(sdk);
+    await writeFile(join(sdk, 'string.h'), '#include "memory.h"\n');
+    await writeFile(join(sdk, 'stdlib.h'), '#include "alloc.h"\n');
+    await writeFile(join(sdk, 'memory.h'), 'void* memchr(const void* p, int c, unsigned n);\n');
+    await writeFile(join(sdk, 'alloc.h'), '/*😀*/ void free(void* p);\n');
+    await writeFile(join(client.project, '.codeoutline.json'), JSON.stringify({ includePaths: [sdk] }));
+    const source = '#include <string.h>\n#include <stdlib.h>\nvoid run(void* p) { memchr(p, 0, 1); free(p); }\n';
+    const file = join(client.project, 'use.c'); await writeFile(file, source);
+    await initialize(client, [client.project]); await indexed(client);
+    const uri = pathToFileURL(file).href;
+    const definition = (name) => client.request('textDocument/definition', { textDocument: { uri },
+        position: { line: 2, character: source.split('\n')[2].indexOf(name) + 1 } });
+    for (let round = 0; round < 3; round++) {
+        for (const [name, header] of [['memchr', 'memory.h'], ['free', 'alloc.h']]) {
+            const start = performance.now(), result = await definition(name);
+            assert.ok(performance.now() - start < 1000);
+            assert.equal(result.length, 1); assert.equal(fileURLToPath(result[0].uri), join(sdk, header));
+            if (name === 'free') assert.equal(result[0].range.start.character, '/*😀*/ void '.length);
+        }
+    }
+    assert.deepEqual(await client.request('workspace/symbol', { query: 'memchr' }), []);
+    await writeFile(join(sdk, 'alloc.h'), 'void fr_e(void* p);\n');
+    assert.deepEqual(await definition('free'), []);
+    await writeFile(join(sdk, 'alloc.h'), '\nvoid free(void* p);\n');
+    assert.equal((await definition('free'))[0].range.start.line, 1);
+});
+
 test('LSP follows literal events on a shared imported emitter and invalidates provider drafts', { timeout: 30000 }, async (t) => {
     const client = await start(t);
     const bus = "import { EventEmitter } from 'node:events';\nexport const bus = new EventEmitter();\nexport const other = new EventEmitter();\n";

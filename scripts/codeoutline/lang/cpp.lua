@@ -40,8 +40,7 @@ M.config = {
 
 M.lang = xscan.lang(M.config)
 
-local ATTR = {}
-for k in pairs(c.ATTR) do ATTR[k] = true end
+local ATTR = setmetatable({}, { __index = c.ATTR })
 ATTR.decltype = true
 
 local ACCESS = { public = true, private = true, protected = true }

@@ -235,6 +235,9 @@ overlay never writes to the resident tables.
   headers, 128 project headers, 4 MiB and a 500ms cooperative budget; known
   local/receiver binding barriers remain authoritative. Repeated requests check
   source size/checksum before reusing declarations, including same-size edits.
+  Microsoft SAL groups and CRT deprecation decorators are parsed as declaration
+  annotations, including nested groups before APIs such as `memset` and `memcpy`.
+  They do not replace the actual function's name or exact source position.
 - When navigation features are enabled, initial indexing prepares the shared
   symbol tables before reporting Ready, so their construction does not delay the
   first definition request. Symbol-only clients keep symbol-table construction lazy.

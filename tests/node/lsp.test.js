@@ -171,17 +171,22 @@ test('LSP follows external forwarding headers without indexing the SDK and refre
     const sdk = join(client.project, '..', 'fake-sdk'); await mkdir(sdk);
     await writeFile(join(sdk, 'string.h'), '#include "memory.h"\n');
     await writeFile(join(sdk, 'stdlib.h'), '#include "alloc.h"\n');
-    await writeFile(join(sdk, 'memory.h'), 'void* memchr(const void* p, int c, unsigned n);\n');
+    await writeFile(join(sdk, 'memory.h'), 'void* memchr(const void* p, int c, unsigned n);\n'
+        + '_Post_equal_to_(_Dst)\n_At_buffer_((unsigned char*)_Dst, _Iter_, _Size, _Post_satisfies_(((unsigned char*)_Dst)[_Iter_] == _Val))\n'
+        + 'void* __cdecl memset(_Out_writes_bytes_all_(_Size) void* _Dst, int _Val, unsigned _Size);\n'
+        + '_CRT_INSECURE_DEPRECATE_MEMORY(copy_s)\nvoid* memcpy(void* dst, const void* src, unsigned n);\n');
     await writeFile(join(sdk, 'alloc.h'), '/*😀*/ void free(void* p);\n');
     await writeFile(join(client.project, '.codeoutline.json'), JSON.stringify({ includePaths: [sdk] }));
-    const source = '#include <string.h>\n#include <stdlib.h>\nvoid run(void* p) { memchr(p, 0, 1); free(p); }\n';
+    const source = '#include <string.h>\n#include <stdlib.h>\nvoid run(void* p) { memchr(p, 0, 1); memset(p, 0, 1); memcpy(p, p, 1); free(p); }\n';
+    await mkdir(join(client.project, 'freestanding'));
+    await writeFile(join(client.project, 'freestanding', 'compat.c'), 'void* memset(void* p, int c, unsigned n) { return p; }\n');
     const file = join(client.project, 'use.c'); await writeFile(file, source);
     await initialize(client, [client.project]); await indexed(client);
     const uri = pathToFileURL(file).href;
     const definition = (name) => client.request('textDocument/definition', { textDocument: { uri },
         position: { line: 2, character: source.split('\n')[2].indexOf(name) + 1 } });
     for (let round = 0; round < 3; round++) {
-        for (const [name, header] of [['memchr', 'memory.h'], ['free', 'alloc.h']]) {
+        for (const [name, header] of [['memchr', 'memory.h'], ['memset', 'memory.h'], ['memcpy', 'memory.h'], ['free', 'alloc.h']]) {
             const start = performance.now(), result = await definition(name);
             assert.ok(performance.now() - start < 1000);
             assert.equal(result.length, 1); assert.equal(fileURLToPath(result[0].uri), join(sdk, header));

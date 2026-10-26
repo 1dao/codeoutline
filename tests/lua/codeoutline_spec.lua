@@ -322,6 +322,22 @@ spec.describe('c', function()
         spec.contains(refs(r), '<file>->DEFINE_THING')
         spec.contains(names(r), 'function h@2')
     end)
+    spec.it('skips nested Microsoft SAL and deprecation annotations before C and C++ declarations', function()
+        local source = '_CRT_INSECURE_DEPRECATE_MEMORY(copy_s)\n_Post_equal_to_(_Dst)\n'
+            .. '_At_buffer_((unsigned char*)_Dst, _Iter_, _Size, _Post_satisfies_(((unsigned char*)_Dst)[_Iter_] == _Val))\n'
+            .. 'void* __cdecl sdk_set(_Out_writes_bytes_all_(_Size) void* _Dst, int _Val, unsigned _Size);\n'
+            .. '_When_(p != 0, _Post_equal_to_(p)) void sdk_body(void* p) { real_call(p); }\n'
+        for _, extension in ipairs({ 'c', 'cpp' }) do
+            local r = ci.parse('sal.' .. extension, source)
+            local found = {}
+            for _, node in ipairs(r.nodes) do found[node.name] = node end
+            spec.truthy(found.sdk_set and found.sdk_set.kind == 'prototype', extension)
+            spec.truthy(found.sdk_body and found.sdk_body.kind == 'function', extension)
+            spec.equal(source:sub(found.sdk_set.name_start + 1, found.sdk_set.name_end), 'sdk_set')
+            spec.equal(found._Post_equal_to_, nil); spec.equal(found._At_buffer_, nil)
+            spec.equal(found._CRT_INSECURE_DEPRECATE_MEMORY, nil)
+        end
+    end)
 end)
 
 spec.describe('python', function()

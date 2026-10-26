@@ -47,6 +47,22 @@ spec.describe('on-demand external header declarations', function()
         write(sdk .. '/detail/alloc.h', 'void fr_e(void* pointer);\n')
         spec.equal(#headers.find(G, f, site('free'), { include_paths = { sdk } }), 0)
     end)
+    spec.it('finds SAL-decorated SDK declarations despite unrelated freestanding implementations', function()
+        local declaration = '_Post_equal_to_(_Dst)\n'
+            .. '_At_buffer_((unsigned char*)_Dst, _Iter_, _Size, _Post_satisfies_(((unsigned char*)_Dst)[_Iter_] == _Val))\n'
+            .. 'void* __cdecl memset(_Out_writes_bytes_all_(_Size) void* _Dst, int _Val, unsigned _Size);\n'
+        write(sdk .. '/string.h', '#include "detail/sal.h"\n')
+        write(sdk .. '/detail/sal.h', declaration)
+        local G = graph.build({ root = root, files = {
+            ['app.c'] = parse.parse('app.c', '#include <string.h>\nvoid run(void* p) { memset(p, 0, 1); }\n', { ranges = false }),
+            ['freestanding/memory.c'] = parse.parse('freestanding/memory.c', 'void* memset(void* p, int c, unsigned n) { return p; }', { ranges = false }),
+        } })
+        local found = headers.find(G, G.file_index['app.c'], site('memset'), { include_paths = { sdk } })
+        spec.equal(#found, 1); spec.equal(found[1].file, sdk .. '/detail/sal.h')
+        spec.equal(found[1].source:sub(found[1].node.name_start + 1, found[1].node.name_end), 'memset')
+        spec.truthy(found[1].declaration)
+        spec.equal(#G.by_name.memset, 1, 'SDK declarations remain outside the project graph')
+    end)
     spec.it('keeps the first selected header authoritative and tolerates empty headers', function()
         local other = sdk .. '/other'; write(other .. '/stdlib.h', 'void free(void* pointer);\n')
         write(sdk .. '/stdlib.h', '')

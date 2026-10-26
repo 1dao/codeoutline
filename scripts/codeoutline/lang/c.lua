@@ -45,10 +45,23 @@ body_cfg.directive, body_cfg.pp_first_branch = nil, nil
 local body_lang = xscan.lang(body_cfg)
 
 -- Names that look like a call but decorate a declaration.
-local ATTR = {
+local SAL = { In = true, Out = true, Inout = true, Outptr = true, Ret = true,
+    Pre = true, Post = true, At = true, When = true, Success = true, Check = true,
+    Analysis = true, Deref = true, Field = true, Group = true, Always = true,
+    Maybe = true, Use = true, Struct = true, On = true }
+local ATTR = setmetatable({
     __attribute__ = true, __attribute = true, __declspec = true, __asm__ = true,
     __asm = true, asm = true, alignas = true, _Alignas = true,
-}
+    _CRT_INSECURE_DEPRECATE_MEMORY = true, _CRT_INSECURE_DEPRECATE = true,
+    _CRT_INSECURE_DEPRECATE_CORE = true, _CRT_NONSTDC_DEPRECATE = true,
+    _CRT_DEPRECATE_TEXT = true,
+}, { __index = function(_, name)
+    -- Microsoft SAL annotates declarations with nested function-like groups.
+    -- Recognize the annotation family, never the decorated API's name.
+    if type(name) == 'string' and name:sub(1, 1) == '_' and name:sub(-1) == '_' then
+        return SAL[name:match('^_([%a]+)_')]
+    end
+end })
 local AGGREGATE = { struct = true, union = true, enum = true }
 
 local function is(T, i, s) return T.k[i] == 'op' and T:text(i) == s end

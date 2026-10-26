@@ -132,6 +132,33 @@ function M.context(G, ctx, source, options)
         -- receiver bindings or implementation evidence for the whole header.
         return require('codeoutline.cpp_macros').summary(rec, raw)
     end
+    -- Inheritance queries need class headers and aliases, not every call,
+    -- receiver, type-use site and method signature in the file.
+    function C.hierarchy(f)
+        local rec = G.files[f]
+        if rec.language ~= 'cpp' or rec.ordinary_bindings or not G.root and not source then return C.data(f) end
+        local cached = cached_data(rec)
+        if cached and (not cached.cpp_aliases_only or cached.implementation_evidence) then return cached end
+        local raw = read_source(f)
+        cached = cached_data(rec, raw)
+        if cached and (not cached.cpp_aliases_only or cached.implementation_evidence) then return cached end
+        local parsed, T = require('codeoutline.parse').parse_tokens(rec.path, raw,
+            { ranges = false, cpp_aliases_only = true, language = rec.language })
+        local function check(ok) assert(ok, 'source changed; refresh index before hierarchy query: ' .. rec.path) end
+        check(parsed and #parsed.nodes == #rec.nodes)
+        local evidence, count = {}, 0
+        for i, n in ipairs(parsed.nodes) do
+            if i % 128 == 0 then control.check() end
+            check(n.qualified == rec.nodes[i].qualified and n.line == rec.nodes[i].line)
+            if n.kind == 'class' or n.kind == 'struct' then
+                evidence[i] = { at = T.s[n.ti] - 1,
+                    hierarchy_bases = require('codeoutline.type_bases').collect(T, n, rec.language) }
+                count = count + 1
+            end
+        end
+        return remember(rec, raw, { cpp_aliases = parsed.cpp_aliases, cpp_aliases_only = true,
+            implementation_evidence = evidence }, #raw + count * 256 + #(parsed.cpp_aliases or {}) * 256)
+    end
     function C.data(f)
         local rec = G.files[f]
         if rec.ordinary_bindings then return rec end -- explicit in-memory parse
@@ -158,6 +185,7 @@ function M.context(G, ctx, source, options)
             csharp_usings = parsed.csharp_usings, csharp_statics = parsed.csharp_statics,
             csharp_scopes = parsed.csharp_scopes, csharp_parameters = parsed.csharp_parameters, csharp_access = parsed.csharp_access }
         data.implementation_evidence = parsed.implementation_evidence
+        data.type_sites, data.type_parameters = parsed.type_sites, parsed.type_parameters
         data.go_methods = parsed.go_methods
         data.cpp_receivers = parsed.cpp_receivers
         data.cpp_macros = parsed.cpp_macros
@@ -165,7 +193,9 @@ function M.context(G, ctx, source, options)
         data.shared_events = parsed.shared_events
         data.lua_callback_loops = parsed.lua_callback_loops
         data.rust_imports, data.rust_public = parsed.rust_imports, parsed.rust_public
+        local type_count = 0; for _ in pairs(parsed.type_sites or {}) do type_count = type_count + 1 end
         local weight = #raw + #parsed.refs.name * 128 + #(parsed.js_exports or {}) * 256
+            + type_count * 256 + #(parsed.type_parameters or {}) * 96
             + #(parsed.python_imports or {}) * 256 + #(parsed.cpp_aliases or {}) * 256
             + #(parsed.csharp_usings or {}) * 256 + #(parsed.csharp_scopes or {}) * 256
             + #(parsed.csharp_parameters or {}) * 128 + #parsed.nodes * (parsed.implementation_evidence and 256 or 0)

@@ -60,7 +60,7 @@ local function execute(req)
         -- on the first definition request. Symbol-only clients retain lazy data.
         if req.prepare_navigation then idx:symbols() end
         return true
-    elseif req.method == 'explore' or req.method == 'callers' or req.method == 'type_hierarchy' or req.method == 'affected' then
+    elseif req.method == 'explore' or req.method == 'callers' or req.method == 'type_hierarchy' or req.method == 'type_references' or req.method == 'affected' then
         local text, info = service[req.method](root, req.method == 'affected' and req.files or req.query, { budget = req.budget, depth = req.depth,
             max_nodes = req.max_nodes, direction = req.direction })
         return { text = text, truncated = info.truncated or false, coverage = info.coverage,

@@ -56,7 +56,9 @@ the result explicitly reports incomplete coverage even if other edges resolve.
 Narrowing to `ancestors` avoids that project-wide reverse candidate work.
 
 Source validation and parsing reuse the ordinary query FIFO (16 files/about
-8 MiB). A query opens at most 128 distinct source files and 8 MiB of source,
+8 MiB). C++ hierarchy queries reuse the lightweight alias parse to extract class
+headers without call, receiver or method-binding evidence. A later full-evidence
+request replaces that limited cache entry. A query opens at most 128 distinct source files and 8 MiB of source,
 including alias dependencies. Only bounded declaration/alias summaries survive
 FIFO eviction for the query's lifetime. Source changes fail explicitly; encoding
 repairs retry selection before returning IDs. Existing cancellation checkpoints

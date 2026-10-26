@@ -82,7 +82,7 @@ spec.describe('symbol byte ranges', function()
                 local a = rec.refs.start[i]
                 spec.truthy(a, 'missing range for ' .. ref_name)
                 spec.equal(source:sub(a + 1, rec.refs.stop[i]), ref_name)
-                names[#names + 1] = ref_name
+                if rec.refs.kind[i] ~= 'type' then names[#names + 1] = ref_name end
             end
             spec.equal(table.concat(names, ','), table.concat(example[3], ','))
         end)
@@ -3144,7 +3144,7 @@ void MacroNavUnknown(void) { MACRO_NAV(3); }
         local only = nav({ method = 'lsp_references', uri = nav_uri('util.c'), position = { line = 1, character = 5 } })
         spec.equal(#only, 2)
         local _, refused = nav({ method = 'lsp_references', uri = nav_uri('shape.py'), position = { line = 0, character = 7 } })
-        spec.contains(refused.error, 'functions')
+        spec.contains(refused.error, 'Type references')
     end)
     spec.it('walks incoming and outgoing calls with exact call ranges', function()
         local items = nav({ method = 'lsp_prepare_calls', uri = nav_uri('util.c'), position = { line = 1, character = 5 } })

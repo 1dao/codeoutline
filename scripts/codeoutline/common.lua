@@ -43,6 +43,7 @@ end
 -- ti/tj: token range the node covers (used for ref attribution, then dropped).
 -- ni/nj: declaration name tokens; range_end overrides a synthetic block end.
 function M.add_node(r, T, f)
+    if r.language ~= 'lua' and r.language ~= 'python' and r.language ~= 'javascript' then f.type_token = f.ni or f.ti end
     if r.ordinary_bindings and (r.language == 'c' or r.language == 'cpp') then
         r.cpp_declaration_tokens = r.cpp_declaration_tokens or {}
         r.cpp_declaration_tokens[#r.nodes + 1] = f.ni or f.ti
@@ -147,6 +148,7 @@ function M.finish(r, T)
         return r
     end
     if T then require('codeoutline.function_values').collect(r, T) end
+    if T then require('codeoutline.type_uses').collect(r, T) end
     if T and r.collect_foreign and (r.language == 'c' or r.language == 'cpp') then
         require('codeoutline.foreign').collect(r, T)
     end
@@ -180,11 +182,13 @@ function M.finish(r, T)
     local binding = (r.python_imports or r.has_bindings) and {}
     r.has_bindings = nil
     local start, stop = r.ranges and T and {}, r.ranges and T and {}
+    local type_sites = (r.ordinary_bindings or r.ranges) and {} or nil
     for i, ref in ipairs(r.refs) do
         name[i], from[i], kind[i], line[i], recv[i] = ref.name, ref.from, ref.kind, ref.line, ref.recv or false
         if js_receiver then js_receiver[i] = ref.js_receiver or '' end
         if lua_binding then lua_binding[i] = ref.lua_binding or '' end
         if binding then binding[i] = ref.binding or '' end
+        if type_sites and ref.type_use then type_sites[i] = ref.type_use end
         if start then
             local named = T:text(ref.tok) == ref.name
             start[i], stop[i] = named and T.s[ref.tok] - 1 or false, named and T.e[ref.tok] or false
@@ -194,8 +198,9 @@ function M.finish(r, T)
     r.refs.js_receiver = js_receiver
     r.refs.lua_binding = lua_binding
     r.refs.binding = binding
+    r.type_sites = type_sites and next(type_sites) and type_sites or nil
     for i, n in ipairs(r.nodes) do
-        n.ti, n.tj = nil, nil
+        n.ti, n.tj, n.type_token = nil, nil, nil
         if not r.ranges then
             -- Rebuild: deleting keys does not shrink Lua table allocations.
             local compact = {}

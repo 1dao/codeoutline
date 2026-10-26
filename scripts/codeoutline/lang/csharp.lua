@@ -198,7 +198,7 @@ parse_members = function(T, r, a, b, parent, class_name)
             local target = x
             if T:text(x) == 'global' and is(T, x + 1, '::') then x = x + 2 end
             local path = dotted(T, x)
-            if path ~= '' or global then r.imports[#r.imports + 1] = { path = path, line = T:line(i), global = global or nil } end
+            if path ~= '' or global then r.imports[#r.imports + 1] = { path = path, alias = alias, line = T:line(i), global = global or nil } end
             if r.ordinary_bindings and (not parent or r.nodes[parent].kind == 'namespace') then
                 local owner = parent and r.nodes[parent]
                 r.csharp_usings = r.csharp_usings or {}

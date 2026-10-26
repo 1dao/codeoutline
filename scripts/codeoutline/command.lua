@@ -22,6 +22,7 @@ Usage:
   codeoutline callers --project PATH --query SYMBOL [--depth 3] [--max-nodes 200] [--budget BYTES]
   codeoutline affected --project PATH --file FILE [--file FILE ...] [--files-from PATH|-] [--depth 3] [--max-nodes 200] [--budget BYTES]
   codeoutline type-hierarchy --project PATH --query TYPE [--direction both|ancestors|descendants] [--depth 8] [--max-nodes 200] [--budget BYTES]
+  codeoutline type-references --project PATH --query TYPE [--max-nodes 200] [--budget BYTES]
   codeoutline status [--project PATH]
   codeoutline rebuild [--project PATH]
   codeoutline doctor [--project PATH]
@@ -66,6 +67,7 @@ local function parse(args)
         callers = { project = true, query = true, budget = true, depth = true, ['max-nodes'] = true },
         affected = { project = true, file = true, ['files-from'] = true, budget = true, depth = true, ['max-nodes'] = true },
         ['type-hierarchy'] = { project = true, query = true, budget = true, depth = true, ['max-nodes'] = true, direction = true },
+        ['type-references'] = { project = true, query = true, budget = true, ['max-nodes'] = true },
         update = { check = true, channel = true },
         status = { project = true }, rebuild = { project = true }, doctor = { project = true },
     }
@@ -243,7 +245,7 @@ local function run()
     local root = options.project or '.'
     if command == 'doctor' then return doctor(root) end
     local svc = require('codeoutline.service')
-    if command == 'explore' or command == 'callers' or command == 'type-hierarchy' or command == 'affected' then
+    if command == 'explore' or command == 'callers' or command == 'type-hierarchy' or command == 'type-references' or command == 'affected' then
         local query = options.query
         if command == 'affected' then
             query = options.file or {}
@@ -264,7 +266,7 @@ local function run()
         if options.budget then budget = assert(tonumber(options.budget), '--budget must be a number') end
         local depth = options.depth and assert(tonumber(options.depth), '--depth must be a number')
         local max_nodes = options['max-nodes'] and assert(tonumber(options['max-nodes']), '--max-nodes must be a number')
-        local text = svc[command == 'type-hierarchy' and 'type_hierarchy' or command](root, query,
+        local text = svc[command:gsub('-', '_')](root, query,
             { budget = budget, depth = depth, max_nodes = max_nodes, direction = options.direction })
         io.write(text, '\n')
     else

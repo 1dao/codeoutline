@@ -227,7 +227,14 @@ parse_items = function(T, r, a, b, parent, impl_type, in_trait)
             stop = e
         elseif t == 'use' then
             local e = item_end(T, x + 1, b)
-            r.imports[#r.imports + 1] = { path = common.sig(T, x + 1, e - 1, 400):gsub('%s', ''), line = T:line(x) }
+            local aliases = {}
+            for i = x + 1, e - 1 do
+                if T:text(i) == 'as' and T.k[i - 1] == 'id' and T.k[i + 1] == 'id' then
+                    aliases[#aliases + 1] = { name = T:text(i - 1), alias = T:text(i + 1) }
+                end
+            end
+            r.imports[#r.imports + 1] = { path = common.sig(T, x + 1, e - 1, 400):gsub('%s', ''), line = T:line(x),
+                type_aliases = #aliases > 0 and aliases or nil }
             stop = e
         elseif (t == 'type') and T.k[x + 1] == 'id' then
             local e = item_end(T, x + 2, b)

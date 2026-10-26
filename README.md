@@ -51,7 +51,7 @@ On Windows, Claude Code cannot start the `codeoutline.cmd` shim directly; use `-
 
 When no project is specified, the service uses, in order: the `projectPath` argument of the call, the `--project` option, the client's roots (the first directory returned by `roots/list`), and the directory the service was started in. Clients usually start a stdio service in the project directory, so a global configuration needs no project path. Access defaults to `--project` or the start directory; repeat `--allow-root` to allow more.
 
-Five tools are provided:
+Seven tools are provided:
 
 | Tool | Purpose |
 | --- | --- |
@@ -59,6 +59,7 @@ Five tools are provided:
 | `codeoutline_callers` | [Find recursive callers and affected files](docs/CALLERS.md) for an exact symbol/qualified name (`query`; optional `projectPath`, `depth` default 3, `max_nodes` default 200, `budget`) |
 | `codeoutline_affected` | [Analyze changed files](docs/AFFECTED.md) with shared reverse traversal, shortest paths and test candidates (`files`; optional `projectPath`, `depth`, `max_nodes`, `budget`) |
 | `codeoutline_type_hierarchy` | [Find declared ancestors and descendants](docs/TYPE-HIERARCHY.md) of a C#/Java/Kotlin/TS/C++ type (`query`; optional `projectPath`, `direction`, `depth` default 8, `max_nodes` default 200, `budget`) |
+| `codeoutline_type_references` | [Find explicit type uses](docs/TYPE-REFERENCES.md) with identity resolution in C/C++, C#, Java, Kotlin, TS/ArkTS, Go and Rust (`query`; optional `projectPath`, `max_nodes` default 200, `budget`) |
 | `codeoutline_status` | Refresh and report index, cache, scanner, and parser statistics |
 | `codeoutline_rebuild` | Rebuild fully, bypassing the cache |
 
@@ -72,7 +73,8 @@ Without Node, download the native archive for your platform from [GitHub Release
 | --- | --- |
 | Document and workspace symbols | Workspace symbols match substrings, case-insensitively |
 | Definition, hover, signature help | Definition also goes from import lines (`require`, `#include`, module imports) to the files they load |
-| References, call hierarchy | Functions, methods, constructors, and macros; incoming and outgoing calls |
+| References | Functions, methods, constructors, macros and [supported explicit type positions](docs/TYPE-REFERENCES.md) |
+| Call hierarchy | Functions, methods, constructors and macros; incoming and outgoing calls |
 | Method implementations | C#, Java, Kotlin and TypeScript interface/abstract methods and C++ virtual overrides; `textDocument/implementation` |
 | Completion | Locals, the file's definitions and imports, declarations from included C/C++ headers, and members after `.`, `->`, `::`, `?.`, or Lua `:` |
 
@@ -297,7 +299,7 @@ Only query-owned configuration and bounded path caches are added; no include map
 
 ## Command line
 
-Explore, callers and type-hierarchy accept [explicit query filters](docs/QUERY-FILTERS.md)
+Explore, callers, type-hierarchy and type-references accept [explicit query filters](docs/QUERY-FILTERS.md)
 such as `lang:lua path:service/ connect`. They select starting symbols; dependency
 expansion still crosses files and languages, including Lua-to-C calls.
 

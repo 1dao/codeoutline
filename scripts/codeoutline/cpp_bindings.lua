@@ -9,11 +9,13 @@ local primitive = { auto = true, int = true, double = true, float = true, char =
     long = true, short = true, unsigned = true, signed = true, void = true }
 
 function M.collect(r, T)
-    if r.language ~= 'cpp' then return end
+    if r.language ~= 'cpp' and r.language ~= 'c' then return end
     require('codeoutline.cpp_types').collect(r, T)
     local wanted = {}
     for _, ref in ipairs(r.refs) do
-        if ref.kind == 'call' or ref.kind == 'ref' or ref.kind == 'member_call' and T:text(ref.tok - 1) == '::' then
+        if ref.kind == 'type' and not ref.recv then wanted[ref.name] = true
+        elseif r.language == 'c' then -- ordinary C call resolution is unchanged
+        elseif ref.kind == 'call' or ref.kind == 'ref' or ref.kind == 'member_call' and T:text(ref.tok - 1) == '::' then
             if T:text(ref.tok) == ref.name then
                 ref.binding = require('codeoutline.cpp_types').evidence(T, ref.tok)
                 r.has_bindings = true
@@ -61,7 +63,7 @@ function M.collect(r, T)
         end
     end
     for _, ref in ipairs(r.refs) do
-        local bare = ref.kind == 'call' or ref.kind == 'ref'
+        local bare = (r.language == 'cpp' and (ref.kind == 'call' or ref.kind == 'ref')) or ref.kind == 'type' and not ref.recv
         if bare or ref.kind == 'member_call' and ref.recv and T:text(ref.tok - 1) ~= '::' then
             local best
             for _, b in ipairs(bindings[bare and ref.name or ref.recv] or {}) do
@@ -69,7 +71,8 @@ function M.collect(r, T)
                     and (not best or b.a > best.a or b.a == best.a and b.token > best.token) then best = b end
             end
             if best then
-                ref.binding = bare and 'cpp:?' or 'cpp:type:' .. best.type .. '\0' .. (T.s[best.token] - 1)
+                if ref.kind == 'type' then ref.type_use.value_shadowed = true
+                else ref.binding = bare and 'cpp:?' or 'cpp:type:' .. best.type .. '\0' .. (T.s[best.token] - 1) end
                 -- A chain's tail is not the simple local sharing that name.
                 if T:text(ref.tok - 3) == '.' or T:text(ref.tok - 3) == '->' then ref.binding = 'cpp:?' end
             end

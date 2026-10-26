@@ -3,6 +3,7 @@ local explore = require('codeoutline.explore')
 local callers = require('codeoutline.callers')
 local affected = require('codeoutline.affected')
 local type_hierarchy = require('codeoutline.type_hierarchy')
+local type_references = require('codeoutline.type_references')
 local text = require('codeoutline.text')
 local version = require('codeoutline.version')
 local coverage = require('codeoutline.coverage')
@@ -13,6 +14,12 @@ local function object(t) return type(t) == 'table' and getmetatable(t) ~= xutils
 local project = { type = 'string', minLength = 1,
     description = 'Project directory on the server machine; defaults to PROJECT, the first client root, then the stdio working directory.' }
 M.tools = array({
+    { name = 'codeoutline_type_references', description = 'Find explicit uses of an indexed type in parameters, returns, fields, variables, inheritance, aliases, construction and supported casts. Resolves type identity on demand and reports coverage limits; not a complete compiler or inferred-type search.',
+        inputSchema = { type = 'object', properties = { projectPath = project,
+            query = { type = 'string', minLength = 1, maxLength = 4096 },
+            max_nodes = { type = 'integer', minimum = 1, maximum = 2000, default = 200 },
+            budget = { type = 'integer', minimum = 256, maximum = 262144, default = 16000 } },
+            required = array({ 'query' }), additionalProperties = false } },
     { name = 'codeoutline_affected', description = 'Analyze potential impact of changed project files in one shared reverse traversal. Returns affected files, shortest symbol paths, test candidates by naming, and explicit coverage limits. Missing/deleted files are reported; no historical graph is inferred. Refreshes automatically.',
         inputSchema = { type = 'object', properties = { projectPath = project,
             files = { type = 'array', minItems = 1, maxItems = 128, items = { type = 'string', minLength = 1, maxLength = 4096 } },
@@ -175,7 +182,7 @@ function M.new(config, submit, cancel)
             error_result(-32602, 'projectPath must be a non-empty string'); return
         end
         local engine = ({ codeoutline_explore = explore, codeoutline_callers = callers,
-            codeoutline_type_hierarchy = type_hierarchy, codeoutline_affected = affected })[tool.name]
+            codeoutline_type_hierarchy = type_hierarchy, codeoutline_type_references = type_references, codeoutline_affected = affected })[tool.name]
         if engine then
             local ok, err = pcall(engine.validate, tool.name == 'codeoutline_affected' and args.files or args.query, { budget = args.budget, depth = args.depth,
                 max_nodes = args.max_nodes, direction = args.direction })

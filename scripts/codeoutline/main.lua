@@ -63,7 +63,7 @@ else exit_on_update = exit_on_update == '1' end
 local installed_update
 -- Background service: listening starts once the port proved free.
 local codec, next_stop_check = nil, 0
-local query_methods = { explore = true, callers = true, affected = true, type_hierarchy = true }
+local query_methods = { explore = true, callers = true, affected = true, type_hierarchy = true, type_references = true }
 local QUERY_QUEUE_WAIT_MS = 750
 
 local function submit(req, done)

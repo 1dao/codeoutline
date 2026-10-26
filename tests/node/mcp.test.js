@@ -30,7 +30,7 @@ test('official SDK stdio: discovery, source, incremental refresh, rebuild and er
     const c = client();
     try {
         await c.connect(transport);
-        assert.equal((await c.listTools()).tools.length, 6);
+        assert.equal((await c.listTools()).tools.length, 7);
         const query = (query) => c.callTool({ name: 'codeoutline_explore', arguments: { query } });
         const greeting = await query('greet');
         assert.match(greeting.content[0].text, /你好世界/);
@@ -130,6 +130,31 @@ test('official SDK reports unresolved calls and excludes unrelated private Lua t
         const dynamic = await c.callTool({ name: 'codeoutline_explore', arguments: { query: 'unknown_entry' } });
         assert.equal(dynamic.structuredContent.state, 'partial');
         assert.equal(dynamic.structuredContent.resolution.unresolved_sites, 1);
+    } finally { await c.close(); await f.cleanup(); }
+});
+
+test('official SDK type references validate identity, limits and source edits', { timeout: 30000 }, async () => {
+    const f = await fixture();
+    await writeFile(join(f.project, 'model.hpp'), 'struct User {};\n');
+    await writeFile(join(f.project, 'use.cpp'), '#include "model.hpp"\nUser make(User arg) { User local; return arg; }\n');
+    const transport = new StdioClientTransport({ command: defaultRuntime,
+        args: [main, 'STDIO=1', `PROJECT=${f.project}`], cwd: tmpdir(), stderr: 'pipe' });
+    transport.stderr?.resume();
+    const c = client();
+    try {
+        await c.connect(transport);
+        const query = (extra = {}) => c.callTool({ name: 'codeoutline_type_references', arguments: { query: 'User', ...extra } });
+        let result = await query();
+        assert.notEqual(result.isError, true); assert.match(result.content[0].text, /3 explicit type references/);
+        assert.equal(result.structuredContent.state, 'ok');
+        result = await query({ max_nodes: 1 });
+        assert.equal(result.structuredContent.state, 'partial');
+        assert.ok(result.structuredContent.coverage.reasons.includes('type_reference_result_limit'));
+        await assert.rejects(query({ max_nodes: 0 }), /max_nodes/);
+        await writeFile(join(f.project, 'use.cpp'), '#include "model.hpp"\nvoid make() {}\n');
+        result = await query(); assert.match(result.content[0].text, /0 explicit type references/);
+        await c.callTool({ name: 'codeoutline_rebuild' });
+        result = await query(); assert.match(result.content[0].text, /0 explicit type references/);
     } finally { await c.close(); await f.cleanup(); }
 });
 
@@ -396,7 +421,7 @@ test('official SDK HTTP: sessions, concurrency, refresh, path aliases and perime
     try {
         await c.connect(transport);
         await c2.connect(new StreamableHTTPClientTransport(new URL(endpoint.url)));
-        assert.equal((await c.listTools()).tools.length, 6);
+        assert.equal((await c.listTools()).tools.length, 7);
         const result = await Promise.all([c, c2].map((instance) => instance.callTool({ name: 'codeoutline_explore', arguments: { query: 'greet' } })));
         assert.ok(result.every((r) => /你好世界/.test(r.content[0].text)));
         const oldPid = endpoint.child.pid;

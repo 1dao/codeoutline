@@ -113,6 +113,59 @@ const indexed = async (client) => {
     assert.ok(client.notifications.some((msg) => msg.params?.value?.kind === 'end'), client.logs());
 };
 
+test('LSP type references use exact UTF-16 ranges and invalidate draft uses', { timeout: 30000 }, async (t) => {
+    const client = await start(t);
+    await writeFile(join(client.project, 'model.hpp'), 'struct User {};\n');
+    const body = 'User make(User arg) { /*😀*/ User local; return arg; }';
+    const source = '#include "model.hpp"\n' + body + '\n';
+    await writeFile(join(client.project, 'use.cpp'), source);
+    await initialize(client, [client.project]); await indexed(client);
+    const model = pathToFileURL(join(client.project, 'model.hpp')).href;
+    const use = pathToFileURL(join(client.project, 'use.cpp')).href;
+    const query = () => client.request('textDocument/references', { textDocument: { uri: model },
+        position: { line: 0, character: 8 }, context: { includeDeclaration: true } });
+    let refs = await query(); assert.equal(refs.length, 4);
+    const local = refs.find((ref) => fileURLToPath(ref.uri) === fileURLToPath(use) && ref.range.start.character === body.indexOf('User local'));
+    assert.ok(local, JSON.stringify(refs)); assert.equal(local.range.end.character, body.indexOf('User local') + 4);
+    const definition = await client.request('textDocument/definition', { textDocument: { uri: use }, position: { line: 1, character: 11 } });
+    assert.equal(definition.length, 1); assert.equal(fileURLToPath(definition[0].uri), fileURLToPath(model));
+    client.notify('textDocument/didOpen', { textDocument: { uri: use, languageId: 'cpp', version: 1, text: source } });
+    client.notify('textDocument/didChange', { textDocument: { uri: use, version: 2 },
+        contentChanges: [{ text: '#include "model.hpp"\nvoid make() {}\n' }] });
+    refs = await query(); assert.equal(refs.length, 1);
+    client.notify('textDocument/didClose', { textDocument: { uri: use } });
+    refs = await query(); assert.equal(refs.length, 4);
+});
+
+test('LSP type references follow imported aliases across provider drafts', { timeout: 30000 }, async (t) => {
+    const client = await start(t);
+    await writeFile(join(client.project, 'model.ts'), 'export class User {}\n');
+    await writeFile(join(client.project, 'use.ts'), "import {User as Account} from './model';\nexport function run(arg: Account): Account { return arg; }\n");
+    await initialize(client, [client.project]); await indexed(client);
+    const model = pathToFileURL(join(client.project, 'model.ts')).href;
+    const query = () => client.request('textDocument/references', { textDocument: { uri: model },
+        position: { line: 0, character: 14 }, context: { includeDeclaration: false } });
+    let refs = await query(); assert.equal(refs.length, 2);
+    client.notify('textDocument/didOpen', { textDocument: { uri: model, languageId: 'typescript', version: 1, text: 'export class User {}\n' } });
+    client.notify('textDocument/didChange', { textDocument: { uri: model, version: 2 }, contentChanges: [{ text: 'export class Other {}\n' }] });
+    const empty = await client.request('textDocument/references', { textDocument: { uri: pathToFileURL(join(client.project, 'use.ts')).href },
+        position: { line: 1, character: 28 }, context: { includeDeclaration: false } });
+    assert.equal(empty.length, 0);
+    client.notify('textDocument/didClose', { textDocument: { uri: model } });
+    refs = await query(); assert.equal(refs.length, 2);
+});
+
+test('LSP references recognize Rust trait declarations as type targets', { timeout: 30000 }, async (t) => {
+    const client = await start(t);
+    const path = join(client.project, 'use.rs');
+    await writeFile(path, 'trait User {}\nfn run(arg: &dyn User) {}\n');
+    await initialize(client, [client.project]); await indexed(client);
+    const result = await client.request('textDocument/references', { textDocument: { uri: pathToFileURL(path).href },
+        position: { line: 0, character: 7 }, context: { includeDeclaration: false } });
+    assert.equal(result.length, 1); assert.equal(result[0].range.start.line, 1);
+    assert.equal(result[0].range.start.character, 17);
+});
+
 test('LSP follows literal events on a shared imported emitter and invalidates provider drafts', { timeout: 30000 }, async (t) => {
     const client = await start(t);
     const bus = "import { EventEmitter } from 'node:events';\nexport const bus = new EventEmitter();\nexport const other = new EventEmitter();\n";

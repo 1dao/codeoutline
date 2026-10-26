@@ -1,7 +1,7 @@
 # Agent query results
 
-`codeoutline_explore`, `codeoutline_callers`, `codeoutline_affected` and
-`codeoutline_type_hierarchy` keep their text result and also return compact MCP
+`codeoutline_explore`, `codeoutline_callers`, `codeoutline_affected`,
+`codeoutline_type_hierarchy` and `codeoutline_type_references` keep their text result and also return compact MCP
 `structuredContent`. The embedded service returns the same coverage in `info`;
 the xagent `CodeExplore` adapter exposes it in `metadata`.
 
@@ -68,7 +68,7 @@ refresh. Query queue saturation or waiting more than 750ms is `busy`, with
 `deadline_exceeded`. Other failures use `query_failed`. Validation/protocol
 errors continue to use the existing JSON-RPC error response.
 
-Queued explore/callers/affected/type-hierarchy requests expire independently of
+Queued explore/callers/affected/type-hierarchy/type-references requests expire independently of
 the active job. The worker acknowledges their cancellation before their queue
 slots are reclaimed, retaining the 64-job bound. Running jobs remain serialized
 and keep their execution deadline; this does not preempt an active query or make

@@ -24,8 +24,8 @@ local binding_cache = { entries = {}, order = {}, bytes = 0 }
 local ANY = setmetatable({}, { __index = function() return true end })
 -- Bare identifiers bind only nearby, except type names used across files.
 local TYPES = { class = true, struct = true, union = true, interface = true, enum = true, record = true,
-    typedef = true, namespace = true, annotation_type = true }
--- references and call hierarchy cover callables; types need complete reference semantics.
+    typedef = true, namespace = true, annotation_type = true, trait = true }
+-- Call hierarchy covers callables; type references use explicit type-site evidence.
 local REFERENCE = { ['function'] = true, method = true, macro = true, constructor = true,
     prototype = true, destructor = true }
 local CALLS = { ['function'] = true, method = true, macro = true, constructor = true,
@@ -189,6 +189,11 @@ end
 
 -- Targets of one occurrence of name in file f, enclosed by node index from.
 local function resolve_site(V, f, from, name, kind, recv, evidence, offset, index, cursor_line)
+    if kind == 'type' then
+        local site = index and (V.js_context.ordinary.data(f).type_sites or {})[index]
+        if not site then return {}, 'unsupported type position' end
+        return require('codeoutline.type_references').resolve(V, f, from > 0 and V.id_of[f][from] or nil, site, V.js_context)
+    end
     if index then evidence = V.js_context.ordinary.evidence(f, index) end
     if V.files[f].language == 'go' and offset and evidence ~= 'go:?' and not (evidence and evidence:match('^go:expr:')) then
         if recv then evidence = 'go:recv:' .. offset
@@ -1409,6 +1414,27 @@ function handlers.lsp_references(req)
     if not V then return {} end
     if #targets == 0 then return {}, V.js_context.workspace_incomplete or V.js_context.go_incomplete or V.js_context.go_methods_incomplete or V.js_context.cpp_receivers_incomplete or V.js_context.rust_incomplete end
     local set = {}
+    local type_ids = {}
+    for _, id in ipairs(targets) do if TYPES[V.nodes[id].kind] then type_ids[#type_ids + 1] = id end end
+    if #type_ids > 0 then
+        local engine = require('codeoutline.type_references')
+        for _, id in ipairs(type_ids) do
+            if not engine.kinds[V.nodes[id].kind] or not require('codeoutline.type_uses').languages[V.files[V.node_file[id]].language] then
+                return { error = 'Type references currently support explicit C/C++, C#, Java, Kotlin, TypeScript, Go and Rust positions' }
+            end
+        end
+        local details = engine.query(V, { query_source = function(_, path)
+            local source = source_doc(V, V.file_index[path]); return source and source.source, false
+        end }, type_ids, { cache = binding_cache, max_nodes = M.MAX_RESULTS, include_paths = req.includePaths })
+        local result = {}
+        if req.includeDeclaration then for _, target in ipairs(details.targets) do result[#result + 1] = location(V, target.id) end end
+        for _, ref in ipairs(details.references) do
+            if #result >= M.MAX_RESULTS then details.incomplete = true; break end
+            local source = source_doc(V, V.file_index[ref.file])
+            if source then result[#result + 1] = { uri = uri_of(V, V.file_index[ref.file]), range = source:range(ref.first, ref.last) } end
+        end
+        return result, details.incomplete
+    end
     for _, id in ipairs(targets) do
         if not REFERENCE[V.nodes[id].kind] then
             return { error = 'References currently support functions, methods, constructors and macros only' }

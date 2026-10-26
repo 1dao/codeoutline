@@ -243,14 +243,17 @@ overlay never writes to the resident tables.
   resolves its name like definition, and lists each target's signature with
   parameters split from the declaration. The active parameter follows the
   argument count; unsaved edits are included.
-- References support functions, methods, constructors, destructors and macros;
-  types, fields and variables get RequestFailed rather than incomplete results.
+- References support functions, methods, constructors, destructors and macros,
+  plus [explicit type positions](TYPE-REFERENCES.md) in C/C++, C#, Java, Kotlin,
+  TypeScript/ArkTS, Go and Rust. Other types, fields and variables get RequestFailed.
   A declaration and its definitions count as one target. Results come from one
   scan of reference names; hit files are reparsed for exact ranges.
 - Call hierarchy items carry the root, file, node index and names, and are
   relocated by name after edits; file-scope calls appear under a file item.
 - Reference scans stop after 1,000 results or 3 s, and position reparsing after
-  2 s; truncation is reported with `window/showMessage`.
+  2 s; truncation is reported with `window/showMessage`. Type references use the
+  separate 16-file, 8 MiB, 4096-site and 600ms cooperative analysis bounds
+  documented above; confirmed partial results carry the same warning.
 - Target positions come from reparsing the target file; a file edited since
   indexing is matched by name and line, or falls back to the start of the line.
 

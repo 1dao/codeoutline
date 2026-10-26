@@ -71,7 +71,7 @@ local function run(G, idx, query, opts, retry)
     local function data(f)
         if not summaries[f] then
             if not idx and not G.root then source(f) end
-            local d = ctx.ordinary.data(f)
+            local d = ctx.ordinary.hierarchy(f)
             -- Share the source FIFO; retain only bounded declaration and alias summaries.
             local evidence = {}
             for i, n in ipairs(G.files[f].nodes) do

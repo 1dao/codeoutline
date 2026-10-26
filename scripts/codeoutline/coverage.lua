@@ -33,6 +33,8 @@ function M.summarize(info)
     if info.files_without_symbols and #info.files_without_symbols > 0 then add('files_without_symbols') end
     if info.on_demand_rejected and #info.on_demand_rejected > 0 then add('on_demand_rejected') end
     if info.unresolved and #info.unresolved > 0 then add('unresolved_types') end
+    if (info.unresolved_sites or 0) > 0 then add('unresolved_type_sites') end
+    if (info.ambiguous_sites or 0) > 0 then add('ambiguous_type_sites') end
     if info.query_stats and (info.query_stats.reverse_unresolved or 0) > 0 then add('unresolved_reverse_types') end
     local resolution = info.query_stats and info.query_stats.resolution
     if resolution then

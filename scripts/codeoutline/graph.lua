@@ -328,7 +328,7 @@ local scored_ids, scored_vals = {}, {}
 
 -- accept overrides the node kinds the ref kind may bind to (navigation only).
 local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired, accept, evidence, js_context, line)
-    if kind == 'annotation' then return nil end
+    if kind == 'annotation' or kind == 'type' then return nil end
     local macro_state
     if kind == 'call' and C_FAMILY[G.files[f].language] and (not src_id or G.nodes[src_id].kind ~= 'macro') then
         local macro, _, state = require('codeoutline.cpp_macros').resolve(G, f, name, line, js_context)
@@ -676,6 +676,7 @@ function M.query(symbols, opts)
         return entry[1], entry[2]
     end
     local function targets(f, i, explain)
+        if symbols.files[f].refs.kind[i] == 'type' then return {} end
         if static_dispatch.handles(f, i) or symbols.files[f].language == 'lua'
             and symbols.files[f].refs.kind[i] == 'call' and callback_loops.handles(f, i) then
             if callback_loops.incomplete then incomplete('lua_callback_analysis_incomplete') end

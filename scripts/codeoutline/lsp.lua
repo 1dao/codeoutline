@@ -270,7 +270,7 @@ function M.new(config, emit, submit, cancel, stop, await_worker)
         if doc then doc.uri = uri end
         return doc
     end
-    local function cancel_pending(id)
+    local function cancel_pending(id, silent)
         local job = self.pending[id]
         if job then
             self.pending[id] = nil
@@ -282,14 +282,16 @@ function M.new(config, emit, submit, cancel, stop, await_worker)
                     cancel(flight.id)
                 end
             else cancel(job.id) end
-            error_response(id, -32800, 'Request cancelled')
+            if not silent then error_response(id, -32800, 'Request cancelled') end
         end
     end
     function self:close()
         if self.state == 'closed' then return end
         self.state = 'closed'
         warm_pending = nil; cancel_warm()
-        for id in pairs(self.pending) do cancel_pending(id) end
+        -- The transport may already be disconnected. Cancel worker jobs without
+        -- writing responses into a pipe the editor has stopped reading.
+        for id in pairs(self.pending) do cancel_pending(id, true) end
         for _, job in pairs(self.scans) do cancel(job.id) end
         if next(self.synced) or self.worker_session then submit({ method = 'lsp_close', session = self.session }, function() end) end
         self.scans, self.documents, self.ready = {}, {}, {}
@@ -340,6 +342,7 @@ function M.new(config, emit, submit, cancel, stop, await_worker)
     end
     handlers.shutdown = function(id)
         self.state = 'shutdown'
+        warm_pending = nil; cancel_warm()
         for request_id in pairs(self.pending) do cancel_pending(request_id) end
         for _, job in pairs(self.scans) do cancel(job.id) end
         self.scans = {}

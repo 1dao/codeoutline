@@ -50,6 +50,7 @@ if #config.roots == 0 then
 end
 local shared = assert(xshared.create('codeoutline_control', 65536, 256))
 local jobs, next_id, job_count, worker_ready = {}, 0, 0, false
+local stopping, indexing = false, false
 local endpoint, stdio, input = nil, nil, ''
 local updating = false
 local startup = xtimer.now_ms()
@@ -96,7 +97,7 @@ local function await_worker(req, started)
     return ok, result
 end
 local function send(response)
-    if response then
+    if response and not stopping and not (lsp_mode and stdio and stdio.state == 'closed') then
         io.stdout:write(lsp_mode and lsp.frame(response) or (xutils.json_pack(response) .. '\n'))
         io.stdout:flush()
     end
@@ -108,8 +109,11 @@ local function listen()
     io.stdout:write(string.format('[codeoutline] listening http://%s:%d/mcp\n', config.host, config.port))
     io.stdout:flush()
 end
-local stopping, indexing = false, false
-local function stop(code) stopping = true; xthread.stop(code) end
+local function stop(code)
+    stopping = true
+    shared:set('shutdown', true)
+    xthread.stop(code)
+end
 
 return {
     __tick_ms = 5,
@@ -232,7 +236,7 @@ return {
                 if incomplete then send(mcp.error(nil, -32700, lsp_mode and 'EOF before complete LSP frame' or 'EOF before message newline')) end
                 if err == 'stdio requires redirected stdin' then err = 'run by an MCP client; see codeoutline --help' end
                 if err ~= 'eof' then io.stderr:write(tostring(err) .. '\n') end
-                stdio:close(); shared:set('shutdown', true); xthread.stop(err == 'eof' and not incomplete and 0 or 1); return
+                stdio:close(); stop(err == 'eof' and not incomplete and 0 or 1); return
             end
             if lsp_mode then
                 local ok, why = pcall(lsp_reader.feed, lsp_reader, data, function(body) stdio:accept(body) end)

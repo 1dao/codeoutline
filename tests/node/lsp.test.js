@@ -926,3 +926,40 @@ test('LSP exit without shutdown fails and truncated frames fail on EOF', { timeo
         assert.equal((await exit)[0], 1);
     }
 });
+
+test('LSP project switches exit with paused log readers during indexing and warming', { timeout: 40000 }, async (t) => {
+    const timings = [];
+    for (let cycle = 0; cycle < 5; cycle++) {
+        const client = await start(t);
+        // Force real parse workers as well as the index and update threads.
+        const source = Array.from({ length: 100 }, (_, i) => `function f${i}() return f${i + 1}() end`).join('\n');
+        await Promise.all(Array.from({ length: 64 }, (_, i) =>
+            writeFile(join(client.project, `worker${i}.lua`), source)));
+        await initialize(client, [client.project]);
+        const limit = Date.now() + 10000;
+        while (!client.logs().includes('pass started:') && Date.now() < limit) {
+            await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+        assert.match(client.logs(), /pass started:/);
+        if (cycle >= 2) {
+            await indexed(client);
+            client.notify('textDocument/didOpen', { textDocument: {
+                uri: pathToFileURL(join(client.project, 'worker0.lua')).href,
+                languageId: 'lua', version: 1, text: source } });
+        }
+        client.child.stderr.pause();
+        const exit = once(client.child, 'exit'), began = Date.now();
+        let timer;
+        try {
+            if (cycle % 2) client.child.stdin.end();
+            else { assert.equal(await client.request('shutdown'), null); client.notify('exit'); }
+            const result = await Promise.race([exit, new Promise((_, reject) => {
+                timer = setTimeout(() => reject(new Error(`project switch ${cycle} left LSP ${client.child.pid} alive`)), 5000);
+            })]);
+            assert.equal(result[0], 0);
+            timings.push(Date.now() - began);
+        } finally { clearTimeout(timer); client.child.stderr.resume(); }
+        assert.doesNotMatch(client.logs(), /\[xpoll\] poll error/);
+    }
+    t.diagnostic(`Five project shutdowns released all child processes: ${timings.join(',')}ms`);
+});

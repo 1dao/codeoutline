@@ -60,6 +60,20 @@ Features: `documentSymbol`, `workspaceSymbol`, `definition`, `hover`, `signature
 Windows Kits/MSVC; add other directories with
 `"initialization_options": { "includePaths": ["C:/sdk/include"] }`.
 
+## Project switching and processes
+
+Zed can keep several projects open in one window. Switching the visible project
+does not close the others: each open project can retain its own CodeOutline LSP
+process. In the project switcher, inspect **This Window** and use the project's
+**Remove from Window** action (the `×` button) to close an unused project and
+release its server. See [Zed's project model](https://zed.dev/docs/windows-and-projects).
+
+An `xnet` command ending in `daemon --port ...` is the separate shared HTTP/MCP
+service. It is expected to outlive individual editor projects. LSP commands end
+in `lsp --stdio`; their shutdown or stdin disconnect cancels background work and
+exits the process. Source checkouts need a rebuilt runtime after native lifecycle
+fixes (`tools/build-runtime.ps1` or `tools/build-runtime.sh`).
+
 ## Development
 
 Install Rust through rustup, then in Zed run `zed: install dev extension` and select

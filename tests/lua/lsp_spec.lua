@@ -320,6 +320,21 @@ spec.describe('LSP sessions', function()
         jobs[2](true, {})
         spec.equal(output[#output].id, 2); spec.equal(#output[#output].result, 0)
     end)
+    spec.it('cancels pending queries silently when the transport closes', function()
+        local output, jobs, cancelled = {}, {}, {}
+        local session = lsp.new({}, function(msg) output[#output + 1] = msg end,
+            function(req, done) jobs[#jobs + 1] = done; return tostring(#jobs) end,
+            function(id) cancelled[id] = true end, function() end)
+        session:accept(xutils.json_pack({ jsonrpc = '2.0', id = 1, method = 'initialize', params = { capabilities = {} } }))
+        session:accept(xutils.json_pack({ jsonrpc = '2.0', method = 'initialized' }))
+        session:accept(xutils.json_pack({ jsonrpc = '2.0', id = 2, method = 'workspace/symbol', params = { query = '' } }))
+        local before = #output
+        session:close(); session:close()
+        spec.truthy(cancelled['1']); spec.equal(next(session.pending), nil)
+        jobs[1](true, { { name = 'late' } })
+        spec.equal(#output, before)
+        spec.equal(session.state, 'closed')
+    end)
     spec.it('returns drafts without worker submission when any workspace root is unready', function()
         local output, jobs = {}, {}
         local session = lsp.new({}, function(msg) output[#output + 1] = msg end,
@@ -3336,6 +3351,13 @@ spec.describe('LSP navigation requests', function()
             send('textDocument/definition', { textDocument = { uri = second }, position = { line = 0, character = 10 } }, 21)
             spec.equal(jobs[7].req.changed[second].version, 3)
             jobs[7].done(true, { result = {} }); spec.equal(output[#output].id, 21)
+            send('textDocument/didChange', { textDocument = { uri = second, version = 4 },
+                contentChanges = { { text = 'function closing_idle() end\n' } } })
+            now = 1900; session:poll(); spec.equal(jobs[8].req.method, 'lsp_warm')
+            send('shutdown', {}, 22); spec.truthy(cancelled['8'])
+            local after_shutdown = #output
+            now = 3000; session:poll(); spec.equal(#jobs, 8)
+            jobs[8].done(true, {}); spec.equal(#output, after_shutdown)
             session:close()
         end)
         xtimer.now_ms = clock

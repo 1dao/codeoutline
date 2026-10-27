@@ -187,6 +187,28 @@ spec.describe('service stability', function()
         spec.truthy(collectgarbage('count') < before - service.GC_MIN_KB, 'idle garbage was collected')
         spec.equal(service.collect(), false)
     end)
+    spec.it('reclaims replaced indexes on idle ticks even below the allocation threshold', function()
+        while service.collect() do end
+        collectgarbage('stop')
+        local ok, err = pcall(function()
+            local previous = setmetatable({}, { __mode = 'v' })
+            local function remember()
+                previous[1] = service.get(project, opts)
+            end
+            remember()
+            collectgarbage('collect')
+            service.rebuild(project)
+            local steps = 0
+            while service.collect() do
+                steps = steps + 1
+                assert(steps < 10000, 'idle reclamation never completed')
+            end
+            spec.nil_value(previous[1], 'the replaced index must not wait for more queries or allocations')
+            spec.truthy(service.status(project).symbols > 0)
+        end)
+        collectgarbage('restart')
+        if not ok then error(err, 0) end
+    end)
     spec.it('rg respects ignored extensions and negations outside a git repository', function()
         if not index.rg_available() then print('SKIP ripgrep is unavailable'); return end
         write(project .. '/.gitignore', '*.lua\n!keep.lua\n')

@@ -14,14 +14,21 @@ local watch = false
 -- last one. A resident index makes the heap large, so the garbage of polls
 -- and requests (and a dropped project's whole index) would build up toward
 -- the index's own size; hosts collect it on idle ticks with M.collect.
-local gc = { live = collectgarbage('count'), running = false }
--- A 512 KB step takes about 1 ms (6 ms at most) on a 650 MB heap.
+local gc = { live = collectgarbage('count'), running = false, again = false }
+-- Limit incremental work per idle tick. The collector's atomic phase can take
+-- longer than an ordinary step, so this is not a hard wall-time bound.
 M.GC_MIN_KB, M.GC_STEP_KB = 16384, 512
+
+local function reclaim_later()
+    -- A cycle already in progress may have marked the index we just dropped.
+    -- Finish it, then run a complete new cycle after the owner's stack unwinds.
+    gc.running, gc.again = true, true
+end
 
 local function drop(key)
     local p = projects[key]
     projects[key] = nil
-    if p then p.idx:close(); gc.running = true end
+    if p then p.idx:close(); reclaim_later() end
 end
 
 function M.configure(opts)
@@ -64,13 +71,17 @@ end
 -- Run one bounded incremental GC step on an idle tick; returns whether a cycle
 -- is still in progress. A cycle starts once the garbage since the last one
 -- reaches a sixteenth of the live heap (at least GC_MIN_KB), or a project is
--- dropped, and then advances one step per call until it completes.
+-- dropped/replaced, and then advances one step per call until it completes.
+-- Dropped indexes also need a follow-up cycle to reclaim already-marked objects.
 function M.collect()
     if not gc.running then
         if collectgarbage('count') - gc.live < math.max(M.GC_MIN_KB, gc.live / 16) then return false end
         gc.running = true
     end
-    if collectgarbage('step', M.GC_STEP_KB) then gc.running, gc.live = false, collectgarbage('count') end
+    if collectgarbage('step', M.GC_STEP_KB) then
+        if gc.again then gc.again = false
+        else gc.running, gc.live = false, collectgarbage('count') end
+    end
     return gc.running
 end
 
@@ -237,7 +248,7 @@ function M.rebuild(root, opts)
         projects[key] = previous
         error(result, 2)
     end
-    if previous then previous.idx:close() end
+    if previous then previous.idx:close(); reclaim_later() end
     return result
 end
 

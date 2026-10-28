@@ -91,10 +91,16 @@ function M.find(G, f, site, ctx, system_directories)
     end
     local function dirs(owner)
         local policy = includes.policy(G, owner, ctx)
-        local result = {}; for _, dir in ipairs(policy.paths) do result[#result + 1] = dir end
+        local result = {}
+        local function add_root(dir)
+            control.check()
+            local real = xutils.realpath(dir)
+            if real then result[#result + 1] = paths.normalize(real) end
+        end
+        for _, dir in ipairs(policy.paths) do add_root(dir) end
         if not policy.configured then
             defaults = defaults or (type(system_directories) == 'function' and system_directories() or system_directories or {})
-            for _, dir in ipairs(defaults) do result[#result + 1] = dir end
+            for _, dir in ipairs(defaults) do add_root(dir) end
         end
         return result
     end
@@ -136,7 +142,8 @@ function M.find(G, f, site, ctx, system_directories)
                     if #ids == 0 then
                         local roots = dirs(owner)
                         if file then
-                            if not paths.contains(G.root, file) then
+                            file = existing(file)
+                            if file and not paths.contains(G.root, file) then
                                 roots[#roots + 1] = directory(file); add(file, roots)
                             end
                         elseif not selected then add(locate(imp, roots), roots) end

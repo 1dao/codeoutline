@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, realpath, symlink, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -169,6 +169,7 @@ test('LSP references recognize Rust trait declarations as type targets', { timeo
 test('LSP follows external forwarding headers without indexing the SDK and refreshes edited declarations', { timeout: 30000 }, async (t) => {
     const client = await start(t);
     const sdk = join(client.project, '..', 'fake-sdk'); await mkdir(sdk);
+    const sdkAlias = join(client.project, '..', 'sdk-alias'); await symlink(sdk, sdkAlias, 'junction');
     await writeFile(join(sdk, 'string.h'), '#include "memory.h"\n');
     await writeFile(join(sdk, 'stdlib.h'), '#include "alloc.h"\n');
     await writeFile(join(sdk, 'memory.h'), 'void* memchr(const void* p, int c, unsigned n);\n'
@@ -176,7 +177,7 @@ test('LSP follows external forwarding headers without indexing the SDK and refre
         + 'void* __cdecl memset(_Out_writes_bytes_all_(_Size) void* _Dst, int _Val, unsigned _Size);\n'
         + '_CRT_INSECURE_DEPRECATE_MEMORY(copy_s)\nvoid* memcpy(void* dst, const void* src, unsigned n);\n');
     await writeFile(join(sdk, 'alloc.h'), '/*😀*/ void free(void* p);\n');
-    await writeFile(join(client.project, '.codeoutline.json'), JSON.stringify({ includePaths: [sdk] }));
+    await writeFile(join(client.project, '.codeoutline.json'), JSON.stringify({ includePaths: [sdkAlias] }));
     const source = '#include <string.h>\n#include <stdlib.h>\nvoid run(void* p) { memchr(p, 0, 1); memset(p, 0, 1); memcpy(p, p, 1); free(p); }\n';
     await mkdir(join(client.project, 'freestanding'));
     await writeFile(join(client.project, 'freestanding', 'compat.c'), 'void* memset(void* p, int c, unsigned n) { return p; }\n');
@@ -189,7 +190,7 @@ test('LSP follows external forwarding headers without indexing the SDK and refre
         for (const [name, header] of [['memchr', 'memory.h'], ['memset', 'memory.h'], ['memcpy', 'memory.h'], ['free', 'alloc.h']]) {
             const start = performance.now(), result = await definition(name);
             assert.ok(performance.now() - start < 1000);
-            assert.equal(result.length, 1); assert.equal(fileURLToPath(result[0].uri), join(sdk, header));
+            assert.equal(result.length, 1); assert.equal(await realpath(fileURLToPath(result[0].uri)), await realpath(join(sdk, header)));
             if (name === 'free') assert.equal(result[0].range.start.character, '/*😀*/ void '.length);
         }
     }
@@ -587,7 +588,7 @@ test('LSP parses unknown suffixes through every navigation phase without learnin
     const lua = 'local function unknown_lua() end\nunknown_lua()\n';
     client.notify('textDocument/didOpen', { textDocument: { uri: luaUri, languageId: 'plaintext', version: 1, text: lua } });
     const result = await client.request('textDocument/definition', { textDocument: { uri: luaUri }, position: { line: 1, character: 3 } });
-    assert.equal(result.length, 1); assert.equal(result[0].uri, luaUri); assert.equal(result[0].range.start.line, 0);
+    assert.equal(result.length, 1); assert.equal(fileURLToPath(result[0].uri), fileURLToPath(luaUri)); assert.equal(result[0].range.start.line, 0);
 });
 
 test('LSP returns only macro definitions for fragments with no include context', { timeout: 30000 }, async (t) => {

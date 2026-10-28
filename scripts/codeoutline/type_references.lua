@@ -11,7 +11,7 @@ function M.validate(query, opts)
     assert(type(cap) == 'number' and cap % 1 == 0 and cap >= 1 and cap <= 2000, 'max_nodes must be an integer between 1 and 2000')
     return budget
 end
-function M.resolve(G, f, from, site, ctx, details)
+function M.resolve(G, f, from, site, ctx, details, navigation)
     if site.value_shadowed and not site.elaborated then return {}, 'value binding' end
     local language, written = G.files[f].language, site.written
     local data, head = details or ctx.ordinary.data(f), written:match('^([%w_$]+)')
@@ -21,7 +21,8 @@ function M.resolve(G, f, from, site, ctx, details)
     local scope = from and from > 0 and G.nodes[from] and G.nodes[from].qualified or ''
     local ids
     if language == 'cpp' then
-        ids = require('codeoutline.cpp_types').resolve(G, f, written, { context = ctx, scope = scope, at = site.at, accept = M.kinds, definitions = true })
+        ids = require('codeoutline.cpp_types').resolve(G, f, written, { context = ctx, scope = scope,
+            at = site.at, accept = M.kinds, definitions = true, navigation_alias = navigation })
     elseif language == 'c' then
         local visible = graph.visible_dependencies(G, f, ctx); ids = {}
         local own = {}

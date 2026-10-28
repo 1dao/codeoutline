@@ -1307,6 +1307,39 @@ int luaopen_native_test(lua_State *L) { luaL_setfuncs(L, methods, 0); luaL_newli
         spec.contains(hover.contents.value, 'save(id:number, arg2:string, count?:int = 10)')
         navigation.close('native-overlay')
     end)
+    spec.it('navigates dotted Lua native modules and their registered members', function()
+        local native = [[static int native_send(lua_State *L) { return 0; }
+static int native_hidden(lua_State *L) { return 0; }
+int luaopen_example_core(lua_State *L) {
+    luaL_Reg api[] = { {"send", native_send}, {NULL, NULL} };
+    lua_newtable(L); luaL_setfuncs(L, api, 0); return 1;
+}
+int luaopen_example_empty(lua_State *L) { return 0; }
+]]
+        local source = 'local c = require "example.core"\nc.send()\nc.hidden()\nlocal e = require "example.empty"\n'
+        nav_write('dotted-native.c', native); nav_write('dotted-client.lua', source)
+        local options = { cache_path = nav_root .. '/cache.idx', lister = 'walk' }
+        service.refresh(nav_root, options)
+        local doc = docs.read(nav_root .. '/dotted-client.lua')
+        local ok, err = pcall(function()
+            local function jump(text)
+                return nav({ method = 'lsp_definition', uri = doc.uri,
+                    position = doc:position(assert(source:find(text, 1, true)) - 1) })
+            end
+            local loader = jump('example.core'); spec.equal(#loader, 1)
+            spec.equal(range_text('dotted-native.c', loader[1].range), 'luaopen_example_core')
+            local empty = jump('example.empty'); spec.equal(#empty, 1)
+            spec.equal(range_text('dotted-native.c', empty[1].range), 'luaopen_example_empty')
+            local member = jump('send()'); spec.equal(#member, 1)
+            spec.equal(range_text('dotted-native.c', member[1].range), 'native_send')
+            spec.equal(#jump('hidden()'), 0, 'unregistered C functions are not exports')
+            local result = nav({ method = 'lsp_completion', uri = doc.uri,
+                position = doc:position(assert(source:find('c.send', 1, true)) + 1) })
+            spec.equal(#result.items, 1); spec.equal(result.items[1].label, 'send')
+        end)
+        os.remove(nav_root .. '/dotted-native.c'); os.remove(nav_root .. '/dotted-client.lua')
+        service.refresh(nav_root, options); assert(ok, err)
+    end)
     spec.it('shares ordinary bindings with definitions, references and unsaved targets', function()
         local cases = {
             { file = 'Ordinary.ts', target = 'OrdinaryTarget.ts', language = 'typescript',
@@ -2871,7 +2904,32 @@ void MacroNavUnknown(void) { MACRO_NAV(3); }
         found = jump('MACRO_NAV(2)', 'macro-nav'); spec.equal(#found, 1); spec.equal(found[1].range.start.line, 3)
         navigation.close('macro-nav')
     end)
-    spec.it('returns macro definitions without API call sites and keeps undef and include barriers', function()
+    spec.it('navigates individual names inside macro bodies without treating parameters as functions', function()
+        local source = '#define ACTION(q) first(q); second(q);\n'
+            .. '#define MULTI(q) \\\n    second(q)\n'
+            .. 'static void first(void *q) {}\nstatic void second(void *q) {}\n'
+        local options = { cache_path = nav_root .. '/cache.idx', lister = 'walk' }
+        for _, extension in ipairs({ 'c', 'cpp' }) do nav_write('macro-cursor.' .. extension, source) end
+        service.refresh(nav_root, options)
+        local ok, err = pcall(function()
+            for _, extension in ipairs({ 'c', 'cpp' }) do
+                local rel = 'macro-cursor.' .. extension
+                local doc = docs.read(nav_root .. '/' .. rel)
+                local function jump(pattern, within)
+                    local offset = assert(source:find(pattern, 1, true)) - 1 + (within or 0)
+                    return nav({ method = 'lsp_definition', uri = doc.uri, position = doc:position(offset) })
+                end
+                local found = jump('first(q)'); spec.equal(#found, 1); spec.equal(found[1].range.start.line, 3)
+                found = jump('second(q)'); spec.equal(#found, 1); spec.equal(found[1].range.start.line, 4)
+                found = jump('    second(q)', 4); spec.equal(#found, 1); spec.equal(found[1].range.start.line, 4)
+                spec.equal(#jump('first(q)', 6), 0, 'macro parameters are not project symbols')
+                found = jump('ACTION(q)'); spec.equal(#found, 1); spec.equal(found[1].range.start.line, 0)
+            end
+        end)
+        for _, extension in ipairs({ 'c', 'cpp' }) do os.remove(nav_root .. '/macro-cursor.' .. extension) end
+        service.refresh(nav_root, options); assert(ok, err)
+    end)
+    spec.it('returns unconfirmed macro definitions without API call sites and keeps definite undef barriers', function()
         for _, dir in ipairs({ 'macroDef1', 'macroDef2', 'macroDef3', 'macroDef4', 'macroUse' }) do assert(xutils.mkdir_p(nav_root .. '/' .. dir)) end
         for i = 1, 4 do nav_write('macroDef' .. i .. '/api.h', '#define MissingContextMacro(L,n) use_stack(L,n)\n') end
         local calls = {}
@@ -2899,9 +2957,9 @@ void MacroNavUnknown(void) { MACRO_NAV(3); }
             end
             spec.equal(#jump(source, nil, 'lsp_references'), 0, 'candidates cannot turn calls into definition sites or reference edges')
             spec.equal(#jump('#undef MissingContextMacro\n' .. source), 0)
-            spec.equal(#jump('#if FLAG\n#undef MissingContextMacro\n#endif\n' .. source), 0)
+            spec.equal(#jump('#if FLAG\n#undef MissingContextMacro\n#endif\n' .. source), 4, 'uncertain undef permits navigation candidates')
             spec.equal(#jump(source, { includePaths = {} }), 4, 'an empty client path list is not an explicit project policy')
-            spec.equal(#jump(source, { includePaths = { 'macroDef1' } }), 0, 'configured visibility cannot be bypassed')
+            spec.equal(#jump(source, { includePaths = { 'macroDef1' } }), 4, 'configured paths do not suppress unconfirmed tags')
             found = jump('#include "../macroDef1/api.h"\n' .. source)
             spec.equal(#found, 1); spec.equal(found[1].uri, nav_uri('macroDef1/api.h'))
             found = jump(source .. '#define MissingContextMacro(L,n) later(L,n)\n')
@@ -3134,6 +3192,54 @@ void MacroNavUnknown(void) { MACRO_NAV(3); }
             spec.equal(#definition, 0)
         end)
         assert(xutils.rmtree(external)); assert(xutils.rmtree(nav_root .. '/externalSearch'))
+        service.refresh(nav_root, options); assert(ok, err)
+    end)
+    spec.it('navigates parameter typedef declarations when their underlying type is unavailable', function()
+        assert(xutils.mkdir_p(nav_root .. '/param-types'))
+        nav_write('param-types/types.hpp', 'typedef struct _Opaque Opaque;\ntypedef std::vector<int> Collection;\nstruct Actual {};\nusing Alias = Actual;\n')
+        nav_write('param-types/hidden.hpp', 'typedef int HiddenType;\n')
+        local source = '#include "types.hpp"\nvoid parameters(Opaque *a, Collection &b, Alias *c, HiddenType *d) {}\n'
+        nav_write('param-types/use.cpp', source)
+        local options = { cache_path = nav_root .. '/cache.idx', lister = 'walk' }
+        service.refresh(nav_root, options)
+        local doc = docs.read(nav_root .. '/param-types/use.cpp')
+        local ok, err = pcall(function()
+            local function jump(name)
+                return nav({ method = 'lsp_definition', uri = doc.uri,
+                    position = doc:position(assert(source:find(name, 1, true)) - 1) })
+            end
+            local opaque = jump('Opaque *'); spec.equal(#opaque, 1); spec.equal(opaque[1].range.start.line, 0)
+            local collection = jump('Collection &'); spec.equal(#collection, 1); spec.equal(collection[1].range.start.line, 1)
+            local alias = jump('Alias *'); spec.equal(#alias, 1); spec.equal(alias[1].range.start.line, 2)
+            spec.equal(#jump('HiddenType *'), 0, 'an invisible typedef is not a confirmed definition')
+        end)
+        assert(xutils.rmtree(nav_root .. '/param-types')); service.refresh(nav_root, options); assert(ok, err)
+    end)
+    spec.it('navigates external types and the declared function-pointer field of the receiver', function()
+        local external = nav_root .. '-external-types'
+        assert(xutils.mkdir_p(external))
+        local f = assert(io.open(external .. '/tasks.h', 'wb'))
+        f:write('typedef struct _ExternalTask ExternalTask;\n'); f:close()
+        local source = '#include <tasks.h>\nstruct FirstTask { void (*response_func)(int); };\n'
+            .. 'struct OtherTask { void (*response_func)(int); };\n'
+            .. 'void run(ExternalTask *base) { FirstTask *task = (FirstTask*)base; task->response_func(1); }\n'
+        nav_write('pointer-field.cpp', source)
+        local options = { cache_path = nav_root .. '/cache.idx', lister = 'walk' }
+        service.refresh(nav_root, options)
+        local doc = docs.read(nav_root .. '/pointer-field.cpp')
+        local ok, err = pcall(function()
+            local function jump(name, method, paths)
+                return nav({ method = method or 'lsp_definition', uri = doc.uri, includePaths = paths,
+                    position = doc:position(assert(source:find(name, 1, true)) - 1) })
+            end
+            local found = jump('ExternalTask *base', nil, { external })
+            spec.equal(#found, 1); spec.equal(found[1].uri, docs.uri(external .. '/tasks.h'))
+            spec.equal(#jump('ExternalTask *base', nil, { nav_root }), 0, 'unselected external headers stay invisible')
+            found = jump('response_func(1)')
+            spec.equal(#found, 1); spec.equal(found[1].range.start.line, 1)
+            spec.equal(#jump('response_func(1)', 'lsp_references'), 0, 'field navigation must not create call edges')
+        end)
+        os.remove(nav_root .. '/pointer-field.cpp'); assert(xutils.rmtree(external))
         service.refresh(nav_root, options); assert(ok, err)
     end)
     spec.it('falls back to a visible prototype when definitions are ambiguous', function()

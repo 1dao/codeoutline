@@ -37,8 +37,8 @@ function M.find(G, f, site, ctx)
     -- These languages have package/project visibility that a name-only search
     -- cannot establish. Their existing resolvers retain authority.
     if language == 'go' or language == 'rust' or language == 'csharp' then return {}, info end
-    if (language == 'c' or language == 'cpp')
-        and require('codeoutline.cpp_includes').policy(G, f, ctx).configured then return {}, info end
+    local configured = (language == 'c' or language == 'cpp')
+        and require('codeoutline.cpp_includes').policy(G, f, ctx).configured
     local qualified
     if site.evidence and site.evidence ~= '' then qualified = site.evidence:match('^cpp:name:(.-)%z') end
     qualified = qualified and normalized(qualified)
@@ -47,7 +47,7 @@ function M.find(G, f, site, ctx)
         if site.recv == 'self' or site.recv == 'this' or site.recv == 'cls' then return {}, info end
         qualified = qualified or normalized(site.recv .. '.' .. site.name)
     elseif site.kind == 'member_call' or site.kind == 'member_symbol' then return {}, info end
-    local list, hits = G.by_name[site.name] or {}, {}
+    local list, hits, macro_hits = G.by_name[site.name] or {}, {}, {}
     local source_dir = G.files[f].path:match('^(.*)/') or ''
     for i = 1, math.min(#list, M.MAX_SCAN) do
         if i % 16 == 0 then control.check() end
@@ -60,10 +60,12 @@ function M.find(G, f, site, ctx)
         local kind = site.kind == 'new' and types[node.kind]
             or site.kind ~= 'new' and (callable[node.kind]
                 or (site.kind == 'symbol' or site.kind == 'member_symbol') and (types[node.kind] or values[node.kind]))
-        -- An absent include context permits inspecting macro declarations.
-        -- An explicit undef, uncertain expansion, or budget failure does not.
+        -- Unresolved macro visibility can still offer unconfirmed definition
+        -- tags for navigation, including when include paths are configured.
+        -- An explicit undef remains a barrier.
         if node.kind == 'macro' then
-            kind = site.kind == 'call' and site.macro_state == 'unseen'
+            kind = site.kind == 'call' and (site.macro_state == 'unseen'
+                or site.macro_state == 'uncertain' or site.macro_state == 'limited')
                 and (g ~= f or site.line and node.line < site.line)
         end
         local name_matches = (node.name == site.name or published) and (normalized(node.qualified) == site.name or published)
@@ -83,9 +85,13 @@ function M.find(G, f, site, ctx)
             and (qualified or node.kind ~= 'method' and node.kind ~= 'constructor') then
             local score = g == f and 100 or (rec.path:match('^(.*)/') or '') == source_dir and 20 or 0
             if node.kind ~= 'prototype' and not node.decl then score = score + 1 end
-            hits[#hits + 1] = { id = id, score = score }
+            local bucket = node.kind == 'macro' and macro_hits or hits
+            bucket[#bucket + 1] = { id = id, score = score }
         end
     end
+    -- Ordinary definitions are more useful than unrelated proxy macros.
+    if #hits == 0 then hits = macro_hits
+    elseif configured then hits = {} end
     info.truncated = info.truncated or #list > M.MAX_SCAN
     -- Prefer implementations over repeated API declarations. A declaration is
     -- still useful when the project has no matching implementation at all.

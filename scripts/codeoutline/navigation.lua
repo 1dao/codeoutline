@@ -189,11 +189,12 @@ local function recursive(node, recv)
 end
 
 -- Targets of one occurrence of name in file f, enclosed by node index from.
-local function resolve_site(V, f, from, name, kind, recv, evidence, offset, index, cursor_line)
+local function resolve_site(V, f, from, name, kind, recv, evidence, offset, index, cursor_line, definition)
     if kind == 'type' then
         local site = type(evidence) == 'table' and evidence
         if not site then return {}, 'unsupported type position' end
-        return require('codeoutline.type_references').resolve(V, f, from > 0 and V.id_of[f][from] or nil, site, V.js_context)
+        return require('codeoutline.type_references').resolve(V, f, from > 0 and V.id_of[f][from] or nil,
+            site, V.js_context, nil, definition)
     end
     if index then evidence = V.js_context.ordinary.evidence(f, index) end
     if V.files[f].language == 'go' and offset and evidence ~= 'go:?' and not (evidence and evidence:match('^go:expr:')) then
@@ -204,7 +205,8 @@ local function resolve_site(V, f, from, name, kind, recv, evidence, offset, inde
     local direct, paired = deps(V, f)
     local rkind, accept = kind, nil
     if kind == 'symbol' then rkind, accept = 'call', ANY
-    elseif kind == 'member_symbol' then rkind, accept = 'member_call', ANY end
+    elseif kind == 'member_symbol' then rkind, accept = 'member_call', ANY
+    elseif definition and kind == 'member_call' and V.files[f].language == 'cpp' then accept = ANY end
     local site_line = index and V.files[f].refs.line[index] or cursor_line
     local targets, reason, macro_state = graph.resolve(V, f, src, name, rkind, recv or nil, direct, paired, accept, evidence, V.js_context, site_line)
     targets = targets or {}
@@ -285,7 +287,65 @@ local function find_cursor(doc, offset, strict, parsed)
     end
 end
 
+local macro_body_scanners = {}
+local function macro_body_cursor(doc, offset, rec)
+    if not C_FAMILY[rec.language] then return nil end
+    local line = doc:position(offset).line + 1
+    while line > 1 do
+        local previous = doc.source:sub(doc.lines[line - 1] + 1, doc.lines[line]):gsub('[\r\n]+$', '')
+        if not previous:match('\\$') then break end
+        line = line - 1
+    end
+    if not doc.source:sub(doc.lines[line] + 1, (doc.lines[line + 1] or #doc.source)):match('^%s*#%s*define%s') then return nil end
+    local T = doc:tokens(true)
+    for i = 1, T.n do
+        if T.s[i] - 1 > offset then break end
+        if T.k[i] == 'dir' and T.s[i] - 1 <= offset and offset < T.e[i] then
+            local text = T:text(i)
+            local name_start, name = text:match('^#%s*define%s+()([%a_][%w_]*)')
+            if not name then return nil end
+            local start = T.s[i] - 1
+            if offset < start + name_start - 1 + #name then return nil end
+            local scanner = macro_body_scanners[rec.language]
+            if not scanner then
+                local config = {}
+                for k, v in pairs(require('codeoutline.lang.' .. rec.language).config) do config[k] = v end
+                config.directive, config.pp_first_branch = nil, nil
+                scanner = require('codeoutline.xscan').lang(config)
+                macro_body_scanners[rec.language] = scanner
+            end
+            local body = scanner:tokenize(text)
+            local macro, parameters = nil, {}
+            for n = 1, body.n do if body.s[n] == name_start then macro = n; break end end
+            if not macro then return false end
+            local first = macro + 1
+            if body:text(first) == '(' and body.s[first] == body.e[macro] + 1 and body.m[first] then
+                local close = body.m[first]
+                for n = first + 1, close - 1 do if body.k[n] == 'id' then parameters[body:text(n)] = true end end
+                first = close + 1
+            end
+            for n = first, body.n do
+                local a, b = start + body.s[n] - 1, start + body.e[n]
+                if a <= offset and offset < b and body.k[n] == 'id' then
+                    local word = body:text(n)
+                    if parameters[word] then return false end
+                    local op = body:text(n - 1)
+                    local member = op == '.' or op == '->' or op == '::'
+                    return { from = 0, name = word, kind = member and (body:text(n + 1) == '(' and 'member_call' or 'member_symbol')
+                        or (body:text(n + 1) == '(' and 'call' or 'symbol'),
+                        recv = member and body.k[n - 2] == 'id' and body:text(n - 2) or nil, first = a, last = b }
+                end
+            end
+            return false
+        end
+    end
+end
+
 local function cursor(doc, offset, V, f, include_inactive)
+    if include_inactive then
+        local macro = macro_body_cursor(doc, offset, doc:parse())
+        if macro ~= nil then return macro or nil end
+    end
     local found = find_cursor(doc, offset, true) or find_cursor(doc, offset, false)
     if found and found.decl then return found end
     local rec, T
@@ -701,6 +761,12 @@ local function import_targets(V, f, line)
     end
     for _, imp in ipairs(rec.imports or {}) do
         if imp.line == line then
+            if rec.language == 'lua' and imp.kind == 'require' then
+                for _, id in ipairs(require('codeoutline.foreign').lua_entrypoints(V, imp.path)) do
+                    local loc = location(V, id)
+                    if loc and not seen[loc.uri] then seen[loc.uri] = true; result[#result + 1] = loc end
+                end
+            end
             local files, selected, header
             if C_FAMILY[rec.language] then
                 files, selected, header = require('codeoutline.cpp_includes').resolve(V, f, imp, V.js_context)
@@ -1108,8 +1174,8 @@ local function at(req)
     if c and c.decl then targets = { V.id_of[f][c.decl] }
     elseif c then
         c.line = doc:position(c.first).line + 1
-        targets, reason, evidence, macro_state = resolve_site(V, f, c.from, c.name, c.kind, c.recv, c.evidence, c.first, c.index, c.line)
-        c.reason, c.evidence, c.macro_state = reason, evidence, macro_state
+        targets, reason, evidence, macro_state = resolve_site(V, f, c.from, c.name, c.kind, c.recv, c.evidence, c.first, c.index, c.line, req.method == 'lsp_definition')
+        c.reason, c.evidence, c.macro_state = reason, c.kind == 'type' and c.evidence or evidence, macro_state
     end
     return V, doc, c, targets, f, offset
 end

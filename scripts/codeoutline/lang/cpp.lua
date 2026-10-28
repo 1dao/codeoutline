@@ -225,24 +225,35 @@ local function cpp_decl(T, r, i, j, parent)
         if is(T, y, '=') and not eq and d == 0 and not kw(T, y - 1, 'operator') then eq = y end
         if is(T, y, '(') and T.m[y] then
             if not eq and d == 0 then
-                local info = name_before_paren(T, y, i)
-                if info and info.first > i - 1 and not ATTR[info.name] then
-                    local ctor = parent and r.nodes[parent].name == info.name
-                    if info.first == i and #info.quals == 0 and not info.name:find('^[~o]') and not ctor then
-                        common.add_calls(r, T, i, j)          -- MACRO(args);
+                -- A function-pointer declarator is a field/variable, not a
+                -- function prototype: void (*callback)(int).
+                local close = T.m[y]
+                if is(T, y + 1, '*') and T.k[y + 2] == 'id' and close == y + 3
+                    and is(T, close + 1, '(') and T.m[close + 1] then
+                    names[#names + 1] = y + 2
+                    y = T.m[close + 1] + 1
+                else
+                    local info = name_before_paren(T, y, i)
+                    if info and info.first > i - 1 and not ATTR[info.name] then
+                        local ctor = parent and r.nodes[parent].name == info.name
+                        if info.first == i and #info.quals == 0 and not info.name:find('^[~o]') and not ctor then
+                            common.add_calls(r, T, i, j)          -- MACRO(args);
+                            return
+                        end
+                        common.add_node(r, T, {
+                            kind = 'prototype', name = info.name, ni = info.ni, nj = info.nj, parent = parent,
+                            ti = i, tj = j, sig = common.sig(T, i, T.m[y]),
+                            quals = #info.quals > 0 and info.quals or nil,
+                            static = first == 'static' or nil,
+                        })
+                        common.add_calls(r, T, T.m[y] + 1, j)     -- default member initializers etc.
                         return
                     end
-                    common.add_node(r, T, {
-                        kind = 'prototype', name = info.name, ni = info.ni, nj = info.nj, parent = parent,
-                        ti = i, tj = j, sig = common.sig(T, i, T.m[y]),
-                        quals = #info.quals > 0 and info.quals or nil,
-                        static = first == 'static' or nil,
-                    })
-                    common.add_calls(r, T, T.m[y] + 1, j)     -- default member initializers etc.
-                    return
+                    y = T.m[y] + 1
                 end
+            else
+                y = T.m[y] + 1
             end
-            y = T.m[y] + 1
         elseif (is(T, y, '[') or is(T, y, '{')) and T.m[y] then
             if T.k[y - 1] == 'id' and is(T, y, '{') and not eq and d == 0 then names[#names + 1] = y - 1 end
             y = T.m[y] + 1

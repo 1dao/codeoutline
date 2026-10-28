@@ -62,7 +62,9 @@ end
 
 function M.exports(rec, language, module)
     local exports = records[rec] or rec.foreign_exports
-    return exports and exports[language] and exports[language][module]
+    local modules = exports and exports[language]
+    return modules and (modules[module] or language == 'lua' and type(module) == 'string'
+        and modules[module:gsub('%.', '_')])
 end
 
 function M.collect(rec, T)
@@ -71,9 +73,11 @@ end
 
 function M.modules(G, language, name, ctx)
     ctx = ctx or {}
+    if not name then return {} end
+    local loader = language == 'lua' and name:gsub('%.', '_') or name
     ctx.foreign = ctx.foreign or {}
     ctx.foreign_loaded = ctx.foreign_loaded or {}
-    for _, f in ipairs(candidates(G, ctx)[name] or {}) do
+    for _, f in ipairs(candidates(G, ctx)[loader] or {}) do
         if not ctx.foreign_loaded[f] then
             local exports = load(G, f)
             -- Failed reads can be skipped within this query, but are never
@@ -89,10 +93,26 @@ function M.modules(G, language, name, ctx)
             end
         end
     end
-    local files = (ctx.foreign[language] or {})[name] or {}
+    local modules = ctx.foreign[language] or {}
+    local files = modules[name] or modules[loader] or {}
     -- A long query may have evicted a previously used record.
     for _, f in ipairs(files) do load(G, f) end
     return files
+end
+
+-- Lua's C loader replaces dots in a module name when naming the entry point.
+-- The indexed entry alone is sufficient for navigating the require string;
+-- member bindings still require the separately verified registration table.
+function M.lua_entrypoints(G, name)
+    local result = {}
+    local symbol = 'luaopen_' .. name:gsub('%.', '_')
+    for _, id in ipairs(G.by_name[symbol] or {}) do
+        local node, f = G.nodes[id], G.node_file[id]
+        if node.kind == 'function' and not node.static and (G.files[f].language == 'c' or G.files[f].language == 'cpp') then
+            result[#result + 1] = id
+        end
+    end
+    return result
 end
 
 -- Parameter labels are structured data, never reparsed as host-language code.

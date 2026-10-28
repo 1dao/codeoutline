@@ -71,7 +71,7 @@ do not parse the same semantic file again, and that edits still invalidate it.
 Measure full generation, saving, query-symbol preparation and cache bytes
 separately from editor cold/warm requests and longer agent queries.
 
-### Local gjqt comparison
+### Local project comparison
 
 The audit used 57,303 files (642 C/C++ fragments), 815,501 symbols and 8 parse
 workers. An adjacent local comparison against `2d0d7ba` measured:

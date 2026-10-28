@@ -53,7 +53,7 @@ local function read(file, info)
     end
     return entry
 end
-local function declarations(entry, name)
+local function declarations(entry, name, type_site)
     local escaped = name:gsub('([^%w])', '%%%1')
     if not entry.source:find('%f[%w_$]' .. escaped .. '%f[^%w_$]') then return {} end
     if not entry.nodes then
@@ -70,7 +70,8 @@ local function declarations(entry, name)
     local result = {}
     for _, node in ipairs(entry.nodes) do
         if node.name == name and node.qualified == name and not node.parent and node.name_start
-            and (node.kind == 'prototype' or node.kind == 'function') then
+            and (type_site and require('codeoutline.type_references').kinds[node.kind]
+                or not type_site and (node.kind == 'prototype' or node.kind == 'function')) then
             result[#result + 1] = { node = node, file = entry.file, source = entry.source,
                 declaration = node.kind == 'prototype' or node.decl == true }
         end
@@ -80,7 +81,11 @@ end
 
 function M.find(G, f, site, ctx, system_directories)
     local info = { files = 0, bytes = 0, truncated = false }
-    if not site or site.recv or site.kind ~= 'call' or not require('codeoutline.definition_candidates').allowed(site) then return {}, info end
+    local type_site = site and site.kind == 'type' and site.reason == 'unresolved type'
+        and not site.recv and site.evidence and site.evidence.written == site.name
+        and not site.evidence.value_shadowed
+    if not site or site.recv or not type_site and (site.kind ~= 'call'
+        or not require('codeoutline.definition_candidates').allowed(site)) then return {}, info end
     local includes = require('codeoutline.cpp_includes')
     local headers, queued, projects, visited, project_queued = {}, {}, { f }, {}, { [f] = true }
     local defaults, started = nil, xtimer.now_ms()
@@ -158,7 +163,7 @@ function M.find(G, f, site, ctx, system_directories)
         local target = headers[hi]; hi = hi + 1
         local entry = read(target.file, info)
         if entry then
-            local found = declarations(entry, site.name)
+            local found = declarations(entry, site.name, type_site)
             for _, hit in ipairs(found) do
                 if hit.declaration then return { hit }, info end
                 if #best < 8 then best[#best + 1] = hit end

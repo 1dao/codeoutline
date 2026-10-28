@@ -182,7 +182,7 @@ function M.resolve(G, f, written, opts)
     end
     local function named(file, qualified, at, depth)
         local tail = qualified:match('([^:]+)$')
-        local found, ids = false, {}
+        local found, ids, alias_declarations = false, {}, {}
         for index, id in ipairs(G.by_name[tail] or {}) do
             if index % 128 == 0 then control.check() end
             local n, g = G.nodes[id], G.node_file[id]
@@ -192,10 +192,18 @@ function M.resolve(G, f, written, opts)
                     for _, alias in ipairs(aliases(g)) do
                         if not alias.kind and not alias.local_alias and (alias.scope ~= '' and alias.scope .. '::' or '') .. alias.name == qualified then
                             matched = true
-                            if g ~= file or not at or alias.at <= at then found = true; add(ids, follow(alias, g, depth)) end
+                            if g ~= file or not at or alias.at <= at then
+                                found = true; add(ids, follow(alias, g, depth))
+                                if opts.navigation_alias and depth == 0 then add(alias_declarations, { id }) end
+                            end
                         end
                     end
-                    if not matched then found = true end -- unsupported alias is a barrier
+                    if not matched then
+                        found = true -- unsupported alias is a barrier
+                        if opts.navigation_alias and depth == 0 and (g ~= file or not at) then
+                            add(alias_declarations, { id })
+                        end
+                    end
                 else
                     found = true
                     add(ids, { id })
@@ -240,6 +248,7 @@ function M.resolve(G, f, written, opts)
                 end
             end
         end
+        if #ids == 0 and opts.navigation_alias then add(ids, alias_declarations) end
         return ids, found
     end
     local function qualified(file, name, at, depth)

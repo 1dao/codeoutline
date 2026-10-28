@@ -835,7 +835,10 @@ local function write(path, text)
     f:close()
 end
 
-local tmp_root = (os.getenv('TEMP') or os.getenv('TMPDIR') or '/tmp'):gsub('\\', '/') .. '/codeindex_spec_' .. os.time()
+-- Match the index's canonical roots (macOS /var links, Windows short names)
+-- before constructing graphs directly from these fixtures.
+local tmp_parent = assert(xutils.realpath(os.getenv('TEMP') or os.getenv('TMPDIR') or '/tmp'))
+local tmp_root = tmp_parent:gsub('\\', '/'):gsub('/+$', '') .. '/codeindex_spec_' .. os.time()
 local cache = tmp_root .. '.idx'
 write(tmp_root .. '/net.h', 'int net_send(int fd);\n')
 write(tmp_root .. '/net.c', table.concat({
@@ -2545,6 +2548,8 @@ spec.describe('include-driven C/C++ source fragments', function()
         spec.equal(idx.files['real.lua'].language, 'lua'); spec.nil_value(idx.files['unused.part'])
     end)
     spec.it('retains C++ hints and GBK source repair across cache reload and reindex', function()
+        local ok, decoded = pcall(xutils.to_utf8, '\214\208\206\196', 'gbk')
+        if not ok or decoded ~= '中文' then print('SKIP system iconv has no GBK converter'); return end
         local idx, root = project({ ['main.cpp'] = '#include "box.part"\nvoid FragmentCpp() {}',
             ['box.part'] = '// \214\208\206\196\nclass FragmentBox { public: int size() { return 1; } };' })
         idx:refresh_all()

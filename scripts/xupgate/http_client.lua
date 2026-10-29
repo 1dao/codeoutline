@@ -122,10 +122,15 @@ make_handler = function(state)
     local h = {}
 
     function h.on_connect(conn)
+        -- The runtime's default send queue is 10 MiB. A request is sent as a
+        -- single buffer, so size this connection's queue for that buffer.
+        if #state.request_bytes > 10 * 1024 * 1024 and conn.set_max_send then
+            conn:set_max_send(#state.request_bytes)
+        end
         local ok, serr = conn:send_raw(state.request_bytes)
         if not ok then
-            conn:close('send_failed')
             fire_once(state, 'send failed: ' .. tostring(serr))
+            conn:close('send_failed')
         end
     end
 

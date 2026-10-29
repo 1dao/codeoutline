@@ -887,6 +887,138 @@ local svc = require('codeoutline.service')
 local explore = require('codeoutline.explore')
 local graph = require('codeoutline.graph')
 
+spec.describe('startup GC lifecycle', function()
+    local index = require('codeoutline.index')
+    spec.it('restores custom GC settings after loading and preparing a project', function()
+        svc.forget(tmp_root)
+        local pause = collectgarbage('setpause', 137)
+        local stepmul = collectgarbage('setstepmul', 283)
+        local original_open, observed = index.open, false
+        index.open = function(...)
+            spec.equal(collectgarbage('setpause', 100), 100)
+            spec.equal(collectgarbage('setstepmul', 500), 500)
+            observed = true
+            return original_open(...)
+        end
+        local ok, err = pcall(function()
+            local idx, symbols = svc.get(tmp_root, { cache_path = cache })
+            spec.truthy(observed)
+            spec.truthy(symbols == idx.symbol_tables)
+            spec.equal(collectgarbage('setpause', 137), 137)
+            spec.equal(collectgarbage('setstepmul', 283), 283)
+            svc.get(tmp_root, { cache_path = cache })
+            spec.equal(collectgarbage('setpause', 137), 137)
+            spec.equal(collectgarbage('setstepmul', 283), 283)
+        end)
+        index.open = original_open
+        collectgarbage('setpause', pause)
+        collectgarbage('setstepmul', stepmul)
+        svc.forget(tmp_root)
+        if not ok then error(err, 0) end
+    end)
+    spec.it('restores settings and cancellation identity when project opening fails', function()
+        svc.forget(tmp_root)
+        local pause = collectgarbage('setpause', 141)
+        local stepmul = collectgarbage('setstepmul', 291)
+        local original_open = index.open
+        local cancelled = require('codeoutline.control').cancelled()
+        index.open = function() error(cancelled, 0) end
+        local ok, err = pcall(svc.get, tmp_root, { cache_path = cache })
+        index.open = original_open
+        local restored_pause = collectgarbage('setpause', pause)
+        local restored_stepmul = collectgarbage('setstepmul', stepmul)
+        spec.equal(ok, false)
+        spec.equal(err, cancelled)
+        spec.equal(restored_pause, 141)
+        spec.equal(restored_stepmul, 291)
+    end)
+end)
+
+spec.describe('agent query reclamation', function()
+    spec.it('collects after successful and cancelled analysis without changing GC parameters', function()
+        svc.get(tmp_root, { cache_path = cache })
+        local original_gc, collected = collectgarbage, 0
+        local control = require('codeoutline.control')
+        local original_callback = control.callback
+        local pause = original_gc('setpause', 143)
+        local stepmul = original_gc('setstepmul', 293)
+        _G.collectgarbage = function(op, ...)
+            if op == 'collect' then collected = collected + 1 end
+            return original_gc(op, ...)
+        end
+        local ok, err = pcall(function()
+            local text = svc.explore(tmp_root, 'run net_send', { cache_path = cache })
+            spec.truthy(type(text) == 'string')
+            spec.truthy(collected > 0)
+            local before, cancelled = collected, control.cancelled()
+            control.callback = function() error(cancelled, 0) end
+            local success, failure = pcall(svc.explore, tmp_root, 'run net_send', { cache_path = cache })
+            spec.equal(success, false)
+            spec.equal(failure, cancelled)
+            spec.truthy(collected > before)
+            spec.equal(original_gc('setpause', 143), 143)
+            spec.equal(original_gc('setstepmul', 293), 293)
+        end)
+        _G.collectgarbage, control.callback = original_gc, original_callback
+        original_gc('setpause', pause)
+        original_gc('setstepmul', stepmul)
+        if not ok then error(err, 0) end
+    end)
+end)
+
+spec.describe('scheduled idle collection', function()
+    spec.it('uses one native timer, cancels for foreground work and rearms unfinished steps', function()
+        local pending, created, busy, steps, cycles = {}, 0, false, 0, 0
+        local timer = {
+            inited = function() return true end,
+            add = function(ms, callback, repeats)
+                spec.equal(ms, 1); spec.equal(repeats, 1)
+                created = created + 1
+                pending[created] = callback
+                return created
+            end,
+            del = function(id) pending[id] = nil end,
+        }
+        local gc = require('codeoutline.idle_gc').new({ timer = timer, delay_ms = 1,
+            busy = function() return busy end,
+            request = function() cycles = cycles + 1 end,
+            step = function() steps = steps + 1; return steps < 2 end })
+        gc.schedule(); local stale = pending[1]
+        gc.schedule(); spec.nil_value(pending[1]); spec.truthy(pending[2])
+        stale(); spec.equal(steps, 0, 'a cancelled callback cannot collect')
+        gc.suspend(); spec.nil_value(pending[2]); spec.truthy(gc.pending())
+        gc.schedule(); busy = true; pending[3]()
+        spec.equal(steps, 0, 'a suspended foreground request must block GC')
+        spec.equal(created, 3, 'no polling timer while foreground work is suspended')
+        busy = false; gc.schedule(); pending[4]()
+        spec.equal(steps, 1); spec.equal(cycles, 1); spec.truthy(pending[5])
+        pending[5](); spec.equal(steps, 2); spec.equal(cycles, 1)
+        spec.equal(gc.pending(), false)
+        gc.schedule(); local closing = pending[6]; gc.close()
+        spec.nil_value(pending[6]); closing(); spec.equal(steps, 2)
+        gc.schedule(); spec.equal(created, 6, 'shutdown cannot rearm')
+    end)
+    spec.it('defers collection until the host runs idle steps', function()
+        local weak = setmetatable({}, { __mode = 'v' })
+        collectgarbage('collect')
+        collectgarbage('stop')
+        local ok, err = pcall(function()
+            local function populate() weak[1] = {} end
+            populate()
+            svc.request_collection()
+            spec.truthy(weak[1], 'scheduling must not collect on the request stack')
+            local finished = false
+            for _ = 1, 10000 do
+                if not svc.collect(64) then finished = true; break end
+            end
+            spec.truthy(finished)
+            spec.nil_value(weak[1])
+        end)
+        collectgarbage('restart')
+        if not ok then error(err, 0) end
+    end)
+end)
+
 local function edges_from(G, name)
     local out = {}
     local Q = graph.query(G)

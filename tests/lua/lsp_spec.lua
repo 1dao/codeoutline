@@ -3626,6 +3626,52 @@ spec.describe('LSP navigation requests', function()
         send('textDocument/references', position, 8)
         spec.contains(replies[warned + 1], 'too many matching references')
     end)
+    spec.it('schedules timer GC after every worker reply, including failure and cancellation', function()
+        local saved = { xthread = xthread, xshared = xshared, xtimer = xtimer,
+            getenv = os.getenv, handles = navigation.handles, execute = navigation.execute,
+            collect = service.collect, request = service.request_collection }
+        local ok, err = pcall(function()
+            local pending, next_timer, steps, replies = {}, 0, 0, 0
+            os.getenv = function(name)
+                if name:match('^CODEOUTLINE_LSP_GC_') then return nil end
+                return saved.getenv(name)
+            end
+            xtimer = setmetatable({ inited = function() return true end,
+                add = function(ms, callback, count)
+                    spec.equal(replies, next_timer + 1, 'reply must be posted before registering GC')
+                    spec.equal(ms, 1); spec.equal(count, 1)
+                    next_timer = next_timer + 1; pending[next_timer] = callback; return next_timer
+                end,
+                del = function(id) pending[id] = nil end,
+            }, { __index = saved.xtimer })
+            service.request_collection = function() end
+            service.collect = function() steps = steps + 1; return false end
+            xshared = { dict = function() return { get = function(_, key) return key == 'cancel:cancelled' end,
+                delete = function() end } end }
+            xthread = { post = function(_, _, id, success)
+                replies = replies + 1
+                spec.equal(success, id ~= 'failed' and id ~= 'cancelled')
+                return true
+            end }
+            navigation.handles = function(method) return method:match('^lsp_') ~= nil end
+            navigation.execute = function() return { result = {} } end
+            local worker = dofile('scripts/codeoutline/index_worker.lua')
+            for _, method in ipairs({ 'lsp_completion', 'lsp_hover', 'lsp_signature', 'lsp_references',
+                'lsp_incoming', 'lsp_outgoing', 'status', 'invalid', 'lsp_definition' }) do
+                local id = method == 'invalid' and 'failed' or method == 'lsp_definition' and 'cancelled' or method
+                worker.__thread_handle(1, 'run', id, { method = method, projectPath = nav_root,
+                    allowedRoots = { nav_root }, deadline = saved.xtimer.now_ms() + 10000 })
+                spec.equal(steps, 0, 'GC cannot run on the request stack')
+                spec.truthy(pending[next_timer])
+            end
+            pending[next_timer](); spec.equal(steps, 1)
+        end)
+        xthread, xshared, xtimer, os.getenv = saved.xthread, saved.xshared, saved.xtimer, saved.getenv
+        navigation.handles, navigation.execute = saved.handles, saved.execute
+        service.collect, service.request_collection = saved.collect, saved.request
+        service.configure({ watch = false, max_projects = 8 })
+        if not ok then error(err, 0) end
+    end)
     spec.it('applies drafts in the worker even when the request is cancelled', function()
         local saved = { xthread = xthread, xshared = xshared, replys = _thread_replys }
         local ok, err = pcall(function()

@@ -4,6 +4,8 @@ local explore = require('codeoutline.explore')
 local paths = require('codeoutline.path')
 local control = require('codeoutline.control')
 local M = {}
+-- Loading uses tighter GC thresholds; queries retain the caller's settings.
+local startup_gc = os.getenv('CODEOUTLINE_MEMORY_POLICY') ~= 'default'
 local projects = {}
 local sequence = 0
 local limits = { max_projects = 8, idle_seconds = 900 }
@@ -73,12 +75,17 @@ end
 -- reaches a sixteenth of the live heap (at least GC_MIN_KB), or a project is
 -- dropped/replaced, and then advances one step per call until it completes.
 -- Dropped indexes also need a follow-up cycle to reclaim already-marked objects.
-function M.collect()
+-- Request a cycle without doing marking work on the foreground request.
+function M.request_collection()
+    gc.running = true
+end
+
+function M.collect(step_kb)
     if not gc.running then
         if collectgarbage('count') - gc.live < math.max(M.GC_MIN_KB, gc.live / 16) then return false end
         gc.running = true
     end
-    if collectgarbage('step', M.GC_STEP_KB) then
+    if collectgarbage('step', step_kb or M.GC_STEP_KB) then
         if gc.again then gc.again = false
         else gc.running, gc.live = false, collectgarbage('count') end
     end
@@ -93,10 +100,9 @@ end
 
 -- Files commit one at a time, so an interrupted refresh needs no rollback:
 -- the index stays consistent and the next refresh resumes with a full pass.
-local function refresh(root, opts, with_symbols)
+local function refresh_project(root, opts, with_symbols)
     opts = opts or {}
     local key, canonical = key_for(root)
-    M.sweep()
     local p = projects[key]
     if p then
         for _, name in ipairs({ 'cache_path', 'max_file_bytes', 'lister' }) do
@@ -135,6 +141,24 @@ local function refresh(root, opts, with_symbols)
     return p.idx, with_symbols and p.idx:symbols() or nil, stats
 end
 
+-- Keep transient cache decoding/building allocations below the resident heap's
+-- normal GC threshold. Restore the caller's settings before serving queries,
+-- including when opening, indexing, saving or cancellation raises an error.
+local function refresh(root, opts, with_symbols)
+    local key = key_for(root)
+    M.sweep()
+    if not startup_gc or projects[key] then
+        return refresh_project(root, opts, with_symbols)
+    end
+    local pause = collectgarbage('setpause', 100)
+    local stepmul = collectgarbage('setstepmul', 500)
+    local ok, idx, symbols, stats = pcall(refresh_project, root, opts, with_symbols)
+    collectgarbage('setpause', pause)
+    collectgarbage('setstepmul', stepmul)
+    if not ok then error(idx, 0) end
+    return idx, symbols, stats
+end
+
 -- LSP refreshes records; symbol tables are kept current only once built.
 function M.refresh(root, opts)
     local idx, _, stats = refresh(root, opts, false)
@@ -155,7 +179,7 @@ function M.resident(root)
     return p.idx, p.idx.symbol_tables
 end
 
-local function run_query(engine, root, query, opts)
+local function execute_query(engine, root, query, opts)
     engine.validate(query, opts)
     local idx, _, stats = refresh(root, opts, true)
     idx.query_sources = {}
@@ -192,6 +216,15 @@ local function run_query(engine, root, query, opts)
     result.info.generation = idx.generation
     result.info.projectPath = idx.root
     return result.text, result.info
+end
+
+-- Agent work can spend longer reclaiming its temporary analysis. Keep this
+-- outside execute_query's stack and leave LSP navigation on its idle GC path.
+local function run_query(engine, root, query, opts)
+    local ok, text, info = pcall(execute_query, engine, root, query, opts)
+    if os.getenv('CODEOUTLINE_AGENT_GC') ~= '0' then collectgarbage('collect') end
+    if not ok then error(text, 0) end
+    return text, info
 end
 
 function M.explore(root, query, opts)

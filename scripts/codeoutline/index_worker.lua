@@ -55,10 +55,10 @@ local function execute(req)
     assert(paths.allowed(req.allowedRoots, root), 'project path is outside allowed roots')
     if req.method == 'lsp_refresh' then
         service.configure({ max_projects = lsp.MAX_ROOTS })
-        local idx = service.refresh(root, { full_interval = 45, paths = req.paths })
-        -- Ready navigation must not leave a whole-project symbol-table build
-        -- on the first definition request. Symbol-only clients retain lazy data.
-        if req.prepare_navigation then idx:symbols() end
+        -- Navigation startup includes symbol preparation in the same scoped GC
+        -- policy as cache loading. Symbol-only clients retain lazy preparation.
+        local refresh = req.prepare_navigation and service.get or service.refresh
+        refresh(root, { full_interval = 45, paths = req.paths })
         return true
     elseif req.method == 'explore' or req.method == 'callers' or req.method == 'type_hierarchy' or req.method == 'type_references' or req.method == 'affected' then
         local text, info = service[req.method](root, req.method == 'affected' and req.files or req.query, { budget = req.budget, depth = req.depth,
@@ -74,6 +74,23 @@ end
 -- Each job runs in a coroutine so a full refresh can wait for the parse
 -- threads; jobs arriving meanwhile queue behind it.
 local queue, active = {}, nil
+-- Every external reply can release temporary analysis, including errors and
+-- cancellation. Retain one pending timer and yield between collection steps.
+local function gc_option(name, default, minimum)
+    local value = tonumber(os.getenv(name) or '')
+    if not value or value ~= value or math.abs(value) == math.huge then return default end
+    return math.max(minimum, math.floor(value))
+end
+local gc_every = gc_option('CODEOUTLINE_LSP_GC_EVERY', 1, 0)
+local requests = 0
+local gc_delay_ms = gc_option('CODEOUTLINE_LSP_GC_DELAY_MS', 1, 0)
+local gc_step_kb = gc_option('CODEOUTLINE_LSP_GC_STEP_KB', 4096, 1)
+local timer_gc = require('codeoutline.idle_gc').new({
+    delay_ms = gc_delay_ms,
+    busy = function() return active ~= nil or #queue > 0 end,
+    request = service.request_collection,
+    step = function() return service.collect(gc_step_kb) end,
+})
 
 local function run(id, req, reply)
     if req.queue_until then assert(xthread.post(1, 'worker_started', id)) end
@@ -96,6 +113,12 @@ local function run(id, req, reply)
     else
         assert(xthread.post(1, 'worker_result', id, ok, result))
     end
+    requests = requests + 1
+    if gc_every > 0 and requests % gc_every == 0 then
+        timer_gc.schedule()
+    elseif timer_gc.pending() then
+        timer_gc.schedule()
+    end
 end
 
 local function resume(...)
@@ -116,6 +139,7 @@ end
 return {
     __init = function()
         assert(xnet.init())
+        xtimer.init()
         local threads = tonumber(os.getenv('CODEOUTLINE_INDEX_THREADS') or '') or pool.THREADS
         pool.configure(scripts .. '/codeoutline/parse_worker.lua', math.max(0, math.floor(threads)))
         assert(xthread.post(1, 'worker_ready'))
@@ -124,14 +148,23 @@ return {
     -- ticks also collect garbage, a step at a time (see service.collect).
     __update = function()
         pool.sweep()
-        if not active then service.sweep(); service.collect() end
+        if not active and #queue == 0 then
+            service.sweep()
+            -- Timer callbacks own pending cycles. Retain idle collection for
+            -- allocations/dropped projects that happen after a timer finishes.
+            if not timer_gc.pending() then
+                service.collect()
+            end
+        end
     end,
     __thread_handle = function(router, op, id, req, failure, rpc_request)
         if type(router) == 'string' and req == 'run_rpc' then
             -- RPC wire: router, coroutine id, session key, method, job id, request.
+            timer_gc.suspend()
             queue[#queue + 1] = { failure, rpc_request, { router = router, co = op, sk = id } }
             pump()
         elseif op == 'run' then
+            timer_gc.suspend()
             queue[#queue + 1] = { id, req }
             pump()
         elseif op == 'parsed' then
@@ -140,6 +173,7 @@ return {
         end
     end,
     __uninit = function()
+        timer_gc.close()
         pool.stop()
         xnet.uninit()
     end,

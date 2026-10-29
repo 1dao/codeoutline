@@ -1320,6 +1320,21 @@ function handlers.lsp_definition(req)
     return result, V.js_context.include_incomplete or V.js_context.workspace_incomplete or V.js_context.go_incomplete or V.js_context.go_methods_incomplete or V.js_context.cpp_receivers_incomplete or V.js_context.rust_incomplete
 end
 
+-- Display tags may be truncated before a heavily annotated SDK declaration's
+-- argument list. Recover only the selected function's bounded source span.
+local function external_signature(entry)
+    local label, node = entry.node.sig, entry.node
+    if label and not label:match('%.%.%.$') then return label end
+    if not node.name_start then return label end
+    local source = entry.source:sub(node.name_start + 1, node.name_start + 4096)
+    local doc = documents.new(documents.uri(entry.file), source, 0)
+    local T = doc:tokens()
+    if T and T:text(1) == node.name and T:text(2) == '(' and T.m[2] then
+        return source:sub(1, T.e[T.m[2]]):gsub('%s+', ' ')
+    end
+    return label
+end
+
 -- Follow unmatched delimiters up to the cursor. Commas in nested calls,
 -- literals and indexing expressions do not advance the enclosing argument.
 function handlers.lsp_signature(req)
@@ -1378,19 +1393,16 @@ function handlers.lsp_signature(req)
     local query = {}
     for key, value in pairs(req) do query[key] = value end
     query.position = doc:position(T.s[name_token] - 1)
-    local V, _, c, targets = at(query)
+    local V, _, c, targets, f = at(query)
     if not V or not c or c.decl then return false end
     local signatures, seen = {}, {}
-    for _, id in ipairs(targets) do
-        local node = V.nodes[id]
-        local foreign = require('codeoutline.foreign').signature(node, doc:parse().language, T:text(name_token))
-        local label = M.detail(V, V.node_file[id], node).sig
+    local function add_signature(node, label, uri, foreign)
         if foreign and not seen[foreign.label] then
             foreign.activeParameter = #foreign.parameters > 0 and math.min(call.argument, #foreign.parameters - 1) or nil
             signatures[#signatures + 1] = foreign
             seen[foreign.label] = true
         elseif not foreign and REFERENCE[node.kind] and label and not seen[label] then
-            local sig_doc = documents.new(uri_of(V, V.node_file[id]), label, 0)
+            local sig_doc = documents.new(uri, label, 0)
             local S = sig_doc:tokens()
             local opening
             for i = 1, S and S.n - 1 or 0 do
@@ -1416,6 +1428,20 @@ function handlers.lsp_signature(req)
                     activeParameter = #parameters > 0 and math.min(call.argument, #parameters - 1) or nil }
                 seen[label] = true
             end
+        end
+    end
+    for _, id in ipairs(targets) do
+        local node = V.nodes[id]
+        add_signature(node, M.detail(V, V.node_file[id], node).sig, uri_of(V, V.node_file[id]),
+            require('codeoutline.foreign').signature(node, doc:parse().language, T:text(name_token)))
+    end
+    if #targets == 0 and C_FAMILY[doc:parse().language] then
+        -- Share definition lookup's bounded, source-validated external-header
+        -- cache. SDK declarations stay query-local and never enter the index.
+        local entries = require('codeoutline.external_headers').find(V, f,
+            c, V.js_context, probe_includes)
+        for _, entry in ipairs(entries) do
+            add_signature(entry.node, external_signature(entry), documents.uri(entry.file))
         end
     end
     if #signatures == 0 then return false end

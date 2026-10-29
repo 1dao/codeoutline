@@ -3194,6 +3194,37 @@ void MacroNavUnknown(void) { MACRO_NAV(3); }
         assert(xutils.rmtree(external)); assert(xutils.rmtree(nav_root .. '/externalSearch'))
         service.refresh(nav_root, options); assert(ok, err)
     end)
+    spec.it('shares selected external declarations with signature help and validates header changes', function()
+        local external = nav_root .. '-external-signatures'
+        assert(xutils.mkdir_p(external))
+        local header = external .. '/formatter.h'
+        local function save_header(last, annotated)
+            local f = assert(io.open(header, 'wb'))
+            if annotated then f:write('__declspec(deprecated("' .. string.rep('display annotation ', 20) .. '")) ') end
+            f:write('int format_copy(char *dst, const char *src, ' .. last .. ');\n'); f:close()
+        end
+        save_header('unsigned size')
+        local source = '#include <formatter.h>\nvoid format_use() { format_copy(0, 0, 0); }\n'
+        nav_write('external_signature.cpp', source)
+        local options = { cache_path = nav_root .. '/cache.idx', lister = 'walk' }
+        service.refresh(nav_root, options)
+        local doc = docs.read(nav_root .. '/external_signature.cpp')
+        local ok, err = pcall(function()
+            local function signature(paths)
+                return nav({ method = 'lsp_signature', uri = doc.uri, includePaths = paths,
+                    position = doc:position(assert(source:find('format_copy(0,', 1, true)) - 1 + #'format_copy(0,') })
+            end
+            local result = signature({ external })
+            spec.equal(#result.signatures[1].parameters, 3)
+            spec.equal(result.activeParameter, 1)
+            spec.contains(result.signatures[1].label, 'unsigned size')
+            save_header('long count', true)
+            spec.contains(signature({ external }).signatures[1].label, 'long count')
+            spec.equal(signature({ nav_root }), false, 'cached headers must still be selected by the current include policy')
+        end)
+        os.remove(nav_root .. '/external_signature.cpp'); assert(xutils.rmtree(external))
+        service.refresh(nav_root, options); assert(ok, err)
+    end)
     spec.it('navigates parameter typedef declarations when their underlying type is unavailable', function()
         assert(xutils.mkdir_p(nav_root .. '/param-types'))
         nav_write('param-types/types.hpp', 'typedef struct _Opaque Opaque;\ntypedef std::vector<int> Collection;\nstruct Actual {};\nusing Alias = Actual;\n')

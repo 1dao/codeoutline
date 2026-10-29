@@ -675,7 +675,11 @@ test('LSP navigates ambiguous proxy macros and respects include path changes and
     client.notify('textDocument/didClose', { textDocument: { uri: targetUri } });
     targets = await definition(); assert.equal(targets[0].range.start.line, 2);
     await writeFile(config, JSON.stringify({ includePaths: [] }));
-    assert.deepEqual(await definition(), [], 'an explicit missing include path must not revive suffix candidates');
+    targets = await definition();
+    assert.deepEqual(targets.map(target => fileURLToPath(target.uri)),
+        ['one', 'two'].map(dir => join(client.project, dir, 'proxy.h')),
+        'an explicit include path miss offers unconfirmed macro candidates');
+    for (const target of targets) assert.equal(target.range.start.line, 2);
 });
 
 test('LSP macro navigation bursts preserve following ordinary definitions', { timeout: 30000 }, async (t) => {

@@ -3,7 +3,8 @@ local paths = require('codeoutline.path')
 local text = require('codeoutline.text')
 local M = { MAX_HEADER = 16384, MAX_MESSAGE = 4194304, MAX_ROOTS = 16,
     MAX_DOCUMENTS = 128, MAX_DRAFT_BYTES = 33554432, MAX_PENDING = 64,
-    MAX_QUERY = 4096, MAX_SYMBOLS = 200, POLL_MS = 1000, WARM_DELAY_MS = 150 }
+    MAX_QUERY = 4096, MAX_SYMBOLS = 200, POLL_MS = 1000, WARM_DELAY_MS = 150,
+    LIMIT_WARNING_MS = 10000 }
 local null = xutils.json_null
 local function array(t) return setmetatable(t or {}, xutils.json_array_mt) end
 local function object(t) return type(t) == 'table' and getmetatable(t) ~= xutils.json_array_mt end
@@ -95,8 +96,17 @@ function M.new(config, emit, submit, cancel, stop, await_worker)
     local self = { state = 'new', documents = {}, roots = {}, pending = {}, scans = {}, ready = {},
         document_bytes = 0, document_count = 0, session = config.session or ('lsp-' .. sessions),
         synced = {}, features = {} }
+    local trace = require('codeoutline.lsp_trace').open(os.getenv('CODEOUTLINE_LSP_TRACE'), self.session)
+    if trace then
+        local transport_emit = emit
+        emit = function(msg) trace:message('send', msg); transport_emit(msg) end
+        trace:record('start', { source = debug.getinfo(1, 'S').source })
+    end
     local progress, server_pending, next_id, next_poll = {}, {}, 0, 0
     local navigation_flights, navigation_epoch = {}, 0
+    -- Clients also query definitions while restoring focus or showing links.
+    -- Preserve every incomplete report in the log without stacking popups.
+    local limit_warnings = {}
     local warm_pending, warm_active, warm_done, warm_pump, focused_uri
     local handlers = {}
     local function error_response(id, code, message)
@@ -272,6 +282,7 @@ function M.new(config, emit, submit, cancel, stop, await_worker)
     end
     local function cancel_pending(id, silent)
         local job = self.pending[id]
+        if trace then trace:record('cancel', { id = id, pending = job ~= nil, silent = silent or false }) end
         if job then
             self.pending[id] = nil
             if job.flight then
@@ -285,6 +296,13 @@ function M.new(config, emit, submit, cancel, stop, await_worker)
             if not silent then error_response(id, -32800, 'Request cancelled') end
         end
     end
+    local function cancel_completions(uri)
+        local ids = {}
+        for id, job in pairs(self.pending) do
+            if job.method == 'lsp_completion' and job.uri == uri then ids[#ids + 1] = id end
+        end
+        for _, id in ipairs(ids) do cancel_pending(id) end
+    end
     function self:close()
         if self.state == 'closed' then return end
         self.state = 'closed'
@@ -296,6 +314,7 @@ function M.new(config, emit, submit, cancel, stop, await_worker)
         if next(self.synced) or self.worker_session then submit({ method = 'lsp_close', session = self.session }, function() end) end
         self.scans, self.documents, self.ready = {}, {}, {}
         progress, server_pending = {}, {}
+        if trace then trace:record('close'); trace:close() end
     end
     handlers.initialize = function(id, params)
         assert(self.state == 'new', 'server already initialized')
@@ -372,10 +391,12 @@ function M.new(config, emit, submit, cancel, stop, await_worker)
         assert(self.document_bytes - #doc.source + #updated.source <= M.MAX_DRAFT_BYTES, 'open document limit reached')
         self.documents[td.uri] = updated
         self.document_bytes = self.document_bytes - #doc.source + #updated.source
+        cancel_completions(server_uri(td.uri))
         schedule_warm(td.uri, false, 500)
     end
     handlers['textDocument/didClose'] = function(_, params)
         local uri = params.textDocument.uri
+        cancel_completions(server_uri(uri))
         if warm_pending and warm_pending.uri == uri then warm_pending = nil end
         if warm_active and warm_active.uri == uri then cancel_warm() end
         if focused_uri == uri then focused_uri = nil end
@@ -433,11 +454,15 @@ function M.new(config, emit, submit, cancel, stop, await_worker)
     -- Each query owns a coroutine; cancelled/replaced requests discard replies.
     local function request(id, req, started, key)
         cancel_warm()
+        if req.method == 'lsp_completion' then cancel_completions(req.uri) end
         if warm_pending and req.uri == server_uri(warm_pending.uri) then warm_pending = nil end
         local count = 0
         for _ in pairs(self.pending) do count = count + 1 end
         assert(count < M.MAX_PENDING, 'too many pending requests')
-        local job = { coroutine = coroutine.running() }
+        local job = { coroutine = coroutine.running(), method = req.method, uri = req.uri }
+        local started_ms = trace and xtimer.now_ms()
+        if trace then trace:record('query', { id = id, method = req.method, uri = req.uri,
+            position = req.position, epoch = navigation_epoch, shared = key and navigation_flights[key] ~= nil or false }) end
         self.pending[id] = job
         local called, ok, result
         local flight = key and navigation_flights[key]
@@ -477,6 +502,9 @@ function M.new(config, emit, submit, cancel, stop, await_worker)
         if not ok and req.changed then self.synced = {} end
         if self.pending[id] ~= job then return nil, false end
         self.pending[id] = nil
+        if trace then trace:record('query_done', { id = id, method = req.method,
+            ms = xtimer.now_ms() - started_ms, ok = ok,
+            incomplete = type(result) == 'table' and result.incomplete or false }) end
         if not ok then
             error_response(id, -32603, tostring(result))
             return nil, false
@@ -571,13 +599,24 @@ function M.new(config, emit, submit, cancel, stop, await_worker)
         if not ok then return end
         if value.error then error_response(id, -32803, value.error); return end
         if value.incomplete then
+            if trace then trace:record('limit', { id = id, method = req.method, uri = req.uri,
+                position = req.position, epoch = navigation_epoch }) end
             local message = req.method == 'lsp_definition'
                 and 'CodeOutline: definition lookup reached a candidate, source or visibility limit; some definitions may be omitted'
                 or req.method == 'lsp_references'
                 and 'CodeOutline: results were truncated; too many matching references'
                 or 'CodeOutline: lookup reached a query limit; some results may be omitted'
-            emit({ jsonrpc = '2.0', method = 'window/showMessage', params = { type = 2,
-                message = message } })
+            local now, previous = xtimer.now_ms(), limit_warnings[message]
+            local show = not previous or now - previous >= M.LIMIT_WARNING_MS
+            if show then limit_warnings[message] = now end
+            local detail = message
+            if not show then
+                local position = req.position or {}
+                detail = message .. ' [' .. req.method .. ' ' .. (req.uri or '')
+                    .. ':' .. tostring(position.line or 0) .. ':' .. tostring(position.character or 0) .. ']'
+            end
+            emit({ jsonrpc = '2.0', method = show and 'window/showMessage' or 'window/logMessage',
+                params = { type = 2, message = detail } })
         end
         reply(id, to_client(finish(value.result)))
     end
@@ -707,6 +746,7 @@ function M.new(config, emit, submit, cancel, stop, await_worker)
     function self:accept(body)
         local ok, msg = pcall(xutils.json_unpack, body)
         if not ok or text.valid(body) ~= body then error_response(nil, -32700, 'Invalid JSON'); return end
+        if trace and object(msg) then trace:message('receive', msg) end
         if object(msg) and msg.jsonrpc == '2.0' and msg.method == nil and valid_id(msg.id)
             and ((msg.result ~= nil and msg.error == nil) or (msg.result == nil and object(msg.error))) then
             local job = server_pending[msg.id]

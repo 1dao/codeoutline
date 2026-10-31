@@ -53,9 +53,10 @@ local function read(file, info)
     end
     return entry
 end
-local function declarations(entry, name, type_site)
+local function declarations(entry, name, type_site, prefix)
     local escaped = name:gsub('([^%w])', '%%%1')
-    if not entry.source:find('%f[%w_$]' .. escaped .. '%f[^%w_$]') then return {} end
+    local source = prefix and entry.source:lower() or entry.source
+    if not source:find('%f[%w_$]' .. escaped .. (prefix and '' or '%f[^%w_$]')) then return {} end
     if not entry.nodes then
         local rec = require('codeoutline.parse').parse(entry.file, entry.source, { type_uses = false, analysis = false })
         entry.nodes = rec and rec.nodes or {}
@@ -69,7 +70,8 @@ local function declarations(entry, name, type_site)
     end
     local result = {}
     for _, node in ipairs(entry.nodes) do
-        if node.name == name and node.qualified == name and not node.parent and node.name_start
+        if (prefix and node.name:sub(1, #name):lower() == name or not prefix and node.name == name)
+            and node.qualified == node.name and not node.parent and node.name_start
             and (type_site and require('codeoutline.type_references').kinds[node.kind]
                 or not type_site and (node.kind == 'prototype' or node.kind == 'function')) then
             result[#result + 1] = { node = node, file = entry.file, source = entry.source,
@@ -79,7 +81,7 @@ local function declarations(entry, name, type_site)
     return result
 end
 
-function M.find(G, f, site, ctx, system_directories)
+function M.find(G, f, site, ctx, system_directories, completion)
     local info = { files = 0, bytes = 0, truncated = false }
     local type_site = site and site.kind == 'type' and site.reason == 'unresolved type'
         and not site.recv and site.evidence and site.evidence.written == site.name
@@ -91,6 +93,7 @@ function M.find(G, f, site, ctx, system_directories)
     local defaults, started = nil, xtimer.now_ms()
     local function expired()
         control.check()
+        if completion and completion.expired() then info.truncated = true; return true end
         if xtimer.now_ms() - started >= M.TIME_MS then info.truncated = true; return true end
         return false
     end
@@ -163,10 +166,15 @@ function M.find(G, f, site, ctx, system_directories)
         local target = headers[hi]; hi = hi + 1
         local entry = read(target.file, info)
         if entry then
-            local found = declarations(entry, site.name, type_site)
+            local found = declarations(entry, site.name, type_site, completion ~= nil)
             for _, hit in ipairs(found) do
-                if hit.declaration then return { hit }, info end
-                if #best < 8 then best[#best + 1] = hit end
+                if completion then
+                    if #best >= completion.limit then info.truncated = true; return best, info end
+                    best[#best + 1] = hit
+                else
+                    if hit.declaration then return { hit }, info end
+                    if #best < 8 then best[#best + 1] = hit end
+                end
             end
             for _, imp in ipairs(entry.imports) do add(locate(imp, target.roots, target.file), target.roots) end
         end

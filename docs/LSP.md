@@ -431,8 +431,22 @@ limit, names starting with the typed prefix come first.
   or, for a local, to the fields this file assigns or its table literal declares.
 - C and Rust field types come from full parses only (compact index records omit
   them); type files are reparsed on demand, cached for 64 files, and skipped above
-  512 KB. Each request has a 300 ms budget and 500 items; exceeding either marks
-  the list incomplete. Trigger characters outside member operators, and positions
+  512 KB. Each request has a 300 ms budget. Typed prefixes and member lists return
+  at most 100 items; empty-prefix non-member requests retain a 500-item limit.
+  A single-character bare prefix searches locals, parameters, current-file
+  declarations and enclosing-class members without enumerating dependencies.
+  From two characters onward, visible dependency declarations are also considered.
+  C/C++ function prefixes also query selected external headers through the same
+  bounded, source-validated memory cache as definition and signature help. This
+  uses the remaining request budget and does not add SDK declarations to the index.
+  Names are filtered case-insensitively before generating item details, with
+  subsequence matching retained for longer prefixes. Short-prefix restrictions
+  and exhausted budgets mark the list incomplete so further input re-queries it.
+  New input, a replacement completion request or closing the document cancels
+  pending completion work for that document and discards its late responses.
+  Standard LSP requests do not reliably distinguish automatic typing from manual
+  invocation, so the same nonempty prefix follows the same policy in either case.
+  Trigger characters outside member operators, and positions
   inside strings, return nothing.
 
 Lua native modules also support definition, hover and member completion when

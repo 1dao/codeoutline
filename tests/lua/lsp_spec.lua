@@ -754,7 +754,7 @@ Manager* Factory();
         spec.equal(#result, 1); spec.equal(result[1].uri, nav_uri(prefix .. 'api.hpp')); spec.equal(result[1].range.start.line, 1)
         local completion = require('codeoutline.completion').complete({ root = nav_root, uri = doc.uri, position = position })
         local labels = {}; for _, item in ipairs(completion.items) do labels[item.label] = true end
-        spec.truthy(labels.Run); spec.truthy(labels.state)
+        spec.truthy(labels.Run); spec.nil_value(labels.state, 'typed R filters unrelated members')
         local target = nav_uri(prefix .. 'api.hpp')
         navigation.sync({ session = 'cpp-result-draft', open = { [target] = 1 }, changed = {
             [target] = { language = 'cpp', version = 1, source = api:gsub('Manager%* Factory', 'Other* Factory') } } })
@@ -1507,7 +1507,7 @@ int luaopen_example_empty(lua_State *L) { return 0; }
         nav_write('NamespaceCompletion.cpp', source)
         service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
         local doc = docs.read(nav_root .. '/NamespaceCompletion.cpp')
-        for _, case in ipairs({ { 'short_api::run', 10, 'Store', 'run' }, { 'Store p', 0, 'Store', 'run' }, { 'p.save', 1, 'save' } }) do
+        for _, case in ipairs({ { 'short_api::run', 10, 'Store', 'run' }, { 'Store p', 1, 'Store' }, { 'p.save', 1, 'save' } }) do
             local req = { uri = doc.uri, root = nav_root, session = 'cpp-namespace-completion',
                 position = doc:position(assert(source:find(case[1], 1, true)) + case[2]) }
             local labels = {}
@@ -3204,7 +3204,10 @@ void MacroNavUnknown(void) { MACRO_NAV(3); }
             f:write('int format_copy(char *dst, const char *src, ' .. last .. ');\n'); f:close()
         end
         save_header('unsigned size')
-        local source = '#include <formatter.h>\nvoid format_use() { format_copy(0, 0, 0); }\n'
+        local noise = {}
+        for i = 1, 120 do noise[#noise + 1] = 'int f_o_r_m_a_t_c_noise_' .. i .. ';' end
+        local source = '#include <formatter.h>\n' .. table.concat(noise, '\n')
+            .. '\nvoid format_use() { format_copy(0, 0, 0); }\n'
         nav_write('external_signature.cpp', source)
         local options = { cache_path = nav_root .. '/cache.idx', lister = 'walk' }
         service.refresh(nav_root, options)
@@ -3218,8 +3221,19 @@ void MacroNavUnknown(void) { MACRO_NAV(3); }
             spec.equal(#result.signatures[1].parameters, 3)
             spec.equal(result.activeParameter, 1)
             spec.contains(result.signatures[1].label, 'unsigned size')
+            local function candidates(paths)
+                local result = nav({ method = 'lsp_completion', uri = doc.uri, includePaths = paths,
+                    position = doc:position(assert(source:find('format_copy', 1, true)) - 1 + #'format_c') })
+                local labels = {}
+                for _, item in ipairs(result.items) do labels[item.label] = item end
+                return labels
+            end
+            spec.truthy(candidates({ external }).format_copy, 'exact SDK prefix must survive a full fuzzy candidate list')
+            spec.nil_value(candidates({ nav_root }).format_copy, 'completion must respect the selected include policy')
             save_header('long count', true)
             spec.contains(signature({ external }).signatures[1].label, 'long count')
+            save_header('int changed')
+            spec.contains(candidates({ external }).format_copy.detail, 'int changed')
             spec.equal(signature({ nav_root }), false, 'cached headers must still be selected by the current include policy')
         end)
         os.remove(nav_root .. '/external_signature.cpp'); assert(xutils.rmtree(external))
@@ -3445,6 +3459,35 @@ local function session_with(submit, init, cancel)
 end
 
 spec.describe('LSP navigation requests', function()
+    spec.it('flushes protocol trace metadata without document or result bodies', function()
+        local file = root .. '/protocol-trace.jsonl'
+        local trace = assert(require('codeoutline.lsp_trace').open(file, 'trace-test'))
+        trace:message('receive', { id = 2, method = 'textDocument/didOpen', params = {
+            textDocument = { uri = 'file:///sample.c', languageId = 'c', version = 1, text = 'private_source_body' } } })
+        trace:message('receive', { method = '$/cancelRequest', params = { id = 2 } })
+        trace:message('receive', { method = 'textDocument/didClose', params = {
+            textDocument = { uri = 'file:///sample.c' } } })
+        trace:record('query_done', { id = 2, incomplete = true, ms = 12 })
+        trace:message('send', { id = 2, result = { { uri = 'file:///sdk/stdio.h', body = 'private_result_body' } } })
+        local stream = assert(io.open(file, 'rb'))
+        local source = stream:read('*a'); stream:close()
+        spec.nil_value(source:find('private_source_body', 1, true))
+        spec.nil_value(source:find('private_result_body', 1, true))
+        local rows = {}
+        for line in source:gmatch('[^\n]+') do rows[#rows + 1] = xutils.json_unpack(line) end
+        spec.equal(#rows, 5, 'trace must be readable before closing the session')
+        spec.equal(rows[1].fields.text_bytes, #'private_source_body')
+        spec.equal(rows[1].fields.version, 1)
+        spec.equal(rows[2].fields.cancel_id, 2)
+        spec.equal(rows[3].fields.method, 'textDocument/didClose')
+        spec.equal(rows[4].fields.incomplete, true)
+        spec.equal(rows[5].fields.target_uri, 'file:///sdk/stdio.h')
+        for i, row in ipairs(rows) do
+            spec.equal(row.sequence, i); spec.equal(row.session, 'trace-test')
+            spec.equal(type(row.ms), 'number')
+        end
+        trace:close(); trace:close()
+    end)
     spec.it('coalesces idle file warming and cancels it before capturing foreground drafts', function()
         local clock, now = xtimer.now_ms, 100
         xtimer.now_ms = function() return now end
@@ -3551,6 +3594,55 @@ spec.describe('LSP navigation requests', function()
         jobs[2].done(false, 'cancelled')
         jobs[3].done(true, { result = {}, incomplete = false })
         spec.equal(next(session.pending), nil)
+    end)
+    spec.it('throttles incomplete popups across shared queries and external document closure', function()
+        local clock, now = xtimer.now_ms, 100
+        xtimer.now_ms = function() return now end
+        local ok, err = pcall(function()
+            local jobs = {}
+            local session, send, output = session_with(function(req, done)
+                if req.method == 'lsp_refresh' then return 'scan' end
+                jobs[#jobs + 1] = { req = req, done = done }; return 'job' .. #jobs
+            end)
+            local uri = nav_uri('main.c')
+            send('textDocument/didOpen', { textDocument = { uri = uri, languageId = 'c', version = 1,
+                text = 'printf("hello");' } })
+            local function definition(id, character)
+                send('textDocument/definition', { textDocument = { uri = uri },
+                    position = { line = 0, character = character or 1 } }, id)
+            end
+            local limited = { result = { { uri = 'file:///outside/stdio.h', range = {
+                start = { line = 0, character = 0 }, ['end'] = { line = 0, character = 6 } } } }, incomplete = true }
+            for id = 2, 5 do definition(id, id - 2) end
+            spec.equal(#jobs, 1)
+            jobs[1].done(true, limited)
+            local function count(method)
+                local n = 0
+                for _, msg in ipairs(output) do if msg.method == method then n = n + 1 end end
+                return n
+            end
+            spec.equal(count('window/showMessage'), 1)
+            spec.equal(count('window/logMessage'), 3)
+            local replies = {}
+            for _, msg in ipairs(output) do if msg.id then replies[msg.id] = msg end end
+            for id = 2, 5 do spec.equal(#replies[id].result, 1) end
+            send('textDocument/didOpen', { textDocument = { uri = 'file:///outside/stdio.h', languageId = 'c',
+                version = 1, text = 'int printf(const char *, ...);' } })
+            send('textDocument/didClose', { textDocument = { uri = 'file:///outside/stdio.h' } })
+            definition(6); jobs[2].done(true, limited)
+            spec.equal(count('window/showMessage'), 1)
+            spec.equal(count('window/logMessage'), 4)
+            spec.contains(output[#output - 1].params.message, uri)
+            now = now + lsp.LIMIT_WARNING_MS
+            definition(7); jobs[3].done(true, limited)
+            spec.equal(count('window/showMessage'), 2, 'persistent limitations must be reported again')
+            send('textDocument/references', { textDocument = { uri = uri }, position = { line = 0, character = 1 } }, 8)
+            jobs[4].done(true, { result = {}, incomplete = true })
+            spec.equal(count('window/showMessage'), 3, 'different warning types remain independent')
+            session:close()
+        end)
+        xtimer.now_ms = clock
+        if not ok then error(err, 0) end
     end)
     spec.it('separates navigation by document changes, method and reference options', function()
         local jobs = {}
@@ -3817,6 +3909,50 @@ end
 
 spec.describe('LSP completion', function()
     service.refresh(comp_root, { cache_path = comp_root .. '/cache.idx', lister = 'walk' })
+    spec.it('keeps short prefixes local and bounds filtered dependency completions', function()
+        local header = { 'void file_open(void);', 'void unrelated(void);' }
+        for i = 1, 180 do header[#header + 1] = ('void format_%03d(void);'):format(i) end
+        write(comp_root .. '/prefix-policy.h', table.concat(header, '\n'))
+        local base = '#include "prefix-policy.h"\nint file_local;\nvoid use(int frame) { int fox; %s }\n'
+        local path = comp_root .. '/prefix-policy.c'
+        write(path, base:format(''))
+        service.refresh(comp_root, { cache_path = comp_root .. '/cache.idx', lister = 'walk' })
+        local uri, version = docs.uri(path), 0
+        local function query(prefix)
+            version = version + 1
+            local source = base:format(prefix)
+            local doc = docs.new(uri, source, version, 'c')
+            navigation.sync({ session = 'prefix-policy', open = { [uri] = version }, changed = {
+                [uri] = { source = source, version = version, language = 'c' } } })
+            return navigation.execute({ method = 'lsp_completion', session = 'prefix-policy', root = comp_root,
+                uri = uri, position = doc:position(assert(source:find(' }', 1, true)) - 1) }).result
+        end
+        local original, dependencies = navigation.deps, 0
+        navigation.deps = function(...) dependencies = dependencies + 1; return original(...) end
+        local ok, result = pcall(query, 'f')
+        navigation.deps = original
+        spec.truthy(ok, result)
+        spec.equal(dependencies, 0, 'single-character completion must skip dependency enumeration')
+        local labels = {}
+        for _, item in ipairs(result.items) do labels[item.label] = true end
+        spec.truthy(labels.frame); spec.truthy(labels.fox); spec.truthy(labels.file_local)
+        spec.nil_value(labels.file_open); spec.truthy(result.isIncomplete, 'next character must refresh the list')
+        result = query('fo')
+        spec.equal(#result.items, completion.AUTO_MAX_ITEMS); spec.truthy(result.isIncomplete)
+        for _, item in ipairs(result.items) do spec.equal(item.label:sub(1, 2), 'fo') end
+        spec.equal(result.items[1].label, 'fox', 'locals precede header candidates')
+        result = query('for')
+        spec.equal(#result.items, completion.AUTO_MAX_ITEMS, 'keyword-shaped prefixes must still be filtered')
+        for _, item in ipairs(result.items) do spec.equal(item.label:sub(1, 3), 'for') end
+        result = query('fop')
+        spec.equal(#result.items, 1); spec.equal(result.items[1].label, 'file_open', 'retain fuzzy subsequence matches')
+        result = query('zz')
+        spec.equal(#result.items, 0); spec.equal(result.isIncomplete, false)
+        result = query('')
+        spec.truthy(#result.items > completion.AUTO_MAX_ITEMS, 'empty-prefix explicit completion retains broad scope')
+        spec.truthy(#result.items <= completion.MAX_ITEMS)
+        navigation.close('prefix-policy')
+    end)
     local cases = {
         { 'p.c', 1, 'next,x', 'C pointer members from a parameter type' },
         { 'p.c', 2, 'next,x', 'C members of a struct local' },
@@ -3926,6 +4062,36 @@ local function comp_session(extra)
 end
 
 spec.describe('LSP completion requests', function()
+    spec.it('cancels superseded completions on input, replacement and document closure', function()
+        local jobs, cancelled = {}, {}
+        local session, send, output = session_with(function(req, done)
+            if req.method == 'lsp_refresh' then return 'scan' end
+            jobs[#jobs + 1] = { req = req, done = done }; return 'job' .. #jobs
+        end, nil, function(id) cancelled[id] = true end)
+        local uri = nav_uri('completion-input.c')
+        send('textDocument/didOpen', { textDocument = { uri = uri, version = 1, languageId = 'c', text = 'f' } })
+        local params = { textDocument = { uri = uri }, position = { line = 0, character = 1 } }
+        send('textDocument/completion', params, 2)
+        send('textDocument/didChange', { textDocument = { uri = uri, version = 2 }, contentChanges = { { text = 'fo' } } })
+        spec.truthy(cancelled.job1)
+        params.position.character = 2
+        send('textDocument/completion', params, 3)
+        send('textDocument/completion', params, 4)
+        spec.truthy(cancelled.job2)
+        jobs[1].done(true, { result = { items = { { label = 'stale' } } } })
+        jobs[2].done(true, { result = { items = { { label = 'stale' } } } })
+        jobs[3].done(true, { result = { items = { { label = 'fresh' } } } })
+        send('textDocument/completion', params, 5)
+        send('textDocument/didClose', { textDocument = { uri = uri } })
+        spec.truthy(cancelled.job4)
+        jobs[4].done(true, { result = { items = { { label = 'stale' } } } })
+        local replies = {}
+        for _, msg in ipairs(output) do if msg.id then replies[msg.id] = msg end end
+        for _, id in ipairs({ 2, 3, 5 }) do spec.equal(replies[id].error.code, -32800) end
+        spec.equal(replies[4].result.items[1].label, 'fresh')
+        spec.equal(next(session.pending), nil)
+        session:close()
+    end)
     spec.it('advertises method implementations and honours its feature switch', function()
         local session, output = comp_session()
         spec.truthy(output[1].result.capabilities.implementationProvider)

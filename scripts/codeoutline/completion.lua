@@ -7,13 +7,15 @@
 -- and return types (read from signatures), initializers (`new T`, `T(`,
 -- `T{`, `T::new(`), imports and static names, then its members are listed:
 -- children, out-of-line definitions, assigned attributes and base classes.
--- Items are unsorted and unfiltered by case; the editor filters them. Type
+-- Short bare prefixes stay local. Longer prefixes are filtered before details
+-- are generated; the editor retains responsibility for ranking. Type
 -- files are reparsed on demand within a time budget; running out of it, or
 -- of items, marks the list incomplete.
 local graph = require('codeoutline.graph')
 local navigation = require('codeoutline.navigation')
 local control = require('codeoutline.control')
-local M = { MAX_ITEMS = 500, BUDGET_SECONDS = 0.3, MAX_DEPTH = 6 }
+local M = { MAX_ITEMS = 500, AUTO_MAX_ITEMS = 100, MIN_GLOBAL_PREFIX = 2,
+    BUDGET_SECONDS = 0.3, MAX_DEPTH = 6 }
 
 local ITEM = { ['function'] = 3, method = 2, constructor = 4, destructor = 4, field = 5, variable = 6,
     property = 10, class = 7, struct = 22, union = 22, record = 22, interface = 8, enum = 13, enum_member = 20,
@@ -999,11 +1001,45 @@ function M.complete(req)
     self.rust_static = self.language == 'rust' and is_member and text_of(T, op) == '::'
     if req.trigger and not is_member then return { items = {} } end
     self.fn, self.owner = self:scope()
-    local prefix = t and T.k[t] == 'id' and T.e[t] >= offset
+    local prefix = t and (T.k[t] == 'id' or T.k[t] == 'kw') and T.e[t] >= offset
         and doc.source:sub(T.s[t], offset):lower() or ''
+    local narrow = not is_member and #prefix > 0 and #prefix < M.MIN_GLOBAL_PREFIX
+    local limit = not is_member and prefix == '' and M.MAX_ITEMS or M.AUTO_MAX_ITEMS
+    local function matches(name)
+        if prefix == '' then return true end
+        name = name:lower()
+        if #prefix == 1 then return name:sub(1, 1) == prefix end
+        -- Preserve subsequence matching (e.g. fop -> file_open).
+        local at = 1
+        for i = 1, #prefix do
+            local found = name:find(prefix:sub(i, i), at, true)
+            if not found then return false end
+            at = found + 1
+        end
+        return true
+    end
     self.aliases = module_aliases(T, self.language)
     if self.language == 'go' then self.aliases = require('codeoutline.go_modules').aliases(V, f, V.js_context) end
     local entries = {}
+    local added = {}
+    local function add(entry)
+        if not matches(entry.name) or added[entry.name] then return end
+        if #entries >= limit then
+            self.incomplete = true
+            if prefix ~= '' and entry.name:sub(1, #prefix):lower() == prefix then
+                for i = #entries, 1, -1 do
+                    if entries[i].name:sub(1, #prefix):lower() ~= prefix then
+                        added[entries[i].name] = nil
+                        entries[i], added[entry.name] = entry, true
+                        break
+                    end
+                end
+            end
+            return
+        end
+        added[entry.name] = true
+        entries[#entries + 1] = entry
+    end
     if is_member then
         local chain = receiver_chain(T, op, member)
         local target
@@ -1034,31 +1070,31 @@ function M.complete(req)
         end
     else
         for _, entry in ipairs(self:locals()) do
-            entries[#entries + 1] = { name = entry.name, kind = 'variable',
-                detail = entry.type and (entry.type .. ' ' .. entry.name) or nil }
+            add({ name = entry.name, kind = 'variable',
+                detail = entry.type and (entry.type .. ' ' .. entry.name) or nil })
         end
-        for alias in pairs(self.aliases) do entries[#entries + 1] = { name = alias, kind = 'namespace', detail = 'module' } end
-        if self.language == 'csharp' then
+        for alias in pairs(self.aliases) do add({ name = alias, kind = 'namespace', detail = 'module' }) end
+        if not narrow and self.language == 'csharp' then
             local bindings = require('codeoutline.csharp_bindings')
             for _, entry in ipairs(bindings.usings(V, f, self.offset, V.js_context)) do
                 local d = entry.directive
-                if d.alias then entries[#entries + 1] = { name = d.alias:gsub('^@', ''), kind = 'class', detail = d.path }
+                if d.alias then add({ name = d.alias:gsub('^@', ''), kind = 'class', detail = d.path })
                 elseif d.static then
                     local ids = bindings.types(V, entry.file, d.path, d.first, V.js_context,
                         { exclude = d.first, no_global = true, scope = d.scope })
                     for _, member in ipairs(self:members(ids)) do
                         if TYPES[member.kind] or bindings.static_node(V, member.file, member.node, V.js_context)
-                            and bindings.visible_node(V, f, member.file, member.node, self.offset, V.js_context) then entries[#entries + 1] = member end
+                            and bindings.visible_node(V, f, member.file, member.node, self.offset, V.js_context) then add(member) end
                     end
                 end
             end
         end
         for _, node in ipairs(self.rec.nodes) do
             if not node.parent and (self.language == 'kotlin' or not node.qualified:find('[%.:]')) then
-                entries[#entries + 1] = { name = node.name, kind = node.kind, node = node, file = f }
+                add({ name = node.name, kind = node.kind, node = node, file = f })
             end
         end
-        if self.language == 'kotlin' then
+        if not narrow and self.language == 'kotlin' then
             local direct = navigation.deps(V, f)
             for g in pairs(direct) do
                 if self:expired() then break end
@@ -1073,13 +1109,13 @@ function M.complete(req)
                             end
                         end
                         if visible and not node.static then
-                            entries[#entries + 1] = { name = visible, kind = node.kind, node = node, file = g }
+                            add({ name = visible, kind = node.kind, node = node, file = g })
                         end
                     end
                 end
             end
         end
-        if self.language == 'c' or self.language == 'cpp' then
+        if not narrow and (self.language == 'c' or self.language == 'cpp') then
             -- Use actual includes (including transitive headers), not paired
             -- implementation files, whose private symbols are not visible here.
             local included = navigation.deps(V, f)
@@ -1090,25 +1126,35 @@ function M.complete(req)
                 if self:expired() then break end
                 for _, node in ipairs(V.files[g].nodes) do
                     if not node.parent and not node.qualified:find('[%.:]') then
-                        entries[#entries + 1] = { name = node.name, kind = node.kind, node = node, file = g }
+                        add({ name = node.name, kind = node.kind, node = node, file = g })
                     end
                 end
             end
+            if #prefix >= M.MIN_GLOBAL_PREFIX and not self:expired() then
+                local external, info = navigation.external_completions(V, f, prefix,
+                    doc:position(offset).line + 1, function() return self:expired() end, limit)
+                for _, entry in ipairs(external) do
+                    add({ name = entry.node.name, kind = entry.node.kind, detail = entry.node.sig })
+                end
+                self.incomplete = self.incomplete or info.truncated
+            end
         end
-        if self.language == 'cpp' and not self:expired() then
+        if not narrow and self.language == 'cpp' and not self:expired() then
             local owner = self.fn and self.rec.nodes[self.fn] or self.owner and self.rec.nodes[self.owner]
             local scope = owner and (CALLABLE[owner.kind] and owner.qualified:match('^(.*)::[^:]+$') or owner.qualified)
             for _, entry in ipairs(require('codeoutline.cpp_types').imported_members(V, f, scope, offset, V.js_context,
-                function() return self:expired() end, prefix)) do entries[#entries + 1] = entry end
+                function() return self:expired() end, prefix)) do add(entry) end
         end
         if self.owner or self.fn then
             local ids = self:self_types()
-            for _, entry in ipairs(self:members(ids)) do entries[#entries + 1] = entry end
+            for _, entry in ipairs(self:members(ids)) do add(entry) end
         end
+        -- Clients must query again when another character opens dependency lookup.
+        if narrow then self.incomplete = true end
     end
     -- Preserve editor-side fuzzy filtering, but keep prefix matches ahead of
     -- unrelated items when a large include tree exceeds the response limit.
-    if prefix ~= '' and #entries > M.MAX_ITEMS then
+    if prefix ~= '' and #entries > limit then
         local ordered = {}
         for _, entry in ipairs(entries) do
             if entry.name:sub(1, #prefix):lower() == prefix then ordered[#ordered + 1] = entry end
@@ -1120,9 +1166,9 @@ function M.complete(req)
     end
     local items, seen = {}, {}
     for _, entry in ipairs(entries) do
-        if not seen[entry.name] then
+        if matches(entry.name) and not seen[entry.name] then
             seen[entry.name] = true
-            if #items >= M.MAX_ITEMS then self.incomplete = true; break end
+            if #items >= limit then self.incomplete = true; break end
             items[#items + 1] = item_for(entry, self.language, V, not self:expired())
         end
     end

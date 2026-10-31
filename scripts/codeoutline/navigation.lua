@@ -752,6 +752,12 @@ local function probe_includes()
     return unique
 end
 
+function M.external_completions(V, f, prefix, line, expired, limit)
+    return require('codeoutline.external_headers').find(V, f,
+        { name = prefix, kind = 'call', reason = 'no indexed target', line = line },
+        V.js_context, probe_includes, { expired = expired, limit = limit })
+end
+
 -- Locations of the files an import on this line names: project files by the
 -- dependency rules, and C/C++ headers found in the include directories.
 local function import_targets(V, f, line)

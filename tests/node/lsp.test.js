@@ -469,12 +469,16 @@ test('LSP C completion includes transitive headers without leaking unrelated fil
     await initialize(client, [client.project]);
     await indexed(client);
     const uri = pathToFileURL(join(client.project, 'main.c')).href;
+    const short = await client.request('textDocument/completion', { textDocument: { uri },
+        position: { line: 1, character: 'void run(void) { x'.length } });
+    assert.deepEqual(short.items, []);
+    assert.equal(short.isIncomplete, true, 'typing more characters must refresh dependency candidates');
     const result = await client.request('textDocument/completion', { textDocument: { uri },
         position: { line: 1, character: 'void run(void) { xhash'.length } });
     const names = result.items.map(item => item.label);
     assert.ok(names.includes('xhash_visible'));
     for (const name of ['xhash_field', 'xhash_private', 'xhash_unrelated']) assert.ok(!names.includes(name), name);
-    assert.equal(result.isIncomplete, true);
+    assert.equal(result.isIncomplete, false, 'unrelated names no longer consume the response limit');
     const header = pathToFileURL(join(client.project, 'z.h')).href;
     client.notify('textDocument/didOpen', { textDocument: { uri: header, languageId: 'c', version: 1,
         text: 'int xhash_updated(int value);\n' } });

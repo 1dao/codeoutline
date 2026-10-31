@@ -43,10 +43,10 @@ function M.manifest(envelope, public_key)
     assert(require('xupgate.signature').verify(public_key, envelope.payload, sig), 'manifest signature invalid')
     local m = assert(M.decode_json(envelope.payload), 'invalid manifest JSON')
     assert(m.schema == 1 and M.id(m.project) and M.version(m.version) and M.id(m.platform), 'invalid manifest identity')
-    assert(m.minUpdater == 1 or m.minUpdater == 2, 'unsupported updater version')
+    assert(m.minUpdater == 1 or m.minUpdater == 2 or m.minUpdater == 3, 'unsupported updater version')
     assert(m.kind == nil or m.kind == 'full' or m.kind == 'scripts', 'invalid package kind')
     if m.kind == 'scripts' then
-        assert(m.minUpdater == 2 and type(m.runtimeFiles) == 'table' and M.path(m.runtime), 'script package requires updater 2 and runtime references')
+        assert(m.minUpdater >= 2 and type(m.runtimeFiles) == 'table' and M.path(m.runtime), 'script package requires updater 2 or newer and runtime references')
         local count, seen = 0, {}
         for path, hash in pairs(m.runtimeFiles) do
             assert(M.path(path) and type(hash) == 'string' and #hash == 64 and hash:match('^[0-9a-f]+$'), 'invalid runtime reference')

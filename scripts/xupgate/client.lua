@@ -34,9 +34,9 @@ end
 local leases={}
 -- Returns nil outside an update directory (the initial installation is never pruned).
 function M.lease(files_root)
-    local root,identity=files_root:gsub('\\','/'):match('^(.*)/versions/(%x+)/files/?$')
-    if not root or #identity~=64 or not u.mkdir_p(root .. '/leases') then return nil end
-    local path=root .. '/leases/' .. identity .. '-' .. token()
+    local root,version=files_root:gsub('\\','/'):match('^(.*)/versions/([^/]+)/files/?$')
+    if not root or not c.version(version) or not u.mkdir_p(root .. '/leases') then return nil end
+    local path=root .. '/leases/' .. version .. '-' .. token()
     local handle
     if windows then
         handle=io.open(path,'wb');if not handle then return nil end
@@ -67,13 +67,18 @@ function M.open(config)
         local data=c.read(root .. '/current.json',1048576)
         if not data then
             assert(not u.stat(root .. '/current.json').exists,'local state unreadable')
-            return {schema=1,highSequence=config.minimumSequence or 0}
+            return {schema=2,highSequence=config.minimumSequence or 0}
         end
         local value=assert(c.decode_json(data),'corrupt local state')
-        assert(value.schema==1 and type(value.highSequence)=='number' and value.highSequence>=0 and value.highSequence%1==0,'invalid local state')
+        assert(value.schema==2, 'unsupported update state; stop old processes, remove the old update cache and reinstall CodeOutline')
+        assert(type(value.highSequence)=='number' and value.highSequence>=0 and value.highSequence%1==0,'invalid local state')
         value.highSequence=math.max(value.highSequence,config.minimumSequence or 0)
-        assert(not value.current or (type(value.current)=='string' and #value.current==64 and value.current:match('^[0-9a-f]+$')),'invalid current')
-        assert(not value.previous or (type(value.previous)=='string' and #value.previous==64 and value.previous:match('^[0-9a-f]+$')),'invalid previous')
+        for _, key in ipairs({ 'current', 'previous' }) do
+            local version, identity = value[key], value[key .. 'Identity']
+            assert(not version or c.version(version), 'invalid ' .. key .. ' version')
+            assert(not version and not identity or version and type(identity)=='string'
+                and #identity==64 and identity:match('^[0-9a-f]+$'), 'invalid ' .. key .. ' identity')
+        end
         return value
     end
     local function save(value)c.atomic(root .. '/current.json',assert(u.json_pack(value)))end
@@ -93,9 +98,9 @@ function M.open(config)
         local now,busy=os.time(),{}
         for _,entry in ipairs(u.list_dir(root .. '/leases') or {})do
             local path=root .. '/leases/' .. entry.name
-            local identity=entry.name:match('^(%x+)%-%x+$')
-            if not identity then os.remove(path)
-            elseif lease_alive(path)then busy[identity]=true end
+            local version=entry.name:match('^(%d+%.%d+%.%d+)%-%x+$')
+            if not version then os.remove(path)
+            elseif lease_alive(path)then busy[version]=true end
         end
         for _,entry in ipairs(u.list_dir(root .. '/versions') or {})do
             local removable=entry.dir and not keep[entry.name] and not busy[entry.name]
@@ -146,7 +151,8 @@ function M.open(config)
         local envelope=c.decode_json(assert(c.read(dir .. '/manifest.json',1048576)))
         local m=verified(envelope)
         assert(u.stat(dir .. '/complete').exists,'installation incomplete')
-        assert(u.sha256_hex(envelope.payload)==s.current,'invalid active identity')
+        assert(m.version==s.current,'active version directory mismatch')
+        assert(u.sha256_hex(envelope.payload)==s.currentIdentity,'invalid active identity')
         local files=c.bundle(assert(c.read(dir .. '/bundle.json')),m)
         for _,f in ipairs(files)do assert(c.read(dir .. '/files/' .. f.path)==f.data,'installed file changed')end
         for path, hash in pairs(m.runtimeFiles or {}) do
@@ -168,9 +174,18 @@ function M.open(config)
         return locked(function()
             local s=state()
             assert(m.sequence>=s.highSequence,'downgrade/replay rejected; use explicit local rollback')
-            if s.current==identity then return api.current()end
-            if m.sequence==s.highSequence and s.current then assert(s.previous==identity,'different content at previously accepted sequence')end
-            local dir=root .. '/versions/' .. identity
+            if s.current==m.version then
+                assert(s.currentIdentity==identity, 'different content for an installed version; publish a new version number')
+                return api.current()
+            end
+            if m.sequence==s.highSequence and s.current then assert(s.previousIdentity==identity,'different content at previously accepted sequence')end
+            local dir=root .. '/versions/' .. m.version
+            if u.stat(dir .. '/complete').exists then
+                local existing=assert(c.decode_json(c.read(dir .. '/manifest.json',1048576)), 'installed manifest missing')
+                local original=verified(existing)
+                assert(original.version==m.version and u.sha256_hex(existing.payload)==identity,
+                    'different content for an installed version; publish a new version number')
+            end
             if not u.stat(dir .. '/complete').exists then
                 assert(u.mkdir_p(dir .. '/files'))
                 for _,f in ipairs(files)do
@@ -207,25 +222,27 @@ function M.open(config)
             end
             if config.validate then assert(config.validate(dir .. '/files',m),'project health validation failed')end
             local previous=config.keepPrevious~=false and s.current or nil
-            save({schema=1,highSequence=math.max(s.highSequence,m.sequence),previous=previous,current=identity})
+            save({schema=2,highSequence=math.max(s.highSequence,m.sequence),previous=previous,
+                previousIdentity=previous and s.currentIdentity or nil,current=m.version,currentIdentity=identity})
             local ok,result=pcall(api.current)
             if not ok then save(s);error(result)end
             -- Cleanup never fails an installation that is already active.
-            if config.prune then pcall(prune,{[identity]=true,[previous or identity]=true})end
+            if config.prune then pcall(prune,{[m.version]=true,[previous or m.version]=true})end
             return result
         end)
     end
     function api.use_initial()
         return locked(function()
             local s=state()
-            save({schema=1,highSequence=s.highSequence,previous=s.current})
+            save({schema=2,highSequence=s.highSequence,previous=s.current,previousIdentity=s.currentIdentity})
             return {initial=true}
         end)
     end
     function api.rollback()
         return locked(function()
             local s=state();assert(s.previous,'no previous version')
-            save({schema=1,highSequence=s.highSequence,current=s.previous,previous=s.current})
+            save({schema=2,highSequence=s.highSequence,current=s.previous,currentIdentity=s.previousIdentity,
+                previous=s.current,previousIdentity=s.currentIdentity})
             local ok,result=pcall(api.current)
             if not ok then save(s);error(result)end
             return result

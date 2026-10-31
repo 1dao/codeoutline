@@ -20,7 +20,7 @@ local function artifact(version, sequence, kind)
     if kind == 'full' then files[#files + 1] = { path = 'bin/runtime', data = u.base64_encode('test-runtime') } end
     local bundle = assert(u.json_pack({ schema = 1, files = files }))
     local manifest = { schema = 1, project = project, platform = 'lua-any', version = version, sequence = sequence,
-        minUpdater = kind == 'scripts' and 2 or 1, kind = kind, entry = 'main.lua', runtime = 'bin/runtime',
+        minUpdater = 3, kind = kind, entry = 'main.lua', runtime = 'bin/runtime',
         size = #bundle, sha256 = u.sha256_hex(bundle) }
     if kind == 'scripts' then manifest.runtimeFiles = { ['bin/runtime'] = u.sha256_hex('test-runtime') } end
     if kind == 'scripts' then

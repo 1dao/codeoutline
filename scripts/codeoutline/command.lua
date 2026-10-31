@@ -272,7 +272,7 @@ local function run()
                 if os.getenv('CODEOUTLINE_AUTOSTART') ~= '0' then
                     local entry = attempt(function()
                         -- Only launchers before 0.1.8 leave root inside an update.
-                        assert(not root:match('/versions/%x+/files$'),
+                        assert(not root:match('/versions/[^/]+/files$'),
                             'cannot register an installed update; run npm install -g codeoutline, or install from the native launcher')
                         return daemon.register(root, port)
                     end)

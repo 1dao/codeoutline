@@ -117,7 +117,7 @@ local function build()
         local bundle = json({ schema = 1, files = files })
         assert(#bundle <= 50331648, 'package exceeds 48 MiB')
         local manifest = { schema = 1, project = 'codeoutline', version = version, sequence = sequence,
-            platform = target, minUpdater = kind == 'scripts' and 2 or 1, kind = kind, entry = 'scripts/codeoutline/command.lua',
+            platform = target, minUpdater = 3, kind = kind, entry = 'scripts/codeoutline/command.lua',
             runtime = target == 'win32-x64' and 'bin/xnet.exe' or 'bin/xnet',
             size = #bundle, sha256 = u.sha256_hex(bundle), notes = options.NOTES or '' }
         if kind == 'scripts' then

@@ -19,7 +19,7 @@ local function fixture(version, sequence, kind, runtime)
     end
     local bundle = assert(u.json_pack({ schema = 1, files = files }))
     local m = { schema = 1, project = 'update-test', platform = 'win32-x64', version = version,
-        sequence = sequence, minUpdater = kind == 'scripts' and 2 or 1, kind = kind,
+        sequence = sequence, minUpdater = 3, kind = kind,
         runtime = 'bin/runtime', entry = 'main.lua', size = #bundle, sha256 = u.sha256_hex(bundle) }
     if kind == 'scripts' then
         m.runtimeFiles = { ['bin/runtime'] = u.sha256_hex(runtime), ['lib/codec.lua'] = u.sha256_hex('codec') }
@@ -34,11 +34,19 @@ end
 local api = require('xupgate.client').open({ project = 'update-test', platform = 'win32-x64',
     url = 'https://example.invalid', publicKey = key, directory = scratch .. '/installed', runtimeDirectory = initial })
 local full1, bytes1 = fixture('1.0.0', 1, 'full', 'runtime-A')
-assert(api.install(full1, bytes1).version == '1.0.0')
+local first = api.install(full1, bytes1)
+assert(first.version == '1.0.0' and first.root:match('/versions/1%.0%.0/files$'), 'update directory is not the version number')
+assert(api.install(full1, bytes1).root == first.root, 'identical reinstall changed the version directory')
+local collision, collision_bytes = fixture('1.0.0', 2, 'full', 'different-runtime')
+assert(not pcall(api.install, collision, collision_bytes), 'same version with different content accepted')
+assert(c.read(first.root .. '/bin/runtime') == 'runtime-A', 'collision overwrote the installed runtime')
 local scripts2, bytes2 = fixture('1.0.1', 2, 'scripts', 'runtime-A')
 assert(not bytes2:find(u.base64_encode('runtime-A'), 1, true), 'script bundle embeds runtime bytes')
 local installed = api.install(scripts2, bytes2)
 assert(installed.kind == 'scripts' and c.read(installed.root .. '/bin/runtime') == 'runtime-A')
+assert(installed.root:match('/versions/1%.0%.1/files$'), 'script update directory is not the version number')
+assert(not pcall(api.install, collision, collision_bytes), 'different content overwrote a retained version directory')
+assert(api.current().version == '1.0.1', 'retained-directory collision changed the active version')
 assert(api.rollback().version == '1.0.0')
 assert(api.rollback().version == '1.0.1')
 local full3, bytes3 = fixture('1.1.0', 3, 'full', 'runtime-B')
@@ -85,7 +93,7 @@ assert(u.stat(leased).exists and #versions() == 2, 'leased version removed')
 assert(not u.stat(state_root .. '/leases/not-a-lease').exists, 'invalid lease kept')
 lease.release()
 -- A lease left by an exited process (an unheld file, a dead PID) does not count.
-local dead = state_root .. '/leases/' .. leased:match('/versions/(%x+)/files$') .. '-0000000000000000'
+local dead = state_root .. '/leases/' .. leased:match('/versions/([^/]+)/files$') .. '-0000000000000000'
 c.write(dead, '999999999\n')
 installed = pruned.install(scripts4, bytes4)
 assert(not u.stat(dead).exists, 'dead lease kept')
@@ -101,6 +109,26 @@ end
 assert(at_minimum(4).active().version == '1.1.1', 'active update ignored at its own sequence')
 assert(at_minimum(5).active() == nil, 'older active update chosen over a newer initial installation')
 assert(client.lease(initial) == nil, 'initial installation leased')
+local saved = assert(c.read(state_root .. '/current.json'))
+local state = assert(c.decode_json(saved))
+assert(state.schema == 2 and state.current == '1.1.1' and #state.currentIdentity == 64, 'state does not separate version and signed identity')
+state.currentIdentity = string.rep('0', 64)
+c.atomic(state_root .. '/current.json', u.json_pack(state))
+assert(not pcall(pruned.current), 'tampered signed identity accepted')
+c.atomic(state_root .. '/current.json', saved)
+local restore = client.open({ project = 'update-test', platform = 'win32-x64', url = 'https://example.invalid',
+    publicKey = key, directory = scratch .. '/restore', runtimeDirectory = initial })
+restore.install(full1, bytes1)
+assert(restore.use_initial().initial and restore.current() == nil, 'initial version selection failed')
+assert(restore.rollback().version == '1.0.0', 'rollback from initial lost the signed version identity')
+-- Schema 1 hash directories are deliberately unsupported: old installations
+-- must clear their update cache when uninstalling and reinstalling.
+local old = scratch .. '/old-state'
+c.write(old .. '/update-test/current.json', u.json_pack({ schema = 1, highSequence = 1, current = string.rep('a', 64) }))
+local old_api = client.open({ project = 'update-test', platform = 'win32-x64', url = 'https://example.invalid',
+    publicKey = key, directory = old, runtimeDirectory = initial })
+local accepted, failure = pcall(old_api.current)
+assert(not accepted and tostring(failure):find('unsupported update state', 1, true), 'legacy hash state silently accepted')
 io.write('Signed script updates, runtime reuse/replacement, rollback, pruning, replay, tamper and missing-runtime checks passed\n')
 os.remove(scratch .. '/private.pem')
 return { __init = function() xthread.stop(0) end }

@@ -106,6 +106,33 @@ installation and recovery version. An older npm installation needs one npm upgra
 to acquire this updater. Updating does not change npm's recorded package version;
 `codeoutline --version` reports the version actually running.
 
+Installed self-updates now use readable version directories, for example
+`~/.codeoutline/updates/codeoutline/versions/0.3.1/files/`. npm's own package
+installation directory is unchanged. Local `current.json` uses schema 2:
+`current`/`previous` hold version numbers and their separate `currentIdentity`/
+`previousIdentity` fields retain the signed manifest's SHA-256 identity.
+Signatures, package/file checksums and anti-replay sequences remain enforced.
+An existing version directory cannot be overwritten with a different signed
+release; publish a new version number instead. Process leases and pruning use
+version numbers too. Transport/package hashes and the temporary runtime cache
+remain internal integrity identifiers.
+
+The former schema 1 state and hash-named installed directories are deliberately
+unsupported. Existing users must stop the service with `codeoutline uninstall`,
+close clients still running CodeOutline, run `npm uninstall -g codeoutline`,
+remove the old `~/.codeoutline/updates` directory, then install the new package
+with `npm install -g codeoutline --foreground-scripts`. On Windows, the update
+directory is `%USERPROFILE%\\.codeoutline\\updates`. If `CODEOUTLINE_UPDATE_DIR`
+was set, clean that update directory instead. npm uninstall alone does not remove
+this cache. Keep project indexes and agent/editor configuration; they do not
+need migration. Reinstalling registers and starts the shared service again.
+Newly generated signed releases require updater 3, so old updaters reject them
+instead of installing a release with an incompatible on-disk state format.
+Before uploading such a release, the XUpgate server's manifest validator must
+also accept `minUpdater = 3` for full and script packages. A server still using
+the updater-2 validator will reject these uploads; updating this repository does
+not update the separately deployed XUpgate server.
+
 ```sh
 codeoutline update --check
 codeoutline update
@@ -155,6 +182,22 @@ before activating the directory. CI must produce each platform runtime; a Window
 package cannot update a Linux or macOS installation.
 
 ### Background service and login entry
+
+Release native packages also include `editors/codeoutline.vsix` and the prebuilt
+Zed WASM client under `editors/zed/`. CI builds both clients before packaging;
+for local release staging, run `pwsh tools/build-editor-assets.ps1` first
+(requires Node.js and Rust with `wasm32-wasip2`). `tools/package.lua` reads
+`dist/editor-assets`, or `EDITOR_ASSETS=PATH`, and refuses release staging if any
+client asset is missing. Preview builds can omit clients.
+
+`codeoutline editors --list` detects editor CLIs on PATH and common installation
+locations without changing anything. `codeoutline editors` offers a selection
+when started through the npm launcher in a terminal. Use `--editors all`,
+`--editors none`, or comma-separated `vscode,cursor,zed` for unattended use.
+VS Code and Cursor receive the bundled VSIX through their CLI; Zed receives the
+bundled manifest and WASM in its default `extensions/installed/codeoutline`
+directory and needs a restart. Custom Zed user-data directories are not detected.
+No editor settings are rewritten. Native launchers can use `--editors` directly.
 
 A global npm installation runs `codeoutline install --npm` as its `postinstall`
 script; local installs, `npx` and `--ignore-scripts` skip it, and it never fails the
@@ -209,22 +252,6 @@ starting the service.
 ### Make an all-platform script update with xnet
 
 For automatic releases, commit the feature changes and the release tools first,
-Release native packages also include `editors/codeoutline.vsix` and the prebuilt
-Zed WASM client under `editors/zed/`. CI builds both clients before packaging;
-for local release staging, run `pwsh tools/build-editor-assets.ps1` first
-(requires Node.js and Rust with `wasm32-wasip2`). `tools/package.lua` reads
-`dist/editor-assets`, or `EDITOR_ASSETS=PATH`, and refuses release staging if any
-client asset is missing. Preview builds can omit clients.
-
-`codeoutline editors --list` detects editor CLIs on PATH and common installation
-locations without changing anything. `codeoutline editors` offers a selection
-when started through the npm launcher in a terminal. Use `--editors all`,
-`--editors none`, or comma-separated `vscode,cursor,zed` for unattended use.
-VS Code and Cursor receive the bundled VSIX through their CLI; Zed receives the
-bundled manifest and WASM in its default `extensions/installed/codeoutline`
-directory and needs a restart. Custom Zed user-data directories are not detected.
-No editor settings are rewritten. Native launchers can use `--editors` directly.
-
 then run one command from a clean `main` checkout:
 
 ```powershell
@@ -291,13 +318,13 @@ Both full bundles and script bundles install into immutable version directories;
 active executables are never overwritten. `serve` installs in the background and
 the next launch selects the verified scripts and matching executable.
 
-Script bundles use protocol updater version 2. Existing 0.1.4 initial bootstraps
-only understand updater version 1 and safely reject script bundles. They need a
-one-time upgrade of the initial bootstrap (npm or native initial installation)
-before using script-only updates; merely receiving a full update through the old
-bootstrap does not replace that bootstrap. After that upgrade, both script and
-executable updates can be delivered solely through XUpgate. Full bundles retain
-updater version 1 for compatibility. A script bundle whose exact runtime hashes
+New full and script bundles require protocol updater version 3 and use local
+state schema 2 with version-number directories. Older initial bootstraps safely
+reject these bundles. They require uninstalling, clearing the old update cache
+and reinstalling the new npm or native initial installation as described above;
+an in-place self-update does not replace the initial bootstrap. After reinstalling,
+both script and executable updates can be delivered solely through XUpgate.
+A script bundle whose exact runtime hashes
 are unavailable locally is rejected, preserving the active version; distribute
 a compatible full update first. When a script package includes a signed reference
 to that published full release, clients missing its runtime automatically download

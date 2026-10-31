@@ -48,7 +48,9 @@ try {
     // Services update themselves; CODEOUTLINE_INITIAL names this installation,
     // which install registers at login because updates are deleted when unused.
     const service = ['serve', 'daemon', 'install'].includes(process.argv[2]);
-    const env = { ...process.env, CODEOUTLINE_AUTO_UPDATE: process.env.CODEOUTLINE_AUTO_UPDATE ?? (service ? '1' : '0'), CODEOUTLINE_INITIAL: root };
+    const env = { ...process.env, CODEOUTLINE_AUTO_UPDATE: process.env.CODEOUTLINE_AUTO_UPDATE ?? (service ? '1' : '0'), CODEOUTLINE_INITIAL: root,
+        // Runtime owns editor selection; only the launcher knows Node's TTY state.
+        CODEOUTLINE_INTERACTIVE: process.stdin.isTTY && process.stdout.isTTY ? '1' : '0' };
     if (process.argv[2] !== 'update') {
         const selection = spawnSync(executable, [join(root, 'scripts/codeoutline/updater.lua'), ...logArgs, 'ACTION=select'], {
             stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8', windowsHide: true, timeout: 30000, env,

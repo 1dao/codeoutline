@@ -33,7 +33,7 @@ try {
     await writeFile(workspace, JSON.stringify({ folders: [{ path: first }, { path: second }], settings: {
         'codeoutline.serverPath': join(repo, 'bin', process.platform === 'win32' ? 'xnet.exe' : 'xnet'),
         'codeoutline.serverArguments': [join(repo, 'scripts/codeoutline/command.lua'), 'LOG_STDERR=1', 'LOG_FILE=0', 'lsp', '--stdio'],
-        'codeoutline.mode': 'navigation', 'codeoutline.languages': ['lua', 'kotlin', 'arkts']
+        'codeoutline.languages': ['lua', 'kotlin', 'arkts']
     } }));
     const executable = process.env.CODEOUTLINE_EDITOR_PATH || await downloadAndUnzipVSCode();
     const env = { ...process.env, CODEOUTLINE_AUTO_UPDATE: '0' };

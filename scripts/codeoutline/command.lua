@@ -4,15 +4,28 @@ local scripts = assert(source:match('^(.*)/codeoutline/[^/]+$'))
 local install = assert(scripts:match('^(.*)/scripts$'))
 package.path = scripts .. '/?.lua;' .. package.path
 local version = require('codeoutline.version')
-local help = [[CodeOutline - Lua code indexing for MCP and LSP
+local help = [[CodeOutline - code exploration tool and LSP server, powered by Lua
+
+Code exploration (code_explore): agents use the MCP tool codeoutline_explore
+to query symbols, line-numbered source, call paths and callers/callees.
+Use codeoutline explore for code exploration from a terminal.
+
+LSP server: codeoutline lsp --stdio provides editor symbols, definitions,
+references, hover, call hierarchy, completion and signature help.
+Bundled clients support VS Code, Cursor and Zed. VS Code/Cursor default to
+full navigation; no codeoutline.mode setting is needed for a new installation.
 
 One shared background service serves every MCP client. A global npm install
-starts it and registers it to start at login (codeoutline install does the same
-for other installations); it keeps itself updated. Register its URL once:
+starts it and registers it to start at login; it keeps itself updated.
+Run codeoutline install --yes to detect and register agents globally, or
+codeoutline install --target cursor,claude,codex to select agents explicitly.
+You can also register the URL manually:
   claude mcp add --transport http codeoutline --scope user http://127.0.0.1:19876/mcp
 
 Usage:
-  codeoutline install [--port PORT]
+  codeoutline install [--yes] [--target auto|all|none|IDS] [--location global|local] [--port PORT] [--editors all|none|vscode,cursor,zed]
+  codeoutline agents [--list] [--target auto|all|none|IDS] [--location global|local] [--port PORT] [--remove] [--force]
+  codeoutline editors [--list] [--editors all|none|vscode,cursor,zed]
   codeoutline uninstall [--port PORT]
   codeoutline daemon [--port PORT]
   codeoutline serve --stdio [--project PATH] [--allow-root PATH ...]
@@ -27,11 +40,47 @@ Usage:
   codeoutline rebuild [--project PATH]
   codeoutline doctor [--project PATH]
   codeoutline update [--check] [--channel CHANNEL]
+  codeoutline --help
   codeoutline --version
+
+Editor setup:
+  npm install -g codeoutline --foreground-scripts   detect and choose at install time
+  codeoutline editors                              detect and choose afterward
+  codeoutline editors --list                       only show detected editors
+  codeoutline editors --editors all                install for all detected editors
+  codeoutline editors --editors vscode             install for VS Code only
+  codeoutline editors --editors cursor             install for Cursor only
+  codeoutline editors --editors zed                install for Zed only
+  codeoutline editors --editors vscode,cursor       install for selected editors
+Choose none to skip clients. Without a terminal, no selection prompt is shown.
+Reload VS Code/Cursor or restart Zed after installation.
+The LSP server runs separately from the shared MCP HTTP service.
+
+Agent MCP setup (independent of LSP clients):
+  codeoutline install --yes                        detect agents, configure MCP, start service
+  codeoutline install --target cursor,claude,codex   configure selected agents and start service
+  codeoutline agents                              detect and choose agents interactively
+  codeoutline agents --list                        show detection and config paths only
+  codeoutline agents --target all                  configure all detected agents
+  codeoutline agents --print codex                 print config only, without writing files
+  codeoutline agents --target cursor --remove      remove only CodeOutline's MCP entry
+Targets: claude, cursor, codex, gemini, opencode, hermes, kiro, antigravity,
+         copilot-vscode, copilot-cli, copilot-jetbrains.
+all and auto select detected targets; comma-separated ids select explicitly.
+Use --location local [--project PATH] for project scope where supported;
+Antigravity, Hermes, Copilot CLI and Copilot JetBrains support global scope only.
+--port changes the local endpoint (default 19876); agents only edits config,
+while install also starts the service. Restart agents after configuration.
+Existing unrelated settings are preserved; original files get .codeoutline.bak
+backups. Different existing codeoutline settings require --force to replace.
+CODEOUTLINE_AGENTS=auto|all|none|IDS selects agents for unattended npm installs.
+Without an explicit selection or terminal, npm skips agent configuration.
 
 HTTP options: --allow-host HOST, --allow-origin ORIGIN (repeatable).
 install starts the background service and registers it at login; uninstall
 stops it and removes that entry. daemon is the service itself.
+editors detects VS Code, Cursor and Zed and offers optional LSP client installation.
+Use --editors or CODEOUTLINE_EDITORS to select clients without a prompt.
 Remote HTTP requires CODEOUTLINE_TOKEN (at least 16 bytes).
 Local HTTP without --allow-root serves any project; stdio and remote HTTP
 default to --project or the working directory.
@@ -62,7 +111,11 @@ local function parse(args)
         lsp = { stdio = true, project = true },
         serve = { stdio = true, http = true, project = true, host = true, port = true,
             ['allow-root'] = true, ['allow-host'] = true, ['allow-origin'] = true },
-        daemon = { port = true }, install = { port = true, npm = true }, uninstall = { port = true },
+        daemon = { port = true }, install = { port = true, npm = true, editors = true, target = true, yes = true,
+            location = true, project = true, force = true, list = true, print = true, ['print-config'] = true }, uninstall = { port = true },
+        agents = { target = true, yes = true, location = true, project = true, port = true, list = true,
+            ['print-config'] = true, print = true, remove = true, force = true },
+        editors = { list = true, editors = true },
         explore = { project = true, query = true, budget = true },
         callers = { project = true, query = true, budget = true, depth = true, ['max-nodes'] = true },
         affected = { project = true, file = true, ['files-from'] = true, budget = true, depth = true, ['max-nodes'] = true },
@@ -77,7 +130,8 @@ local function parse(args)
         local name, value = clean[i]:match('^%-%-([%w-]+)=(.*)$')
         if not name then name = clean[i]:match('^%-%-([%w-]+)$') end
         assert(name and (allowed[command][name] or name == 'help'), 'unknown option: ' .. clean[i])
-        local flag = name == 'check' or name == 'stdio' or name == 'http' or name == 'help' or name == 'npm'
+        local flag = name == 'check' or name == 'stdio' or name == 'http' or name == 'help' or name == 'npm' or name == 'list'
+            or name == 'yes' or name == 'remove' or name == 'force'
         if flag then
             assert(value == nil, '--' .. name .. ' does not take a value')
             value = true
@@ -158,6 +212,12 @@ local function run()
     if command == 'update' then
         return require('codeoutline.updater').run(options.check and 'check' or 'update', options)
     end
+    if command == 'editors' then
+        return require('codeoutline.editor_install').run(os.getenv('CODEOUTLINE_INITIAL') or install, options)
+    end
+    if command == 'agents' or command == 'install' and (options.list or options.print or options['print-config']) then
+        return require('codeoutline.agent_install').run(options)
+    end
     if command == 'daemon' or command == 'install' or command == 'uninstall' then
         local daemon = require('codeoutline.daemon')
         local port = tonumber(options.port or daemon.PORT)
@@ -169,9 +229,21 @@ local function run()
         -- npm runs install after every installation; only global ones start a
         -- service, and nothing here may fail the installation.
         local npm = options.npm
-        if npm and (os.getenv('npm_config_global') ~= 'true' or os.getenv('CODEOUTLINE_AUTOSTART') == '0') then return 0 end
+        if npm and os.getenv('npm_config_global') ~= 'true' then return 0 end
         local function say(text) io.write(text, '\n'); io.stdout:flush() end
         local status = 0
+        if command == 'install' then
+            local agent_ok, agent_result = pcall(require('codeoutline.agent_install').run, options)
+            if not agent_ok then io.stderr:write('codeoutline: ', tostring(agent_result), '\n') end
+            if not npm and not agent_ok then return 1 end
+            local editor_selection = options.editors or os.getenv('CODEOUTLINE_EDITORS')
+            if editor_selection == '' then editor_selection = nil end
+            local editor_options = { editors = editor_selection or (options.yes and 'none' or nil) }
+            local ok, result = pcall(require('codeoutline.editor_install').run, os.getenv('CODEOUTLINE_INITIAL') or install, editor_options)
+            if not ok then io.stderr:write('codeoutline: ', tostring(result), '\n') end
+            if not npm then status = ok and result or 1 end
+            if npm and os.getenv('CODEOUTLINE_AUTOSTART') == '0' then return 0 end
+        end
         local function attempt(fn, ...)
             local ok, err = pcall(fn, ...)
             if not ok then io.stderr:write('codeoutline: ', tostring(err), '\n'); status = npm and 0 or 1 end

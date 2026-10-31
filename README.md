@@ -2,7 +2,14 @@
 
 English | [简体中文](README.zh-CN.md)
 
-Lightweight code indexing and exploration for coding agents, as an MCP server, and for editors, as a language server. Powered by Lua.
+CodeOutline is a code exploration tool and LSP server, powered by Lua.
+
+- **Code exploration (`code_explore`) for coding agents:** the MCP tool
+  `codeoutline_explore` returns symbols, line-numbered source, call paths and
+  callers/callees. Use `codeoutline explore` for the same exploration from a terminal.
+- **LSP server for editors:** `codeoutline lsp --stdio` provides symbols,
+  definitions, references, hover, call hierarchy, completion and signature help.
+  Install the bundled clients for VS Code, Cursor or Zed to use it in an editor.
 
 CodeOutline answers symbol queries with line-numbered source, call paths, and callers/callees, refreshes incrementally, and caches the index on disk. Editors get symbols, definitions, references, call hierarchy, and completion from the same index through LSP. The MCP protocol with both transports (stdio and Streamable HTTP) and the language server are implemented in Lua, so neither depends on Node; in the npm package, Node only locates and starts the runtime for your platform.
 
@@ -13,13 +20,82 @@ Requires Node.js 20 or newer. npm downloads the runtime for your platform automa
 ```sh
 npm install -g codeoutline
 codeoutline --version
+codeoutline --help
 ```
+
+To detect supported agents and editors and choose which MCP registrations and
+LSP clients to install during npm installation, run:
+
+```sh
+npm install -g codeoutline --foreground-scripts
+```
+
+Agent MCP setup and editor LSP installation have separate prompts; both default
+to `none`. For LSP clients, enter `vscode,cursor`, `zed`, or `all` (detected editors).
+You can also choose or install clients after npm installation:
+
+```sh
+codeoutline editors                             # detect and choose interactively
+codeoutline editors --list                      # only show detected editors
+codeoutline editors --editors all               # install for all detected editors
+codeoutline editors --editors vscode            # install for VS Code only
+codeoutline editors --editors cursor            # install for Cursor only
+codeoutline editors --editors zed               # install for Zed only
+codeoutline editors --editors vscode,cursor      # install for selected editors
+```
+
+Set `CODEOUTLINE_EDITORS` to
+the same selection for unattended global npm installs; `none` skips clients.
+Without a terminal, installation never waits for a choice. Local npm installs
+do not change editor installations. Clients are bundled in release packages;
+no Rust toolchain or marketplace download is needed. Reload VS Code/Cursor or
+restart Zed afterward. Detection uses PATH and common installation locations;
+for a custom location, add the editor CLI to PATH. Zed uses its default user-data
+directory. Existing editor settings are preserved. The VS Code/Cursor client
+starts with full navigation enabled; set `codeoutline.mode` to `auxiliary` for
+workspace symbols only. See [LSP.md](docs/LSP.md) for server capabilities.
 
 ### Recommended: one shared HTTP service
 
 A stdio server is a child process of its client, so every agent session (each Claude Code session, each Cursor window) starts its own copy and builds its own in-memory index. One HTTP service serves all sessions from a single process and a single index.
 
-A global npm installation starts that service in the background and registers it to start at login: a `Run` registry value on Windows, a LaunchAgent on macOS, and a systemd user unit on Linux; without a systemd user manager (WSL, containers), start `codeoutline daemon` at login yourself. The service installs updates and restarts itself into them, so after installation the only setup is registering its URL once.
+A global npm installation starts that service in the background and registers it to start at login: a `Run` registry value on Windows, a LaunchAgent on macOS, and a systemd user unit on Linux; without a systemd user manager (WSL, containers), start `codeoutline daemon` at login yourself. The service installs updates and restarts itself into them. Register agents once:
+
+```sh
+codeoutline install --yes                         # detect agents, configure MCP, start service
+codeoutline install --target cursor,claude,codex   # select agents explicitly
+codeoutline agents                               # choose interactively, without restarting service
+codeoutline agents --list                         # inspect detection and config paths
+codeoutline agents --target all                   # configure all detected agents
+codeoutline agents --print codex                  # preview one agent's config, no writes
+codeoutline agents --target cursor --remove       # remove only CodeOutline's MCP entry
+```
+
+Supported target IDs: `claude`, `cursor`, `codex`, `gemini`, `opencode`, `hermes`,
+`kiro`, `antigravity`, `copilot-vscode`, `copilot-cli`, `copilot-jetbrains`.
+Detection uses existing profile directories/configs and CLI commands on PATH;
+explicit IDs work even when detection misses an application. `all` and `auto`
+select detected targets. `none` skips registration. `install --yes` does not
+install LSP clients unless `--editors` is also specified.
+
+Configuration defaults to user scope. Use `--location local --project PATH` for
+project scope; Hermes, Antigravity and Copilot CLI/JetBrains support user scope
+only. `--port` selects the shared service port for both registration and startup.
+`agents` edits configs only; use `install` to start/register the service too.
+Restart the agents after setup so they discover `codeoutline_explore` and the
+other MCP tools. Agent approval controls still apply; no prompt hooks,
+instructions files or auto-approval policies are changed.
+
+The installer preserves unrelated settings and JSONC comments and stores the
+original nonempty file in `<config>.codeoutline.bak` before its first change.
+Repeating the same installation leaves configs unchanged. A different existing
+`codeoutline` entry is kept unless `--force` is passed. Complex TOML/YAML layouts
+that cannot be edited safely require manual setup using `agents --print ID`.
+For unattended global npm installation, set `CODEOUTLINE_AGENTS=auto`, `all`,
+`none`, or comma-separated IDs. Without a terminal or an explicit selection,
+npm leaves agent configs unchanged. Local npm installs skip registration.
+
+For manual setup instead:
 
 **Claude Code** (added globally, available in every project):
 

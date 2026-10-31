@@ -33,18 +33,17 @@ shell.
     "codeoutline.serverArguments": [
       "C:/source/ops/codeoutline/scripts/codeoutline/command.lua",
       "LOG_STDERR=1", "LOG_FILE=0", "lsp", "--stdio"
-    ],
-    "codeoutline.mode": "navigation"
+    ]
   }
   ```
 
 The server uses the newest installed CodeOutline version each time it starts;
 a runtime started directly from an archive or checkout always runs that copy.
 
-The default `auxiliary` mode enables workspace symbols only, to avoid adding
-duplicate navigation providers beside an existing language server. Use
-`navigation` to enable symbols, definition, hover, references, call hierarchy
-and completion. Override individual capabilities with `codeoutline.features`,
+The default `navigation` mode enables symbols, definition, hover, references,
+call hierarchy and completion without extra configuration. Use `auxiliary`
+for workspace symbols only alongside an existing language server.
+Override individual capabilities with `codeoutline.features`,
 for example `{ "definition": true }` to use project `.codeoutline.json` rules
 in auxiliary mode. Existing language servers are never disabled automatically.
 

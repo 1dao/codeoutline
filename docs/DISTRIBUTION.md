@@ -158,7 +158,33 @@ package cannot update a Linux or macOS installation.
 
 A global npm installation runs `codeoutline install --npm` as its `postinstall`
 script; local installs, `npx` and `--ignore-scripts` skip it, and it never fails the
-installation. `install` registers a login entry for the installation it belongs to
+installation. With `--foreground-scripts` and a terminal it offers editor
+selection; otherwise it skips the prompt. `CODEOUTLINE_EDITORS=all|none|LIST`
+selects clients explicitly, independently of `CODEOUTLINE_AUTOSTART=0`.
+Agent MCP registration is a separate selection in that same postinstall:
+`CODEOUTLINE_AGENTS=auto|all|none|IDS`, or an interactive choice when a terminal
+is available. Ordinary unattended npm installs leave agent configs untouched;
+`codeoutline install --yes` detects agents and writes user-level MCP entries.
+`--target` selects explicit IDs, `--location local --project PATH` selects
+project scope where supported, and `--port` is shared by registration and daemon
+startup. `codeoutline agents` provides the same registration without service
+changes; `--list` and `--print ID` are read-only. `agents --target IDS --remove`
+removes only the CodeOutline MCP entry. Service uninstall leaves agent entries
+alone, so remove them separately before removing the package if desired.
+
+The installer writes loopback HTTP entries for Claude Code, Cursor, Codex,
+Gemini CLI, OpenCode, Hermes, Kiro, Antigravity and Copilot (VS Code, CLI and
+JetBrains). These all connect to the shared service. It does not change agent
+instructions or tool-approval policy. JSONC comments and unrelated settings are
+preserved; edits use temporary files and atomic replacement, and the original
+nonempty config is backed up once as `<config>.codeoutline.bak`. It plans all
+selected edits first, rejecting malformed configs and conflicting CodeOutline
+entries before any config is changed. `--force` allows replacing a different
+existing CodeOutline entry. Ambiguous inline/dotted TOML and flow-style YAML
+MCP mappings require manual configuration. Generated entries assume an
+unauthenticated local service; custom authentication must be configured manually.
+
+`install` registers a login entry for the installation it belongs to
 (launchers pass it as `CODEOUTLINE_INITIAL`; installed updates are deleted when
 unused, the initial installation is not), stops a running service and starts
 `codeoutline daemon` detached. Each login entry runs the daemon once per login:
@@ -183,6 +209,22 @@ starting the service.
 ### Make an all-platform script update with xnet
 
 For automatic releases, commit the feature changes and the release tools first,
+Release native packages also include `editors/codeoutline.vsix` and the prebuilt
+Zed WASM client under `editors/zed/`. CI builds both clients before packaging;
+for local release staging, run `pwsh tools/build-editor-assets.ps1` first
+(requires Node.js and Rust with `wasm32-wasip2`). `tools/package.lua` reads
+`dist/editor-assets`, or `EDITOR_ASSETS=PATH`, and refuses release staging if any
+client asset is missing. Preview builds can omit clients.
+
+`codeoutline editors --list` detects editor CLIs on PATH and common installation
+locations without changing anything. `codeoutline editors` offers a selection
+when started through the npm launcher in a terminal. Use `--editors all`,
+`--editors none`, or comma-separated `vscode,cursor,zed` for unattended use.
+VS Code and Cursor receive the bundled VSIX through their CLI; Zed receives the
+bundled manifest and WASM in its default `extensions/installed/codeoutline`
+directory and needs a restart. Custom Zed user-data directories are not detected.
+No editor settings are rewritten. Native launchers can use `--editors` directly.
+
 then run one command from a clean `main` checkout:
 
 ```powershell

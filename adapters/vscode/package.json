@@ -153,8 +153,8 @@
             "auxiliary",
             "navigation"
           ],
-          "default": "auxiliary",
-          "description": "Auxiliary enables workspace symbols only alongside existing language servers. Navigation enables all supported capabilities. Override individual capabilities with features."
+          "default": "navigation",
+          "description": "Navigation (default) enables all supported capabilities. Auxiliary enables workspace symbols only alongside existing language servers. Override individual capabilities with features."
         },
         "codeoutline.features": {
           "type": "object",

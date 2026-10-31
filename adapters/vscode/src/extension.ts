@@ -34,7 +34,8 @@ async function restart(): Promise<void> {
     const command = config.get<string>('serverPath', 'codeoutline').trim();
     if (!command) throw new Error('Set codeoutline.serverPath to the CodeOutline executable.');
     const features: Record<string, boolean> = {};
-    const full = config.get<string>('mode') === 'navigation';
+    const mode = config.get<string>('mode', 'navigation');
+    const full = mode === 'navigation';
     for (const name of featureNames) features[name] = full || name === 'workspaceSymbol';
     Object.assign(features, config.get<Record<string, boolean>>('features', {}));
     const launch = resolveServer(command, config.get<string[]>('serverArguments', ['lsp', '--stdio']));
@@ -60,7 +61,7 @@ async function restart(): Promise<void> {
             }
             notifyVisibleDocument();
         }
-        output.appendLine('CodeOutline is ready. Mode: ' + config.get<string>('mode', 'auxiliary'));
+        output.appendLine('CodeOutline is ready. Mode: ' + mode);
     } catch (error) {
         client = undefined;
         // A failed spawn leaves languageclient in startFailed, where dispose may

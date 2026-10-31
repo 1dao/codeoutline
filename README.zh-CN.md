@@ -2,7 +2,10 @@
 
 [English](README.md) | 简体中文
 
-Lightweight code indexing and exploration for coding agents, as an MCP server, and for editors, as a language server. Powered by Lua.
+CodeOutline 是由 Lua 实现的代码探索工具（code_explore）和 LSP Server。
+
+- **面向编程智能体的代码探索**：通过 MCP 工具 `codeoutline_explore` 查询符号、带行号的源码、调用路径和上下游关系；终端中可使用 `codeoutline explore` 完成同类查询。
+- **面向编辑器的 LSP Server**：通过 `codeoutline lsp --stdio` 提供符号、定义跳转、引用、悬停、调用层级、补全和签名提示；安装内置的 VS Code、Cursor 或 Zed 客户端即可在编辑器中使用。
 
 面向编程智能体的轻量代码索引与查询服务：按符号查询带行号的源码、调用路径和上下游关系，自动增量刷新并缓存到磁盘。编辑器通过 LSP 使用同一套索引，获得符号、定义跳转、引用、调用层级和补全。MCP 协议（含 stdio 与 Streamable HTTP 传输）和语言服务器均由 Lua 实现，运行不依赖 Node；npm 包中的 Node 只负责找到对应平台的程序并启动。
 
@@ -13,13 +16,71 @@ Lightweight code indexing and exploration for coding agents, as an MCP server, a
 ```sh
 npm install -g codeoutline
 codeoutline --version
+codeoutline --help
 ```
+
+如需安装时检测 Agent 和编辑器，选择注册哪些应用的 MCP、安装哪些编辑器的 LSP 客户端，运行：
+
+```sh
+npm install -g codeoutline --foreground-scripts
+```
+
+Agent MCP 注册和编辑器 LSP 安装分别选择，默认均为 `none`（跳过）。
+LSP 客户端可输入 `vscode,cursor`、`zed` 或 `all`（全部检测到的编辑器）。
+安装后也可以交互选择，或直接指定编辑器：
+
+```sh
+codeoutline editors                             # 检测并交互选择
+codeoutline editors --list                      # 只查看检测结果
+codeoutline editors --editors all               # 为全部检测到的编辑器安装
+codeoutline editors --editors vscode            # 只安装 VS Code 客户端
+codeoutline editors --editors cursor            # 只安装 Cursor 客户端
+codeoutline editors --editors zed               # 只安装 Zed 客户端
+codeoutline editors --editors vscode,cursor      # 指定多个编辑器，用逗号分隔
+```
+
+无人值守的全局 npm 安装可设置环境变量 `CODEOUTLINE_EDITORS` 为同样的选择，`none` 表示跳过。
+没有交互终端时不会等待输入，本地 npm 安装不会修改编辑器安装。
+发布包内置客户端，无需 Rust 工具链或从扩展市场下载。
+完成后重载 VS Code/Cursor 窗口或重启 Zed。检测覆盖 PATH 和常见安装位置；
+自定义位置请把编辑器 CLI 加入 PATH。Zed 使用默认用户数据目录，已有编辑器设置会保留。
+VS Code/Cursor 客户端默认启用完整导航；如只需工作区符号搜索，可将 `codeoutline.mode` 设为 `auxiliary`。服务端能力见 [LSP.md](docs/LSP.md)。
 
 ### 推荐：共享一个 HTTP 服务
 
 stdio 服务是客户端的子进程，每个智能体会话（每个 Claude Code 会话、每个 Cursor 窗口）都会各自启动一份，并各自建一份内存索引。HTTP 服务只用一个进程、一份索引，供所有会话共用。
 
-通过 npm 全局安装时，会在后台启动这个服务，并登记为登录时自动启动：Windows 写入注册表 `Run` 项，macOS 添加 LaunchAgent，Linux 添加 systemd 用户单元；没有 systemd 用户管理器时（WSL、容器），请自行在登录时运行 `codeoutline daemon`。服务会自行安装更新并重启到新版本，因此安装后只需登记一次它的地址。
+通过 npm 全局安装时，会在后台启动这个服务，并登记为登录时自动启动：Windows 写入注册表 `Run` 项，macOS 添加 LaunchAgent，Linux 添加 systemd 用户单元；没有 systemd 用户管理器时（WSL、容器），请自行在登录时运行 `codeoutline daemon`。服务会自行安装更新并重启到新版本。Agent 只需注册一次：
+
+```sh
+codeoutline install --yes                         # 自动检测 Agent、配置 MCP 并启动服务
+codeoutline install --target cursor,claude,codex   # 指定需要配置的 Agent
+codeoutline agents                               # 交互选择，不重启服务
+codeoutline agents --list                         # 查看检测结果和配置路径
+codeoutline agents --target all                   # 为全部检测到的 Agent 配置 MCP
+codeoutline agents --print codex                  # 只预览配置，不写文件
+codeoutline agents --target cursor --remove       # 只移除 CodeOutline 的 MCP 配置项
+```
+
+支持的目标标识：`claude`、`cursor`、`codex`、`gemini`、`opencode`、`hermes`、
+`kiro`、`antigravity`、`copilot-vscode`、`copilot-cli`、`copilot-jetbrains`。
+检测依据为已有应用配置目录、配置文件或 PATH 上的 CLI；未检测到时也可显式指定标识。
+`all`、`auto` 表示全部检测到的目标，`none` 表示跳过。
+`install --yes` 默认不安装 LSP 客户端，需要时另加 `--editors all` 或指定编辑器。
+
+默认写入用户级配置；使用 `--location local --project PATH` 可写入项目级配置，
+Hermes、Antigravity、Copilot CLI 和 Copilot JetBrains 仅支持用户级。
+`--port` 同时指定注册地址和服务启动端口。`agents` 只编辑配置，`install` 还会启动服务并登记自启动。
+完成后重启对应 Agent，即可发现 `codeoutline_explore` 等 MCP 工具；应用自身的工具审批仍然有效。
+安装器不会添加提示钩子、修改指令文件或自动放行权限。
+
+已有其他设置和 JSONC 注释会保留；首次修改非空配置文件前，会保存原始文件到 `<配置文件>.codeoutline.bak`。
+重复安装同样配置不会重写文件；已有不同的 `codeoutline` 配置会保留，需要显式加 `--force` 才替换。
+不能安全编辑的复杂 TOML/YAML 布局会提示使用 `agents --print 标识` 手动配置。
+无人值守的全局 npm 安装可设置 `CODEOUTLINE_AGENTS` 为 `auto`、`all`、`none` 或逗号分隔的目标标识；
+没有终端且未指定选择时，不会修改 Agent 配置。本地 npm 安装不会注册 Agent。
+
+也可以手动配置：
 
 **Claude Code**（全局添加，在任意项目中可用）：
 

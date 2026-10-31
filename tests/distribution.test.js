@@ -46,6 +46,11 @@ test('packed npm and native artifacts work outside the checkout', { timeout: 120
             const paths = packed.files.map((f) => f.path);
             assert(paths.includes(`bin/${process.platform === 'win32' ? 'xnet.exe' : 'xnet'}`), paths.join(' '));
             assert(paths.includes('lib/xhttp_codec.lua'), paths.join(' '));
+            for (const asset of ['codeoutline.vsix', 'zed/extension.toml', 'zed/extension.wasm']) {
+                if (existsSync(join(root, 'dist/editor-assets', asset))) {
+                    assert(paths.includes(`editors/${asset}`), paths.join(' '));
+                }
+            }
             assert(!paths.some((p) => p.startsWith('xnet2lua/')), paths.join(' '));
         }
         archives.push(join(temp, packed.filename));

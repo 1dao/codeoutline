@@ -77,6 +77,14 @@ copy(root .. '/README.md', 'README.md')
 copy(root .. '/README.zh-CN.md', 'README.zh-CN.md')
 copy(root .. '/docs/DISTRIBUTION.md', 'DISTRIBUTION.md')
 copy(root .. '/docs/THIRD_PARTY.md', 'THIRD_PARTY.md')
+-- Clients are built once in CI and bundled for offline editor installation.
+-- Preview staging may omit them; releases must include both clients.
+local editor_assets = options.EDITOR_ASSETS or root .. '/dist/editor-assets'
+for _, relative in ipairs({ 'codeoutline.vsix', 'zed/extension.toml', 'zed/extension.wasm' }) do
+    local path = editor_assets .. '/' .. relative
+    if xutils.stat(path).exists then copy(path, 'editors/' .. relative)
+    else assert(options.RELEASE ~= '1', 'missing editor asset: ' .. path) end
+end
 -- RELEASE=1 stages publishable packages; anything else keeps `private: true`
 -- so a preview cannot be published by accident. Untracked files inside the
 -- submodule (its build output) do not count as a dirty checkout.
@@ -98,7 +106,7 @@ local manifest = { name = scope .. 'codeoutline-' .. target, version = version, 
     repository = repository, publishConfig = public,
     description = 'CodeOutline native runtime and Lua implementation for ' .. target,
     os = { platform[1] }, cpu = { platform[2], platform[3] }, license = 'BSD-2-Clause',
-    files = { 'bin/', 'lib/', 'keys/', 'scripts/', 'licenses/', 'LICENSE', 'codeoutline', 'codeoutline.cmd', 'build-info.json', '*.md' } }
+    files = { 'bin/', 'lib/', 'keys/', 'scripts/', 'editors/', 'licenses/', 'LICENSE', 'codeoutline', 'codeoutline.cmd', 'build-info.json', '*.md' } }
 if platform[1] == 'linux' then manifest.libc = { 'glibc' } end
 write(output .. '/native/package.json', xutils.json_pack(manifest) .. '\n')
 -- Native launchers pass the same log defaults as launcher/codeoutline.cjs:

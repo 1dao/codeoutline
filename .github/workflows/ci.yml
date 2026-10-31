@@ -37,7 +37,23 @@ jobs:
           name: codeoutline-vscode
           path: adapters/vscode/codeoutline.vsix
           if-no-files-found: error
+  zed-client:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+      - name: Build Zed client
+        shell: pwsh
+        run: ./tools/build-editor-assets.ps1 -SkipVscode
+      - uses: actions/upload-artifact@v4
+        with:
+          name: codeoutline-zed
+          path: dist/editor-assets/zed/
+          if-no-files-found: error
   validate:
+    needs: [vscode-client, zed-client]
     strategy:
       fail-fast: false
       matrix:
@@ -63,6 +79,14 @@ jobs:
         with:
           node-version: '22'
           cache: npm
+      - uses: actions/download-artifact@v4
+        with:
+          name: codeoutline-vscode
+          path: dist/editor-assets
+      - uses: actions/download-artifact@v4
+        with:
+          name: codeoutline-zed
+          path: dist/editor-assets/zed
       - name: Verify build host
         run: |
           $actual = node -p "process.platform + '-' + process.arch"

@@ -5,6 +5,15 @@ include it from 0.2.0; the README's
 [Editor integration](../README.md#editor-integration-lsp) section covers
 installation and how each platform's editors start it.
 
+CodeOutline also provides code exploration for agents through the MCP tool
+`codeoutline_explore` and for terminals through `codeoutline explore`.
+Run `codeoutline --help` for both workflows and editor installation commands.
+After a global npm installation, `codeoutline editors` detects editors and offers
+a choice; use `codeoutline editors --editors all` for all detected editors, or
+`--editors vscode`, `--editors cursor`, `--editors zed`, or a comma-separated list.
+The VS Code/Cursor client defaults to `navigation`, enabling all supported
+capabilities unless existing settings override it.
+
 Clients are available for [VS Code/Cursor](../adapters/vscode/README.md)
 and [Zed](../adapters/zed/README.md). The VS Code/Cursor client uses one common
 VSIX and supports capability selection, server configuration, restart and logs.

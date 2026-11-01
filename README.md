@@ -411,6 +411,13 @@ The service starts parse workers on demand for full scans with at least 32 files
 
 The cache lives at `.codeoutline/cache/<SHA-256 of path>.idx` in the user's home directory. It is integrity-checked and rebuilt automatically if corrupt; every write goes to a separate temporary file that atomically replaces the old one, which survives a failed write. Up to 8 projects stay resident by default, and idle ones are evicted after 15 minutes. Directory aliases and links resolve to real absolute paths; on Windows, ASCII case is ignored.
 
+For isolated cache or memory experiments, set `CODEOUTLINE_MEMORY_CACHE` to a
+cache file path. A nonempty value overrides the embedding API's `cache_path` and
+the default path; empty or unset values preserve normal selection. This is one
+file shared by all projects in that process, so use it only for a single-project
+run, not the shared multi-project service. Source validation and atomic writes
+still apply.
+
 Source encodings are confirmed on demand: the first index pass does not check each file, only the files a query touches. UTF-8 (with or without BOM) is tried first, then strict GBK conversion; a GBK file is reparsed and its symbols updated before the query runs, without modifying the file. Encoding results are cached and invalidated when a file changes, and a matched file that cannot be decoded is reported as an error. When both encodings are valid, UTF-8 wins. GBK files that no query has touched yet may still be misparsed, so Chinese identifiers can be missed; querying the file name triggers its repair.
 
 Files are listed with ripgrep (`rg`) when available, honoring every `.gitignore`. Without `rg`, a directory walk supports only the common rules of the root `.gitignore` (no negation, no nested ignore files) and skips hidden directories, `node_modules`, `__pycache__`, and symbolic links. Project root paths must not contain `"`, `%`, `!`, `$`, backticks, backslashes, or line breaks.

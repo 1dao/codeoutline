@@ -112,9 +112,11 @@ function M.open(root, opts)
     local max_bytes = opts.max_file_bytes or M.MAX_FILE_BYTES
     assert(type(max_bytes) == 'number' and max_bytes >= 1 and max_bytes < math.huge and max_bytes % 1 == 0,
         'max_file_bytes must be a positive integer')
+    local cache_override = os.getenv('CODEOUTLINE_MEMORY_CACHE')
+    if cache_override == '' then cache_override = nil end
     local self = setmetatable({
         root = norm(root),
-        cache_path = opts.cache_path and norm(opts.cache_path) or cache_path_for(root),
+        cache_path = cache_override and norm(cache_override) or (opts.cache_path and norm(opts.cache_path) or cache_path_for(root)),
         max_bytes = max_bytes,
         lister = opts.lister,       -- 'rg' | 'walk' | nil (rg when it runs here)
         files = {},          -- rel path -> record

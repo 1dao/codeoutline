@@ -21,11 +21,14 @@ test('packed npm and native artifacts work outside the checkout', { timeout: 120
     const stage = join(temp, 'stage');
     const install = join(temp, 'install 中文');
     const project = join(temp, 'project 中文');
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('CODEOUTLINE_')));
+    env.CODEOUTLINE_UPDATE_DIR = join(temp, 'updates');
+    env.CODEOUTLINE_AUTO_UPDATE = '0';
     await mkdir(install); await mkdir(project);
     await writeFile(join(install, 'package.json'), '{"name":"install-smoke","private":true}\n');
     await writeFile(join(project, 'example.lua'), 'function packaged_symbol() return 42 end\n');
     const run = (command, args, cwd = temp) => {
-        const r = spawnSync(command, args, { cwd, encoding: 'utf8', timeout: 60000 });
+        const r = spawnSync(command, args, { cwd, env, encoding: 'utf8', timeout: 60000 });
         assert.equal(r.status, 0, `${r.error || ''}\n${r.stderr}\n${r.stdout}`); return r.stdout;
     };
     const npm = (args, cwd) => run(process.execPath, [process.env.npm_execpath, ...args], cwd);
@@ -71,13 +74,13 @@ test('packed npm and native artifacts work outside the checkout', { timeout: 120
         ? [process.env.ComSpec || 'cmd.exe', ['/d', '/c', join(native, 'codeoutline.cmd'), '--version']]
         : [join(native, 'codeoutline'), ['--version']];
     for (const [command, args] of [[process.execPath, [entry, '--version']], nativeCommand]) {
-        const r = spawnSync(command, args, { cwd: project, encoding: 'utf8', timeout: 60000 });
+        const r = spawnSync(command, args, { cwd: project, env, encoding: 'utf8', timeout: 60000 });
         assert.equal(r.status, 0, r.stderr);
         assert.equal(r.stderr, '', `${command} ${args.join(' ')} wrote to stderr:\n${r.stderr}`);
     }
     assert(!existsSync(join(project, 'logs')), 'CLI commands created logs/ in the project');
     const transport = new StdioClientTransport({ command: process.execPath,
-        args: [entry, 'serve', '--stdio', '--project', project], cwd: project, stderr: 'pipe' });
+        args: [entry, 'serve', '--stdio', '--project', project], cwd: project, env, stderr: 'pipe' });
     transport.stderr?.resume();
     const client = new Client({ name: 'installed-package-smoke', version: '1' });
     try {
@@ -91,7 +94,7 @@ test('packed npm and native artifacts work outside the checkout', { timeout: 120
     const port = probe.address().port;
     await new Promise((resolve) => probe.close(resolve));
     const child = spawn(process.execPath, [entry, 'serve', '--http', '--port', String(port), '--project', project], {
-        cwd: project, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+        cwd: project, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
     });
     const httpClient = new Client({ name: 'installed-http-smoke', version: '1' });
     let httpStderr = '';
@@ -125,7 +128,7 @@ test('packed npm and native artifacts work outside the checkout', { timeout: 120
     const isolated = join(temp, 'missing-runtime'); await mkdir(isolated);
     await writeFile(join(isolated, 'package.json'), '{"name":"missing-smoke","private":true}\n');
     npm(['install', '--offline', '--omit=optional', '--ignore-scripts', '--no-audit', '--no-fund', archives[1]], isolated);
-    const missing = spawnSync(process.execPath, [join(isolated, 'node_modules/codeoutline/launcher/codeoutline.cjs'), '--version'], { encoding: 'utf8' });
+    const missing = spawnSync(process.execPath, [join(isolated, 'node_modules/codeoutline/launcher/codeoutline.cjs'), '--version'], { env, encoding: 'utf8' });
     assert.notEqual(missing.status, 0); assert.match(missing.stderr, /Missing @codua\/codeoutline-/);
     // Retain artifacts for inspection and an independent pnpm installation.
     console.log(`Distribution preview: ${temp}`);

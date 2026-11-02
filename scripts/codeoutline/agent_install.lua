@@ -84,6 +84,8 @@ end
 local function select_targets(value, targets)
     local wanted, selected = {}, {}
     value = value:lower():gsub('%s+', '')
+    if value == 'y' or value == 'yes' then value = 'all' end
+    if value == 'n' or value == 'no' then value = 'none' end
     if value == 'none' or value == '' then return selected end
     for id in value:gmatch('[^,]+') do wanted[id] = true end
     assert(not value:find(',,', 1, true) and not value:match('^,') and not value:match(',$'), 'invalid target selection')
@@ -150,10 +152,18 @@ function M.run(options)
             say('Optional agent MCP setup: run codeoutline agents, or codeoutline install --yes.'); return 0
         end
         local available = {}
-        for _, target in ipairs(targets) do if target.detected and target.path then available[#available + 1] = target.id end end
-        say('Detected agents: ' .. (#available > 0 and table.concat(available, ', ') or 'none'))
-        say('Configure CodeOutline MCP? Enter comma-separated target ids, all/auto (detected agents), or none [none]:')
-        value = io.read('*l') or 'none'
+        for _, target in ipairs(targets) do if target.detected and target.path then available[#available + 1] = target end end
+        if #available == 0 then say('No supported AI tools detected; skipping MCP configuration.'); return 0 end
+        say('Detected AI tools: ' .. #available .. '. Confirm each tool; Enter accepts the default.')
+        local chosen = {}
+        for _, target in ipairs(available) do
+            local answer = require('codeoutline.install_prompt').confirm(
+                (options.remove and 'Remove code_explore from ' or 'Install code_explore (MCP) for ') .. target.name .. ' (' .. target.id .. ')?',
+                not options.remove)
+            if answer == nil then break end
+            if answer then chosen[#chosen + 1] = target.id end
+        end
+        value = #chosen > 0 and table.concat(chosen, ',') or 'none'
     end
     local selected = select_targets(value, targets)
     -- Plan every selected edit before making any writes. Broken configs and
@@ -175,7 +185,8 @@ function M.run(options)
     end
     if #selected > 0 and not options.remove then
         say('Restart the selected agents to load codeoutline_explore and the other MCP tools.')
-        say('Shared MCP endpoint: ' .. url .. '. LSP editor clients are installed separately with codeoutline editors.')
+        say('Shared MCP endpoint: ' .. url)
+        if not options.installing then say('LSP editor clients can be installed with codeoutline editors.') end
         if location == 'local' then say('Project configuration may require trusting the project in the agent.') end
     end
     return 0

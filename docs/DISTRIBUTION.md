@@ -201,12 +201,28 @@ No editor settings are rewritten. Native launchers can use `--editors` directly.
 
 A global npm installation runs `codeoutline install --npm` as its `postinstall`
 script; local installs, `npx` and `--ignore-scripts` skip it, and it never fails the
-installation. With `--foreground-scripts` and a terminal it offers editor
-selection; otherwise it skips the prompt. `CODEOUTLINE_EDITORS=all|none|LIST`
+installation. For global npm setup, the launcher first uses inherited terminal
+stdio, or reconnects npm's piped stdio to the controlling terminal through
+Windows console devices or Unix `/dev/tty`. This makes normal `npm install -g
+codeoutline` interactive without extra flags. `--foreground-scripts` remains a
+fallback for terminal hosts that disallow reconnection. CI never reconnects.
+It first offers AI-tool MCP registration, then editor LSP installation. Each detected application gets
+its own `[Y/n]` confirmation: Enter or `y`/`yes` installs it; `n`/`no` skips only
+that application. EOF skips remaining applications. Interactive removal instead
+defaults to `[y/N]`. Explicit target/editor IDs remain supported and bypass the
+questions. When no AI tools are
+detected, that step is skipped without consuming an answer. After the selections,
+the same postinstall registers and starts the service; no second install command
+is needed. Existing applications may need a restart to load the integrations.
+Without a terminal, global npm setup installs all detected AI/editor integrations
+automatically, so `npm install -g codeoutline` completes setup on its own.
+Explicit `CODEOUTLINE_AGENTS` and `CODEOUTLINE_EDITORS` selections take priority;
+set both to `none` to opt out of integration installation. Local npm installs
+and `--ignore-scripts` still skip setup. `CODEOUTLINE_EDITORS=all|none|LIST`
 selects clients explicitly, independently of `CODEOUTLINE_AUTOSTART=0`.
 Agent MCP registration is a separate selection in that same postinstall:
 `CODEOUTLINE_AGENTS=auto|all|none|IDS`, or an interactive choice when a terminal
-is available. Ordinary unattended npm installs leave agent configs untouched;
+is available. Ordinary unattended global npm installs select detected agents;
 `codeoutline install --yes` detects agents and writes user-level MCP entries.
 `--target` selects explicit IDs, `--location local --project PATH` selects
 project scope where supported, and `--port` is shared by registration and daemon

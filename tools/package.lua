@@ -133,6 +133,7 @@ write(output .. '/npm/package.json', xutils.json_pack({ name = 'codeoutline', ve
     files = { 'launcher/', 'LICENSE', '*.md' }, optionalDependencies = dependencies }) .. '\n')
 write(output .. '/npm/LICENSE', read(root .. '/LICENSE'))
 write(output .. '/npm/launcher/codeoutline.cjs', read(root .. '/launcher/codeoutline.cjs'))
+write(output .. '/npm/launcher/install-terminal.cjs', read(root .. '/launcher/install-terminal.cjs'))
 write(output .. '/npm/README.md', read(root .. '/README.md'))
 write(output .. '/npm/README.zh-CN.md', read(root .. '/README.zh-CN.md'))
 write(output .. '/npm/DISTRIBUTION.md', read(root .. '/docs/DISTRIBUTION.md'))

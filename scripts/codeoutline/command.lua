@@ -44,7 +44,8 @@ Usage:
   codeoutline --version
 
 Editor setup:
-  npm install -g codeoutline --foreground-scripts   detect and choose at install time
+  npm install -g codeoutline                      detect apps and confirm each installation
+  npm install -g codeoutline --foreground-scripts   compatibility fallback for terminal prompts
   codeoutline editors                              detect and choose afterward
   codeoutline editors --list                       only show detected editors
   codeoutline editors --editors all                install for all detected editors
@@ -52,7 +53,14 @@ Editor setup:
   codeoutline editors --editors cursor             install for Cursor only
   codeoutline editors --editors zed                install for Zed only
   codeoutline editors --editors vscode,cursor       install for selected editors
-Choose none to skip clients. Without a terminal, no selection prompt is shown.
+During global npm setup, confirm each detected AI tool first, then each editor.
+Each install prompt is [Y/n]: Enter or y installs it; n skips just that app.
+EOF skips remaining apps. Explicit target/editor lists bypass the prompts.
+The same setup starts the service; no second codeoutline install is needed.
+The npm launcher reconnects to the terminal for confirmations automatically.
+--foreground-scripts is a fallback for restricted terminal hosts. In CI or
+without a terminal, global npm setup installs all detected integrations. Explicit environment
+selections override these defaults; project-local npm installs skip global setup.
 Reload VS Code/Cursor or restart Zed after installation.
 The LSP server runs separately from the shared MCP HTTP service.
 
@@ -74,7 +82,8 @@ while install also starts the service. Restart agents after configuration.
 Existing unrelated settings are preserved; original files get .codeoutline.bak
 backups. Different existing codeoutline settings require --force to replace.
 CODEOUTLINE_AGENTS=auto|all|none|IDS selects agents for unattended npm installs.
-Without an explicit selection or terminal, npm skips agent configuration.
+Without an explicit selection or terminal, global npm configures detected agents.
+Set CODEOUTLINE_AGENTS=none and CODEOUTLINE_EDITORS=none to skip integrations.
 
 HTTP options: --allow-host HOST, --allow-origin ORIGIN (repeatable).
 install starts the background service and registers it at login; uninstall
@@ -232,15 +241,28 @@ local function run()
         if npm and os.getenv('npm_config_global') ~= 'true' then return 0 end
         local function say(text) io.write(text, '\n'); io.stdout:flush() end
         local status = 0
+        local integrations_ok = true
         if command == 'install' then
+            -- npm backgrounds lifecycle scripts by default. A normal global
+            -- install must still finish setup; explicit selections always win.
+            local automatic = npm and os.getenv('CODEOUTLINE_INTERACTIVE') ~= '1'
+            if automatic and not options.target and not (os.getenv('CODEOUTLINE_AGENTS') or ''):match('%S') then
+                options.target = 'auto'
+            end
+            if automatic then say('Global npm setup: installing detected integrations by default. Use --foreground-scripts for per-application choices.') end
+            options.installing = true
+            say('Step 1/2: AI tools - code_explore over MCP')
             local agent_ok, agent_result = pcall(require('codeoutline.agent_install').run, options)
             if not agent_ok then io.stderr:write('codeoutline: ', tostring(agent_result), '\n') end
+            if not agent_ok or agent_result ~= 0 then integrations_ok = false end
             if not npm and not agent_ok then return 1 end
+            say('Step 2/2: Editors - CodeOutline LSP (Zed, VS Code, Cursor)')
             local editor_selection = options.editors or os.getenv('CODEOUTLINE_EDITORS')
             if editor_selection == '' then editor_selection = nil end
-            local editor_options = { editors = editor_selection or (options.yes and 'none' or nil) }
+            local editor_options = { editors = editor_selection or (automatic and 'all' or options.yes and 'none' or nil) }
             local ok, result = pcall(require('codeoutline.editor_install').run, os.getenv('CODEOUTLINE_INITIAL') or install, editor_options)
             if not ok then io.stderr:write('codeoutline: ', tostring(result), '\n') end
+            if not ok or result ~= 0 then integrations_ok = false end
             if not npm then status = ok and result or 1 end
             if npm and os.getenv('CODEOUTLINE_AUTOSTART') == '0' then return 0 end
         end
@@ -284,7 +306,14 @@ local function run()
                         finish(status); return
                     end
                     daemon.wait(port, 20000, function(listening)
-                        if listening then say('service listening on http://127.0.0.1:' .. port .. '/mcp')
+                        if listening then
+                            say('service listening on http://127.0.0.1:' .. port .. '/mcp')
+                            if integrations_ok then
+                                say('Setup complete. Restart selected AI tools and reload/restart selected editors.')
+                                say('No additional codeoutline install command is needed.')
+                            else
+                                say('Service started, but some integrations failed; see the errors above.')
+                            end
                         else io.stderr:write('codeoutline: the service did not start; see ', daemon.logs_dir(), '\n')
                             if not npm then status = 1 end end
                         finish(status)

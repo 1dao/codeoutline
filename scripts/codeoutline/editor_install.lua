@@ -78,6 +78,8 @@ end
 -- Parse before any writes so a typo cannot cause a partial selection.
 function M.select(value, detected)
     value = value:lower():gsub('%s+', '')
+    if value == 'y' or value == 'yes' then value = 'all' end
+    if value == 'n' or value == 'no' then value = 'none' end
     if value == 'none' or value == '' then return {} end
     local wanted = {}
     if value ~= 'all' then
@@ -117,12 +119,17 @@ function M.run(root, options)
         end
         local available = {}
         for _, editor in ipairs(editors) do
-            if editor.detected then available[#available + 1] = editor.id end
+            if editor.detected then available[#available + 1] = editor end
         end
         if #available == 0 then say('No supported editors detected. Add the editor CLI to PATH and retry.'); return 0 end
-        say('Detected editors: ' .. table.concat(available, ', '))
-        say('Install CodeOutline LSP clients? Enter comma-separated names, all, or none [none]:')
-        value = io.read('*l') or 'none'
+        say('Detected editors: ' .. #available .. '. Confirm each editor; Enter installs it.')
+        local chosen = {}
+        for _, editor in ipairs(available) do
+            local answer = require('codeoutline.install_prompt').confirm('Install CodeOutline LSP for ' .. editor.name .. ' (' .. editor.id .. ')?', true)
+            if answer == nil then break end
+            if answer then chosen[#chosen + 1] = editor.id end
+        end
+        value = #chosen > 0 and table.concat(chosen, ',') or 'none'
     end
     local selected = M.select(value, editors)
     local status = 0

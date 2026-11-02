@@ -41,8 +41,8 @@ test('agent installer merges all profiles, keeps unrelated settings, backs up an
         assert.match(success(['agents', '--print', 'cursor']), /mcpServers/);
         assert.match(success(['install', '--print-config=codex']), /mcp_servers.codeoutline/);
         for (const [id, path] of Object.entries(paths)) assert.equal(await readFile(path, 'utf8'), original[id]);
-        // npm postinstall never waits for input and leaves profiles untouched by default.
-        success(['install', '--npm']);
+        // Explicit opt-out leaves profiles untouched even in background npm setup.
+        success(['install', '--npm'], { CODEOUTLINE_AGENTS: 'none' });
         for (const [id, path] of Object.entries(paths)) assert.equal(await readFile(path, 'utf8'), original[id]);
         success(['agents', '--yes', '--port=21987']);
         const installed = {};
@@ -89,8 +89,10 @@ test('agent installer merges all profiles, keeps unrelated settings, backs up an
         success(['install', '--npm'], { CODEOUTLINE_AGENTS: 'claude' });
         assert.match(await readFile(paths.claude, 'utf8'), /19876/);
         success(['agents', '--target=claude', '--remove']);
-        success(['agents'], { CODEOUTLINE_INTERACTIVE: '1' }, 'claude\n');
+        success(['agents'], { CODEOUTLINE_INTERACTIVE: '1' }, 'y\n' + 'n\n'.repeat(10));
         assert.match(await readFile(paths.claude, 'utf8'), /19876/);
+        success(['agents', '--remove'], { CODEOUTLINE_INTERACTIVE: '1' }, '\n'.repeat(11));
+        assert.match(await readFile(paths.claude, 'utf8'), /19876/, 'interactive removal must default to no');
         assert.notEqual(run(['agents', '--target=typo']).status, 0);
         assert.notEqual(run(['agents', '--location=typo']).status, 0);
         assert.notEqual(run(['agents', '--port=99999']).status, 0);

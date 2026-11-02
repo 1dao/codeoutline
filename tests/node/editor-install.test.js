@@ -27,7 +27,7 @@ test('optional editor installation: detection, selection, offline assets and npm
     }
     await writeFile(join(bin, win ? 'zed.exe' : 'zed'), '');
     const env = { ...process.env, PATH: bin, HOME: temp, USERPROFILE: temp, LOCALAPPDATA: temp,
-        XDG_DATA_HOME: temp, CODEOUTLINE_INITIAL: assets, CODEOUTLINE_INTERACTIVE: '0', CODEOUTLINE_EDITORS: '',
+        XDG_DATA_HOME: temp, CODEOUTLINE_INITIAL: assets, CODEOUTLINE_INTERACTIVE: '0', CODEOUTLINE_EDITORS: '', CODEOUTLINE_AGENTS: 'none',
         CODEOUTLINE_AUTOSTART: '0', npm_config_global: 'true' };
     // uname is needed for Unix platform detection; retain only its system path.
     if (!win) env.PATH += ':/usr/bin:/bin';
@@ -57,7 +57,7 @@ test('optional editor installation: detection, selection, offline assets and npm
         const declined = run(['editors'], { CODEOUTLINE_EDITORS: 'none', CODEOUTLINE_INTERACTIVE: '1' }, '\n');
         assert.equal(declined.status, 0, declined.stderr);
         assert.equal(await readFile(log, 'utf8'), before);
-        const prompt = run(['editors'], { CODEOUTLINE_EDITORS: '', CODEOUTLINE_INTERACTIVE: '1' }, 'cursor\n');
+        const prompt = run(['editors'], { CODEOUTLINE_EDITORS: '', CODEOUTLINE_INTERACTIVE: '1' }, 'n\ny\nn\n');
         assert.equal(prompt.status, 0, prompt.stderr);
         assert.match(prompt.stdout, /Detected editors/);
         const afterPrompt = await readFile(log, 'utf8');

@@ -19,15 +19,31 @@ codeoutline --version
 codeoutline --help
 ```
 
-如需安装时检测 Agent 和编辑器，选择注册哪些应用的 MCP、安装哪些编辑器的 LSP 客户端，运行：
+普通全局安装会连接当前终端，对检测到的每个 AI 工具和 Zed、VS Code、Cursor 逐项询问，
+每项默认安装。随后自动启动共享服务，无需额外参数或再次执行安装命令。
+
+如果某个终端环境不允许安装器连接当前终端，可使用 npm 的前台模式作为兼容选项：
 
 ```sh
 npm install -g codeoutline --foreground-scripts
 ```
 
-Agent MCP 注册和编辑器 LSP 安装分别选择，默认均为 `none`（跳过）。
-LSP 客户端可输入 `vscode,cursor`、`zed` 或 `all`（全部检测到的编辑器）。
-安装后也可以交互选择，或直接指定编辑器：
+安装过程中会按两个阶段依次检测，并对每个应用单独确认：
+
+1. 检测 AI 工具，逐个提示是否安装代码探索功能（通过 MCP 提供 `codeoutline_explore`），例如 `Install code_explore (MCP) for Codex (codex)? [Y/n]`。
+2. 检测 Zed、VS Code、Cursor，逐个提示是否安装 LSP 客户端，例如 `Install CodeOutline LSP for Zed (zed)? [Y/n]`。
+
+每项默认安装：直接回车或输入 `y/yes` 即安装，输入 `n/no` 只跳过当前应用。
+每项都回车即可安装全部检测结果；输入结束（EOF）则跳过剩余项目，不会自动接受默认值。
+指定 `--target`、`--editors` 列表或对应环境变量时，直接按指定范围处理，不逐项询问。
+交互移除配置时默认不移除，需明确输入 `y`。
+随后会自动启动共享服务并登记自启动。重启所选 AI 工具、重载或重启编辑器后即可使用，
+无需再次执行 `codeoutline install`。
+npm 默认会重定向安装脚本的输入输出；启动器会尝试连接控制终端
+（Windows 的 `CONIN$`/`CONOUT$`，Unix 的 `/dev/tty`），因此通常不需要 `--foreground-scripts` 也能交互。
+只有在 CI 或确实没有可用终端时，才自动安装全部检测到的集成；环境变量选择仍然优先。
+普通项目级 `npm install codeoutline` 不会配置全局集成，请使用上面的全局安装命令完成这套流程。
+以后也可以再次交互选择，或直接指定编辑器：
 
 ```sh
 codeoutline editors                             # 检测并交互选择
@@ -78,7 +94,9 @@ Hermes、Antigravity、Copilot CLI 和 Copilot JetBrains 仅支持用户级。
 重复安装同样配置不会重写文件；已有不同的 `codeoutline` 配置会保留，需要显式加 `--force` 才替换。
 不能安全编辑的复杂 TOML/YAML 布局会提示使用 `agents --print 标识` 手动配置。
 无人值守的全局 npm 安装可设置 `CODEOUTLINE_AGENTS` 为 `auto`、`all`、`none` 或逗号分隔的目标标识；
-没有终端且未指定选择时，不会修改 Agent 配置。本地 npm 安装不会注册 Agent。
+没有终端且未指定选择时，全局 npm 安装默认处理全部检测到的 Agent 和编辑器。
+将 `CODEOUTLINE_AGENTS` 和 `CODEOUTLINE_EDITORS` 都设为 `none` 可跳过集成安装，
+或使用 `--ignore-scripts` 跳过整个安装配置流程。本地 npm 安装不会注册 Agent。
 
 也可以手动配置：
 

@@ -5,6 +5,7 @@ const { spawn, spawnSync } = require('node:child_process');
 const { createRequire } = require('node:module');
 const { join, dirname } = require('node:path');
 const { readFileSync, existsSync } = require('node:fs');
+const installTerminal = require('./install-terminal.cjs');
 
 try {
     const manifest = require('../package.json');
@@ -49,7 +50,7 @@ try {
     // which install registers at login because updates are deleted when unused.
     const service = ['serve', 'daemon', 'install'].includes(process.argv[2]);
     const env = { ...process.env, CODEOUTLINE_AUTO_UPDATE: process.env.CODEOUTLINE_AUTO_UPDATE ?? (service ? '1' : '0'), CODEOUTLINE_INITIAL: root,
-        // Runtime owns editor selection; only the launcher knows Node's TTY state.
+        // Runtime owns editor selection; the launcher supplies terminal state.
         CODEOUTLINE_INTERACTIVE: process.stdin.isTTY && process.stdout.isTTY ? '1' : '0' };
     if (process.argv[2] !== 'update') {
         const selection = spawnSync(executable, [join(root, 'scripts/codeoutline/updater.lua'), ...logArgs, 'ACTION=select'], {
@@ -64,9 +65,15 @@ try {
             }
         }
     }
-    const child = spawn(executable, [join(root, 'scripts/codeoutline/command.lua'), ...logArgs, ...process.argv.slice(2)], {
-        stdio: 'inherit', windowsHide: true, env,
-    });
+    const terminal = installTerminal({ eligible: process.argv[2] === 'install'
+        && process.argv.includes('--npm') && process.env.npm_config_global === 'true' });
+    env.CODEOUTLINE_INTERACTIVE = terminal.interactive ? '1' : '0';
+    let child;
+    try {
+        child = spawn(executable, [join(root, 'scripts/codeoutline/command.lua'), ...logArgs, ...process.argv.slice(2)], {
+            stdio: terminal.stdio, windowsHide: true, env,
+        });
+    } finally { terminal.close(); }
     const handlers = new Map();
     for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
         const handler = () => child.kill(signal);

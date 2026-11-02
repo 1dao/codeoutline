@@ -23,16 +23,40 @@ codeoutline --version
 codeoutline --help
 ```
 
-To detect supported agents and editors and choose which MCP registrations and
-LSP clients to install during npm installation, run:
+A normal global install reconnects to the current terminal and asks about each
+detected AI tool and Zed, VS Code or Cursor editor. Each prompt defaults to
+installation. The shared service then starts automatically, without another
+install command. No extra npm flag is normally required.
+
+If a terminal host does not allow the installer to reconnect, use npm's explicit
+foreground mode as a compatibility option:
 
 ```sh
 npm install -g codeoutline --foreground-scripts
 ```
 
-Agent MCP setup and editor LSP installation have separate prompts; both default
-to `none`. For LSP clients, enter `vscode,cursor`, `zed`, or `all` (detected editors).
-You can also choose or install clients after npm installation:
+Installation offers two stages in order, confirming each detected application:
+
+1. Detect AI tools and ask whether to install code exploration (`codeoutline_explore`
+   over MCP) for each tool, such as `Install code_explore (MCP) for Codex (codex)? [Y/n]`.
+2. Detect Zed, VS Code and Cursor and ask whether to install their LSP clients.
+   Each editor gets its own confirmation, such as `Install CodeOutline LSP for Zed (zed)? [Y/n]`.
+
+Every installation prompt defaults to yes: press Enter (or enter `y`/`yes`) to
+install it, or `n`/`no` to skip just that application. Press Enter for every item
+to install all detected integrations. EOF skips remaining applications instead
+of accepting their defaults. Explicit `--target`/`--editors` lists and environment
+selections bypass the per-application prompts. Interactive removal defaults to no.
+The installer then starts/registers the shared service.
+After restarting the selected applications, no additional `codeoutline install`
+command is required. npm runs lifecycle scripts in the background by default:
+The launcher reconnects lifecycle input/output to the controlling terminal
+(`CONIN$`/`CONOUT$` on Windows, `/dev/tty` on Unix) because npm normally pipes
+them. In CI or when no terminal is available, it uses noninteractive setup and
+installs detected integrations automatically unless explicitly overridden. Ordinary
+project-local `npm install codeoutline` does not configure global integrations;
+use the global installation command above for this setup flow.
+You can also choose or install clients later:
 
 ```sh
 codeoutline editors                             # detect and choose interactively
@@ -93,7 +117,10 @@ Repeating the same installation leaves configs unchanged. A different existing
 that cannot be edited safely require manual setup using `agents --print ID`.
 For unattended global npm installation, set `CODEOUTLINE_AGENTS=auto`, `all`,
 `none`, or comma-separated IDs. Without a terminal or an explicit selection,
-npm leaves agent configs unchanged. Local npm installs skip registration.
+global npm setup selects all detected agents and editors. Set both
+`CODEOUTLINE_AGENTS=none` and `CODEOUTLINE_EDITORS=none` to skip integration
+installation, or `--ignore-scripts` to skip the entire npm setup lifecycle.
+Local npm installs skip registration.
 
 For manual setup instead:
 

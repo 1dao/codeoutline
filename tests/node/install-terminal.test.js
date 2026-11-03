@@ -2,30 +2,23 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import installTerminal from '../../launcher/install-terminal.cjs';
 
-test('npm setup reconnects only a real controlling terminal and closes duplicated descriptors', () => {
+test('piped npm setup never reopens the console or enables unreadable prompts', () => {
     for (const platform of ['win32', 'linux']) {
-        const opened = [], closed = [];
-        const options = { eligible: true, platform, env: {}, stdin: {}, stdout: {},
-            open(path, mode) { opened.push([path, mode]); return opened.length + 2; },
-            close(fd) { closed.push(fd); }, isTTY: () => true };
-        const terminal = installTerminal(options);
-        assert.equal(terminal.interactive, true);
-        assert.deepEqual(terminal.stdio, [3, 4, 4]);
-        assert.deepEqual(opened, platform === 'win32' ? [['//./CONIN$', 'r'], ['//./CONOUT$', 'r+']]
-            : [['/dev/tty', 'r'], ['/dev/tty', 'w']]);
-        terminal.close(); terminal.close();
-        assert.deepEqual(closed, [3, 4]);
-        for (const overrides of [{ eligible: false }, { env: { CI: 'true' } }, { stdin: { isTTY: true }, stdout: { isTTY: true } }]) {
-            const before = opened.length;
-            assert.equal(installTerminal({ ...options, ...overrides }).stdio, 'inherit');
-            assert.equal(opened.length, before, 'MCP, CI and inherited terminals must not be reopened');
+        for (const [stdin, stdout] of [[{}, {}], [{}, { isTTY: true }], [{ isTTY: true }, {}]]) {
+            const terminal = installTerminal({ eligible: true, platform, env: {}, stdin, stdout,
+                open() { assert.fail('background setup must not reopen the controlling terminal'); }, isTTY: () => true });
+            assert.equal(terminal.interactive, false);
+            assert.equal(terminal.stdio, 'inherit');
+            terminal.close();
         }
-        let attempt = 0;
-        const failed = installTerminal({ ...options, open() { if (++attempt === 2) throw new Error('no console'); return 8; } });
-        assert.equal(failed.interactive, false);
-        assert.equal(closed.at(-1), 8, 'partial acquisition must close the input descriptor');
-        const detached = installTerminal({ ...options, isTTY: () => false });
-        assert.equal(detached.interactive, false);
-        assert.equal(detached.stdio, 'inherit');
+    }
+});
+
+test('only inherited terminal input and output enable prompts outside CI', () => {
+    for (const [env, expected] of [[{}, true], [{ CI: 'true' }, false], [{ CI: '1' }, false],
+        [{ CI: 'false' }, true], [{ CI: '0' }, true]]) {
+        const terminal = installTerminal({ env, stdin: { isTTY: true }, stdout: { isTTY: true } });
+        assert.equal(terminal.interactive, expected);
+        assert.equal(terminal.stdio, 'inherit');
     }
 });

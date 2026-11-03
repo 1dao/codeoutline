@@ -26,7 +26,7 @@ Usage:
   codeoutline install [--yes] [--target auto|all|none|IDS] [--location global|local] [--port PORT] [--editors all|none|vscode,cursor,zed]
   codeoutline agents [--list] [--target auto|all|none|IDS] [--location global|local] [--port PORT] [--remove] [--force]
   codeoutline editors [--list] [--editors all|none|vscode,cursor,zed]
-  codeoutline uninstall [--port PORT]
+  codeoutline uninstall [--port PORT] [--project PATH] [--service-only] [--purge]
   codeoutline daemon [--port PORT]
   codeoutline serve --stdio [--project PATH] [--allow-root PATH ...]
   codeoutline lsp --stdio [--project PATH]
@@ -44,8 +44,8 @@ Usage:
   codeoutline --version
 
 Editor setup:
-  npm install -g codeoutline                      detect apps and confirm each installation
-  npm install -g codeoutline --foreground-scripts   compatibility fallback for terminal prompts
+  npm install -g codeoutline                      automatically configure detected apps
+  npm install -g codeoutline --foreground-scripts   confirm each detected application
   codeoutline editors                              detect and choose afterward
   codeoutline editors --list                       only show detected editors
   codeoutline editors --editors all                install for all detected editors
@@ -57,8 +57,8 @@ During global npm setup, confirm each detected AI tool first, then each editor.
 Each install prompt is [Y/n]: Enter or y installs it; n skips just that app.
 EOF skips remaining apps. Explicit target/editor lists bypass the prompts.
 The same setup starts the service; no second codeoutline install is needed.
-The npm launcher reconnects to the terminal for confirmations automatically.
---foreground-scripts is a fallback for restricted terminal hosts. In CI or
+Use --foreground-scripts to give installation prompts access to terminal input.
+With npm's default background scripts, in CI or
 without a terminal, global npm setup installs all detected integrations. Explicit environment
 selections override these defaults; project-local npm installs skip global setup.
 Reload VS Code/Cursor or restart Zed after installation.
@@ -86,8 +86,12 @@ Without an explicit selection or terminal, global npm configures detected agents
 Set CODEOUTLINE_AGENTS=none and CODEOUTLINE_EDITORS=none to skip integrations.
 
 HTTP options: --allow-host HOST, --allow-origin ORIGIN (repeatable).
-install starts the background service and registers it at login; uninstall
-stops it and removes that entry. daemon is the service itself.
+install starts the background service and registers it at login. uninstall
+stops it, removes its login entry, user-level MCP registrations and editor clients.
+--project also removes MCP entries from that project; --service-only keeps integrations.
+--purge additionally removes ~/.codeoutline data after cleanup succeeds.
+Run uninstall before npm uninstall -g codeoutline; npm has no uninstall hooks.
+daemon is the service itself.
 editors detects VS Code, Cursor and Zed and offers optional LSP client installation.
 Use --editors or CODEOUTLINE_EDITORS to select clients without a prompt.
 Remote HTTP requires CODEOUTLINE_TOKEN (at least 16 bytes).
@@ -121,7 +125,8 @@ local function parse(args)
         serve = { stdio = true, http = true, project = true, host = true, port = true,
             ['allow-root'] = true, ['allow-host'] = true, ['allow-origin'] = true },
         daemon = { port = true }, install = { port = true, npm = true, editors = true, target = true, yes = true,
-            location = true, project = true, force = true, list = true, print = true, ['print-config'] = true }, uninstall = { port = true },
+            location = true, project = true, force = true, list = true, print = true, ['print-config'] = true },
+        uninstall = { port = true, project = true, ['service-only'] = true, purge = true },
         agents = { target = true, yes = true, location = true, project = true, port = true, list = true,
             ['print-config'] = true, print = true, remove = true, force = true },
         editors = { list = true, editors = true },
@@ -140,7 +145,7 @@ local function parse(args)
         if not name then name = clean[i]:match('^%-%-([%w-]+)$') end
         assert(name and (allowed[command][name] or name == 'help'), 'unknown option: ' .. clean[i])
         local flag = name == 'check' or name == 'stdio' or name == 'http' or name == 'help' or name == 'npm' or name == 'list'
-            or name == 'yes' or name == 'remove' or name == 'force'
+            or name == 'yes' or name == 'remove' or name == 'force' or name == 'service-only' or name == 'purge'
         if flag then
             assert(value == nil, '--' .. name .. ' does not take a value')
             value = true
@@ -287,7 +292,27 @@ local function run()
                     for _, removed in ipairs(attempt(daemon.unregister) or {}) do say('removed login entry ' .. removed) end
                     daemon.stop(port, 10000, function(stopped)
                         say(stopped and 'service on port ' .. port .. ' stopped' or 'service on port ' .. port .. ' is still running')
-                        finish(stopped and status or 1)
+                        if not stopped then status = 1 end
+                        if not options['service-only'] then
+                            if attempt(function() return require('codeoutline.agent_install').remove(options) end) ~= 0 then status = 1 end
+                            if attempt(function() return require('codeoutline.editor_install').remove() end) ~= 0 then status = 1 end
+                        end
+                        if options.purge and status == 0 then
+                            attempt(function()
+                                local path = daemon.state_dir()
+                                if xutils.stat(path).exists then
+                                    local actual = assert(xutils.realpath(path)):gsub('\\', '/'):gsub('/+$', '')
+                                    local expected = assert(xutils.realpath(path .. '/..')):gsub('\\', '/'):gsub('/+$', '') .. '/.codeoutline'
+                                    if package.config:sub(1, 1) == '\\' then actual, expected = actual:lower(), expected:lower() end
+                                    assert(actual == expected, 'refusing to purge a linked state directory')
+                                    assert(not install:lower():find(actual:lower() .. '/', 1, true), 'run uninstall from the initial installation before purging updates')
+                                    assert(xutils.rmtree(path) and not xutils.stat(path).exists, 'state files are busy; close CodeOutline clients and retry')
+                                end
+                                say('removed CodeOutline user data; custom cache/update directories require separate cleanup')
+                            end)
+                        end
+                        if status == 0 then say('Cleanup completed. Run npm uninstall -g codeoutline to remove the npm package.') end
+                        finish(status)
                     end)
                     return
                 end

@@ -59,8 +59,8 @@ function M.detect()
         zed_data = (os.getenv('XDG_DATA_HOME') or h .. '/.local/share') .. '/zed'
     end
     return {
-        { id = 'vscode', name = 'VS Code', command = vscode, detected = vscode ~= nil },
-        { id = 'cursor', name = 'Cursor', command = cursor, detected = cursor ~= nil },
+        { id = 'vscode', name = 'VS Code', command = vscode, detected = vscode ~= nil, extensions = h .. '/.vscode/extensions' },
+        { id = 'cursor', name = 'Cursor', command = cursor, detected = cursor ~= nil, extensions = h .. '/.cursor/extensions' },
         { id = 'zed', name = 'Zed', command = zed, data = zed_data, detected = zed ~= nil },
     }
 end
@@ -158,6 +158,77 @@ function M.run(root, options)
                 local result = os.execute(command)
                 assert(result == true or result == 0, editor.name .. ' extension installation failed')
                 say('Installed CodeOutline for ' .. editor.name .. '. Reload the editor window if it is open.')
+            end
+        end)
+        if not ok then io.stderr:write('codeoutline: ', tostring(err), '\n'); status = 1 end
+    end
+    return status
+end
+
+-- Remove only our extension, including Zed's per-extension downloaded runtime.
+-- Continue with other editors when one editor is unavailable or reports errors.
+function M.remove()
+    local status = 0
+    local function remove_directory(target, parent)
+        if not exists(target) then return end
+        local actual = assert(xutils.realpath(target)):gsub('\\', '/'):gsub('/+$', '')
+        local expected = assert(xutils.realpath(parent)):gsub('\\', '/'):gsub('/+$', '') .. '/' .. assert(target:match('([^/]+)$'))
+        if windows then actual, expected = actual:lower(), expected:lower() end
+        assert(actual == expected, 'refusing to remove linked extension: ' .. target)
+        assert(xutils.rmtree(target), 'cannot remove ' .. target .. '; close the editor and retry')
+        assert(not exists(target), 'extension directory remains: ' .. target)
+    end
+    for _, editor in ipairs(M.detect()) do
+        local ok, err = pcall(function()
+            if editor.id == 'zed' then
+                for _, kind in ipairs({ 'installed', 'work', 'staging' }) do
+                    local parent = editor.data .. '/extensions/' .. kind
+                    local target = parent .. '/codeoutline'
+                    remove_directory(target, parent)
+                end
+                -- This is Zed's generated extension registry, not user settings.
+                local index = editor.data .. '/extensions/index.json'
+                if exists(index) then
+                    local before = read(index)
+                    local after, changed = require('codeoutline.agent_config').json(before,
+                        { 'extensions', 'codeoutline' }, {}, true, false)
+                    if changed then
+                        local temp = assert(xutils.temp_file(editor.data .. '/extensions'))
+                        write(temp, after)
+                        assert(read(index) == before, 'Zed extension registry changed; close Zed and retry')
+                        assert(xutils.replace_file(temp, index), 'cannot update Zed extension registry')
+                    end
+                end
+                say('CodeOutline removed from Zed. Restart Zed if it is open.')
+            elseif editor.detected then
+                local function command(args)
+                    local text = quote(editor.command) .. ' ' .. args
+                    return windows and ('"' .. text .. '"') or text
+                end
+                local function installed()
+                    local pipe = assert(io.popen(command('--list-extensions')))
+                    local output = pipe:read('a'); local closed = pipe:close()
+                    assert(closed, editor.name .. ' extension listing failed')
+                    for line in output:gmatch('[^\r\n]+') do
+                        if line:lower():match('^%s*1dao%.codeoutline%s*$') then return true end
+                    end
+                    return false
+                end
+                if installed() then
+                    local result = os.execute(command('--uninstall-extension 1dao.codeoutline'))
+                    assert(result == true or result == 0, editor.name .. ' extension removal failed')
+                    assert(not installed(), editor.name .. ' still lists CodeOutline')
+                end
+                -- The editor CLI may only mark old versions obsolete until its
+                -- next start. Remove those owned directories now or report locks.
+                for _, entry in ipairs(xutils.list_dir(editor.extensions) or {}) do
+                    if entry.dir and entry.name:lower():match('^1dao%.codeoutline%-%d') then
+                        remove_directory(editor.extensions .. '/' .. entry.name, editor.extensions)
+                    end
+                end
+                say('CodeOutline removed from ' .. editor.name .. '. Reload the editor if it is open.')
+            else
+                say(editor.name .. ' CLI not detected; check other editor profiles manually.')
             end
         end)
         if not ok then io.stderr:write('codeoutline: ', tostring(err), '\n'); status = 1 end

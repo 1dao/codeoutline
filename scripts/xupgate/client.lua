@@ -70,9 +70,20 @@ function M.open(config)
             return {schema=2,highSequence=config.minimumSequence or 0}
         end
         local value=assert(c.decode_json(data),'corrupt local state')
-        assert(value.schema==2, 'unsupported update state; stop old processes, remove the old update cache and reinstall CodeOutline')
         assert(type(value.highSequence)=='number' and value.highSequence>=0 and value.highSequence%1==0,'invalid local state')
         value.highSequence=math.max(value.highSequence,config.minimumSequence or 0)
+        if value.schema==1 then
+            for _, key in ipairs({ 'current', 'previous' }) do
+                local identity=value[key]
+                assert(not identity or type(identity)=='string' and #identity==64
+                    and identity:match('^[0-9a-f]+$'), 'invalid legacy ' .. key .. ' identity')
+            end
+            -- Retire hash-based activation without loading old code or changing
+            -- files during startup. The next locked write saves schema 2 while
+            -- preserving the replay floor. Old processes may still use the cache.
+            return {schema=2,highSequence=value.highSequence}
+        end
+        assert(value.schema==2, 'unsupported update state')
         for _, key in ipairs({ 'current', 'previous' }) do
             local version, identity = value[key], value[key .. 'Identity']
             assert(not version or c.version(version), 'invalid ' .. key .. ' version')
@@ -99,11 +110,15 @@ function M.open(config)
         for _,entry in ipairs(u.list_dir(root .. '/leases') or {})do
             local path=root .. '/leases/' .. entry.name
             local version=entry.name:match('^(%d+%.%d+%.%d+)%-%x+$')
-            if not version then os.remove(path)
+            local legacy=entry.name:match('^(%x+)%-%x+$')
+            if not version then
+                if not legacy or #legacy~=64 then os.remove(path) end
             elseif lease_alive(path)then busy[version]=true end
         end
         for _,entry in ipairs(u.list_dir(root .. '/versions') or {})do
-            local removable=entry.dir and not keep[entry.name] and not busy[entry.name]
+            -- Hash-named directories belong to old bootstraps whose leases are
+            -- incompatible. Leave them untouched until users stop old processes.
+            local removable=entry.dir and c.version(entry.name) and not keep[entry.name] and not busy[entry.name]
             -- Versions predating leases may still run unseen: delete them only
             -- after a grace period counted from the first prune that saw them.
             if removable and config.leased and not config.leased(root .. '/versions/' .. entry.name .. '/files') then

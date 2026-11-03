@@ -61,6 +61,23 @@ test('packed npm and native artifacts work outside the checkout', { timeout: 120
     npm(['install', '--offline', '--ignore-scripts', '--no-audit', '--no-fund', ...archives], install);
     const entry = join(install, 'node_modules/codeoutline/launcher/codeoutline.cjs');
     const invoke = (...args) => run(process.execPath, [entry, ...args], project);
+    // A new bootstrap can start over legacy state without loading hash-based
+    // code, rewriting the state, or emitting the generic invalid-update error.
+    const legacyRoot = join(env.CODEOUTLINE_UPDATE_DIR, 'codeoutline');
+    const legacyState = JSON.stringify({ schema: 1, highSequence: 0, current: 'a'.repeat(64) });
+    await mkdir(legacyRoot, { recursive: true });
+    await writeFile(join(legacyRoot, 'current.json'), legacyState);
+    const recovered = spawnSync(process.execPath, [entry, '--version'], { cwd: project, env, encoding: 'utf8', timeout: 15000 });
+    assert.equal(recovered.status, 0, recovered.stderr);
+    assert.equal(recovered.stdout.trim(), version);
+    assert.doesNotMatch(recovered.stderr, /installed update invalid/);
+    assert.equal(await readFile(join(legacyRoot, 'current.json'), 'utf8'), legacyState);
+    await writeFile(join(legacyRoot, 'current.json'), '{ corrupt state');
+    const cleanupHelp = spawnSync(process.execPath, [entry, 'uninstall', '--help'], { cwd: project, env, encoding: 'utf8', timeout: 15000 });
+    assert.equal(cleanupHelp.status, 0, cleanupHelp.stderr);
+    assert.doesNotMatch(cleanupHelp.stderr, /installed update invalid/);
+    assert.match(cleanupHelp.stdout, /--purge/);
+    await writeFile(join(legacyRoot, 'current.json'), legacyState);
     assert.equal(JSON.parse(invoke('doctor')).ok, true);
     assert.equal(JSON.parse(invoke('status')).files, 1);
     assert.match(invoke('explore', '--query', 'packaged_symbol'), /return 42/);

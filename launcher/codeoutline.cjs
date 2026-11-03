@@ -52,7 +52,8 @@ try {
     const env = { ...process.env, CODEOUTLINE_AUTO_UPDATE: process.env.CODEOUTLINE_AUTO_UPDATE ?? (service ? '1' : '0'), CODEOUTLINE_INITIAL: root,
         // Runtime owns editor selection; the launcher supplies terminal state.
         CODEOUTLINE_INTERACTIVE: process.stdin.isTTY && process.stdout.isTTY ? '1' : '0' };
-    if (process.argv[2] !== 'update') {
+    // Cleanup must run from the initial installation so update data can be purged.
+    if (process.argv[2] !== 'update' && process.argv[2] !== 'uninstall') {
         const selection = spawnSync(executable, [join(root, 'scripts/codeoutline/updater.lua'), ...logArgs, 'ACTION=select'], {
             stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8', windowsHide: true, timeout: 30000, env,
         });
@@ -65,8 +66,7 @@ try {
             }
         }
     }
-    const terminal = installTerminal({ eligible: process.argv[2] === 'install'
-        && process.argv.includes('--npm') && process.env.npm_config_global === 'true' });
+    const terminal = installTerminal();
     env.CODEOUTLINE_INTERACTIVE = terminal.interactive ? '1' : '0';
     let child;
     try {

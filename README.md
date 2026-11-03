@@ -23,13 +23,9 @@ codeoutline --version
 codeoutline --help
 ```
 
-A normal global install reconnects to the current terminal and asks about each
-detected AI tool and Zed, VS Code or Cursor editor. Each prompt defaults to
-installation. The shared service then starts automatically, without another
-install command. No extra npm flag is normally required.
-
-If a terminal host does not allow the installer to reconnect, use npm's explicit
-foreground mode as a compatibility option:
+To choose each detected AI tool and Zed, VS Code or Cursor editor during global
+installation, use npm's foreground mode. Each prompt defaults to installation.
+The shared service then starts automatically, without another install command:
 
 ```sh
 npm install -g codeoutline --foreground-scripts
@@ -49,10 +45,10 @@ of accepting their defaults. Explicit `--target`/`--editors` lists and environme
 selections bypass the per-application prompts. Interactive removal defaults to no.
 The installer then starts/registers the shared service.
 After restarting the selected applications, no additional `codeoutline install`
-command is required. npm runs lifecycle scripts in the background by default:
-The launcher reconnects lifecycle input/output to the controlling terminal
-(`CONIN$`/`CONOUT$` on Windows, `/dev/tty` on Unix) because npm normally pipes
-them. In CI or when no terminal is available, it uses noninteractive setup and
+command is required. npm runs lifecycle scripts in the background by default.
+The launcher only prompts when it inherits terminal input and output; it does
+not reopen the controlling console while npm owns it. Without
+`--foreground-scripts`, in CI or when no terminal is available, it uses noninteractive setup and
 installs detected integrations automatically unless explicitly overridden. Ordinary
 project-local `npm install codeoutline` does not configure global integrations;
 use the global installation command above for this setup flow.
@@ -136,7 +132,17 @@ claude mcp add --transport http codeoutline --scope user http://127.0.0.1:19876/
 { "mcpServers": { "codeoutline": { "url": "http://127.0.0.1:19876/mcp" } } }
 ```
 
-`codeoutline install` does the same for a native installation, or after installing with `--ignore-scripts`; `--port` selects a port other than 19876. Set `CODEOUTLINE_AUTOSTART=0` when installing to skip the login entry. `codeoutline uninstall` stops the service and removes the entry; run it before `npm uninstall -g codeoutline`, which does not run package scripts. The service logs to `~/.codeoutline/logs`.
+`codeoutline install` does the same for a native installation, or after installing with `--ignore-scripts`; `--port` selects a port other than 19876. Set `CODEOUTLINE_AUTOSTART=0` when installing to skip the login entry. The service logs to `~/.codeoutline/logs`.
+
+To uninstall, first run `codeoutline uninstall`, then `npm uninstall -g codeoutline`.
+The first command stops the service, removes its login entry, user-level Agent MCP
+entries and the VS Code/Cursor/Zed clients. Use `--purge` to also remove
+`~/.codeoutline` caches, updates and logs, or `--service-only` to keep integrations.
+Use `--project PATH` to also remove MCP registrations in a specific project.
+Close/reload editors to release running LSP processes before deleting package files.
+Other editor profiles, remote installations, custom data directories and original
+configuration backups require separate cleanup. npm 7+ has no uninstall hooks;
+running only `npm uninstall` cannot clean integrations or stop the service.
 
 The service listens on `127.0.0.1:19876` and serves projects anywhere on the machine, so switching between projects on different drives needs no configuration. Only local processes can reach it, and they already have your file access. A shared service has no project of its own: it uses the client's roots when the client provides them, and otherwise the agent passes `projectPath`, which the tools ask for when it is missing.
 

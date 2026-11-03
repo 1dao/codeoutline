@@ -96,6 +96,24 @@ test('agent installer merges all profiles, keeps unrelated settings, backs up an
         assert.notEqual(run(['agents', '--target=typo']).status, 0);
         assert.notEqual(run(['agents', '--location=typo']).status, 0);
         assert.notEqual(run(['agents', '--port=99999']).status, 0);
+        // Existing empty files are valid starting points, just like missing files.
+        for (const path of Object.values(paths)) await writeFile(path, '');
+        success(['agents', '--yes']);
+        const fromEmpty = {};
+        for (const [id, path] of Object.entries(paths)) {
+            fromEmpty[id] = await readFile(path, 'utf8');
+            assert.match(fromEmpty[id], /127\.0\.0\.1:19876\/mcp/);
+        }
+        success(['agents', '--yes']);
+        for (const [id, path] of Object.entries(paths)) assert.equal(await readFile(path, 'utf8'), fromEmpty[id]);
+        // Read failures must still reject the complete plan without editing peers.
+        await rm(paths.gemini);
+        await mkdir(paths.gemini);
+        const unreadable = run(['agents', '--target=cursor,gemini', '--port=21989', '--force']);
+        assert.notEqual(unreadable.status, 0);
+        assert.match(unreadable.stderr, /cannot read config/);
+        assert(unreadable.stderr.includes(paths.gemini.replaceAll('\\', '/')));
+        assert.equal(await readFile(paths.cursor, 'utf8'), fromEmpty.cursor);
     } finally { await rm(temp, { recursive: true, force: true }); }
 });
 

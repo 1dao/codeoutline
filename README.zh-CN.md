@@ -19,10 +19,8 @@ codeoutline --version
 codeoutline --help
 ```
 
-普通全局安装会连接当前终端，对检测到的每个 AI 工具和 Zed、VS Code、Cursor 逐项询问，
-每项默认安装。随后自动启动共享服务，无需额外参数或再次执行安装命令。
-
-如果某个终端环境不允许安装器连接当前终端，可使用 npm 的前台模式作为兼容选项：
+如需在全局安装时对检测到的每个 AI 工具和 Zed、VS Code、Cursor 逐项确认，
+请使用 npm 的前台模式。每项默认安装，随后自动启动共享服务，无需再次执行安装命令：
 
 ```sh
 npm install -g codeoutline --foreground-scripts
@@ -39,9 +37,9 @@ npm install -g codeoutline --foreground-scripts
 交互移除配置时默认不移除，需明确输入 `y`。
 随后会自动启动共享服务并登记自启动。重启所选 AI 工具、重载或重启编辑器后即可使用，
 无需再次执行 `codeoutline install`。
-npm 默认会重定向安装脚本的输入输出；启动器会尝试连接控制终端
-（Windows 的 `CONIN$`/`CONOUT$`，Unix 的 `/dev/tty`），因此通常不需要 `--foreground-scripts` 也能交互。
-只有在 CI 或确实没有可用终端时，才自动安装全部检测到的集成；环境变量选择仍然优先。
+npm 默认在后台运行安装脚本并重定向输入输出；启动器只在继承的输入输出均为终端时询问，
+不会在 npm 占用终端时重新打开控制台，避免显示提示却无法输入。
+未加 `--foreground-scripts`、在 CI 或没有可用终端时，自动安装全部检测到的集成；环境变量选择仍然优先。
 普通项目级 `npm install codeoutline` 不会配置全局集成，请使用上面的全局安装命令完成这套流程。
 以后也可以再次交互选择，或直接指定编辑器：
 
@@ -112,7 +110,16 @@ claude mcp add --transport http codeoutline --scope user http://127.0.0.1:19876/
 { "mcpServers": { "codeoutline": { "url": "http://127.0.0.1:19876/mcp" } } }
 ```
 
-原生安装或使用 `--ignore-scripts` 安装后，运行 `codeoutline install` 完成同样的操作；`--port` 可指定 19876 以外的端口。安装时设置 `CODEOUTLINE_AUTOSTART=0` 可不登记自启动。`codeoutline uninstall` 会停止服务并删除自启动项；`npm uninstall -g codeoutline` 不会运行包脚本，请先运行它。服务日志位于 `~/.codeoutline/logs`。
+原生安装或使用 `--ignore-scripts` 安装后，运行 `codeoutline install` 完成同样的操作；`--port` 可指定 19876 以外的端口。安装时设置 `CODEOUTLINE_AUTOSTART=0` 可不登记自启动。服务日志位于 `~/.codeoutline/logs`。
+
+卸载时先运行 `codeoutline uninstall`，再运行 `npm uninstall -g codeoutline`。
+第一步停止服务、移除自启动项、用户级 Agent MCP 配置及 VS Code/Cursor/Zed 客户端。
+添加 `--purge` 同时清理 `~/.codeoutline` 下的缓存、更新和日志；
+使用 `--service-only` 则仅移除服务，保留集成。
+添加 `--project PATH` 可同时移除指定项目的 MCP 注册。
+删除包文件前请关闭或重载编辑器，以释放运行中的 LSP 进程。
+其他编辑器配置档、远程安装、自定义数据目录和原始配置备份需单独清理。
+npm 7+ 不执行卸载钩子，仅运行 `npm uninstall` 不会清理集成或停止服务。
 
 服务监听 `127.0.0.1:19876`，可访问本机任意位置的项目，在不同盘的项目之间切换无需额外配置；只有本机进程能连到它，而本机进程本来就有你的文件访问权限。共享服务没有自己的项目：客户端提供 roots 时使用 roots，否则由智能体传入 `projectPath`，缺少时工具会提示需要它。
 

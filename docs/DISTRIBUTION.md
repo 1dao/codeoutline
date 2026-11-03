@@ -117,15 +117,16 @@ release; publish a new version number instead. Process leases and pruning use
 version numbers too. Transport/package hashes and the temporary runtime cache
 remain internal integrity identifiers.
 
-The former schema 1 state and hash-named installed directories are deliberately
-unsupported. Existing users must stop the service with `codeoutline uninstall`,
-close clients still running CodeOutline, run `npm uninstall -g codeoutline`,
-remove the old `~/.codeoutline/updates` directory, then install the new package
-with `npm install -g codeoutline --foreground-scripts`. On Windows, the update
-directory is `%USERPROFILE%\\.codeoutline\\updates`. If `CODEOUTLINE_UPDATE_DIR`
-was set, clean that update directory instead. npm uninstall alone does not remove
-this cache. Keep project indexes and agent/editor configuration; they do not
-need migration. Reinstalling registers and starts the shared service again.
+When a new bootstrap finds former schema 1 state, it runs the initial npm/native
+installation instead of activating hash-named cached code. It preserves the
+highest accepted update sequence; the next successful update writes schema 2.
+Startup does not rewrite the old state or remove old files and leases that
+running processes may still use. Upgrade the initial installation with
+`npm install -g codeoutline --foreground-scripts`; clearing the update cache is
+not required. After stopping old processes, obsolete hash-named directories can
+be removed manually from `~/.codeoutline/updates/codeoutline/versions`.
+Keep project indexes and agent/editor configuration. Reinstalling registers
+and starts the shared service again.
 Newly generated signed releases require updater 3, so old updaters reject them
 instead of installing a release with an incompatible on-disk state format.
 Before uploading such a release, the XUpgate server's manifest validator must
@@ -201,11 +202,11 @@ No editor settings are rewritten. Native launchers can use `--editors` directly.
 
 A global npm installation runs `codeoutline install --npm` as its `postinstall`
 script; local installs, `npx` and `--ignore-scripts` skip it, and it never fails the
-installation. For global npm setup, the launcher first uses inherited terminal
-stdio, or reconnects npm's piped stdio to the controlling terminal through
-Windows console devices or Unix `/dev/tty`. This makes normal `npm install -g
-codeoutline` interactive without extra flags. `--foreground-scripts` remains a
-fallback for terminal hosts that disallow reconnection. CI never reconnects.
+installation. For interactive global npm setup, use `npm install -g codeoutline
+--foreground-scripts`. The launcher only prompts with inherited terminal input
+and output. It never reopens console devices while npm owns terminal input;
+a valid console handle alone does not guarantee usable interactive input.
+Default background lifecycle scripts and CI use noninteractive setup.
 It first offers AI-tool MCP registration, then editor LSP installation. Each detected application gets
 its own `[Y/n]` confirmation: Enter or `y`/`yes` installs it; `n`/`no` skips only
 that application. EOF skips remaining applications. Interactive removal instead
@@ -228,8 +229,10 @@ is available. Ordinary unattended global npm installs select detected agents;
 project scope where supported, and `--port` is shared by registration and daemon
 startup. `codeoutline agents` provides the same registration without service
 changes; `--list` and `--print ID` are read-only. `agents --target IDS --remove`
-removes only the CodeOutline MCP entry. Service uninstall leaves agent entries
-alone, so remove them separately before removing the package if desired.
+removes only the CodeOutline MCP entry. `codeoutline uninstall` removes detected
+user-level MCP entries and editor clients along with the service; use
+`--service-only` to preserve integrations, or `--project PATH` to also remove
+project-scoped MCP entries. Unrelated configuration and original backups remain.
 
 The installer writes loopback HTTP entries for Claude Code, Cursor, Codex,
 Gemini CLI, OpenCode, Hermes, Kiro, Antigravity and Copilot (VS Code, CLI and
@@ -261,6 +264,16 @@ initial installation when an npm upgrade made it newer) and exits if a service
 already answers on its port: Windows lets a second process bind a port the runtime
 listens on. `codeoutline uninstall` removes the entry and asks the daemon to exit
 by creating `~/.codeoutline/service-<port>.stop`, which it checks every second.
+It then removes user-level Agent registrations and default-profile VS Code/Cursor
+extensions, plus Zed's installed extension, work/staging directories and generated
+registry entry. Each cleanup failure is reported and makes the command fail;
+other integrations are still attempted. Reload/close editors to release active
+LSP processes. `--purge` additionally removes the default `~/.codeoutline` state
+directory only after all cleanup steps succeed; linked state/extension directories
+are rejected. Custom data directories, other editor profiles, remote extensions
+and project scopes not named with `--project` require separate cleanup.
+Run this command before `npm uninstall -g codeoutline`: npm 7+ has no uninstall
+lifecycle hooks, so a package cannot attach automatic cleanup to that command.
 Services from 0.1.7 and earlier ignore that file; they exit after installing an
 update. `CODEOUTLINE_AUTOSTART=0` skips the login entry; with `--npm` it also skips
 starting the service.
@@ -336,8 +349,7 @@ the next launch selects the verified scripts and matching executable.
 
 New full and script bundles require protocol updater version 3 and use local
 state schema 2 with version-number directories. Older initial bootstraps safely
-reject these bundles. They require uninstalling, clearing the old update cache
-and reinstalling the new npm or native initial installation as described above;
+reject these bundles. Upgrade the npm or native initial installation as described above;
 an in-place self-update does not replace the initial bootstrap. After reinstalling,
 both script and executable updates can be delivered solely through XUpgate.
 A script bundle whose exact runtime hashes

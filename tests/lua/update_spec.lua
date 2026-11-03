@@ -121,14 +121,40 @@ local restore = client.open({ project = 'update-test', platform = 'win32-x64', u
 restore.install(full1, bytes1)
 assert(restore.use_initial().initial and restore.current() == nil, 'initial version selection failed')
 assert(restore.rollback().version == '1.0.0', 'rollback from initial lost the signed version identity')
--- Schema 1 hash directories are deliberately unsupported: old installations
--- must clear their update cache when uninstalling and reinstalling.
+-- Schema 1 retires old activation without reading its files or losing the
+-- replay floor. Startup is read-only; the next install writes schema 2.
 local old = scratch .. '/old-state'
-c.write(old .. '/update-test/current.json', u.json_pack({ schema = 1, highSequence = 1, current = string.rep('a', 64) }))
+local old_root = old .. '/update-test'
+local old_identity = string.rep('a', 64)
+local old_state = u.json_pack({ schema = 1, highSequence = 2, current = old_identity })
+c.write(old_root .. '/current.json', old_state)
+c.write(old_root .. '/versions/' .. old_identity .. '/files/main.lua', 'old process may be using this')
+local old_lease = old_root .. '/leases/' .. old_identity .. '-0000000000000000'
+c.write(old_lease, '999999999\n')
 local old_api = client.open({ project = 'update-test', platform = 'win32-x64', url = 'https://example.invalid',
-    publicKey = key, directory = old, runtimeDirectory = initial })
-local accepted, failure = pcall(old_api.current)
-assert(not accepted and tostring(failure):find('unsupported update state', 1, true), 'legacy hash state silently accepted')
+    publicKey = key, directory = old, runtimeDirectory = initial, prune = true })
+assert(old_api.current() == nil and old_api.active() == nil, 'legacy code was activated')
+assert(c.read(old_root .. '/current.json') == old_state, 'startup rewrote legacy state')
+assert(not pcall(old_api.install, full1, bytes1), 'legacy replay floor was lost')
+assert(old_api.install(full3, bytes3).version == '1.1.0', 'upgrade from legacy state failed')
+local migrated = assert(c.decode_json(c.read(old_root .. '/current.json')))
+assert(migrated.schema == 2 and migrated.highSequence == 3 and migrated.current == '1.1.0')
+assert(c.read(old_root .. '/versions/' .. old_identity .. '/files/main.lua') == 'old process may be using this', 'legacy process files removed')
+assert(u.stat(old_lease).exists, 'legacy process lease removed')
+assert(not pcall(old_api.install, scripts2, bytes2), 'migration enabled replay')
+for _, malformed in ipairs({
+    { schema = 1, highSequence = 2, current = '../escape' },
+    { schema = 1, highSequence = -1, current = old_identity },
+    { schema = 1, highSequence = '2', current = old_identity },
+    { schema = 3, highSequence = 2 },
+}) do
+    c.atomic(old_root .. '/current.json', u.json_pack(malformed))
+    assert(not pcall(old_api.current), 'malformed or unknown update state accepted')
+end
+c.atomic(old_root .. '/current.json', old_state)
+assert(old_api.use_initial().initial, 'legacy initial-version recovery failed')
+local recovered = assert(c.decode_json(c.read(old_root .. '/current.json')))
+assert(recovered.schema == 2 and recovered.highSequence == 2 and recovered.current == nil, 'initial recovery lost replay floor')
 io.write('Signed script updates, runtime reuse/replacement, rollback, pruning, replay, tamper and missing-runtime checks passed\n')
 os.remove(scratch .. '/private.pem')
 return { __init = function() xthread.stop(0) end }

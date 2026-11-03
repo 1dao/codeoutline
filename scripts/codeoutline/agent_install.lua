@@ -10,7 +10,10 @@ end
 local function read(path)
     if not exists(path) then return '' end
     local f = assert(io.open(path, 'rb'), 'cannot read config: ' .. path)
-    local raw = f:read(4 * 1024 * 1024 + 1); f:close()
+    local raw, err = f:read(4 * 1024 * 1024 + 1); f:close()
+    assert(not err, 'cannot read config: ' .. path .. ': ' .. tostring(err))
+    -- A numeric read returns nil at EOF for an existing zero-byte file.
+    raw = raw or ''
     assert(#raw <= 4 * 1024 * 1024, 'config exceeds 4 MiB: ' .. path)
     return raw
 end
@@ -190,6 +193,26 @@ function M.run(options)
         if location == 'local' then say('Project configuration may require trusting the project in the agent.') end
     end
     return 0
+end
+
+function M.remove(options)
+    options = options or {}
+    local status = 0
+    local project = assert(xutils.realpath(options.project or '.')):gsub('\\', '/')
+    local locations = options.project and { 'global', 'local' } or { 'global' }
+    for _, location in ipairs(locations) do
+        for _, target in ipairs(M.detect(location, project)) do
+            if target.path and exists(target.path) then
+                local ok, result = pcall(M.run, { target = target.id, remove = true,
+                    location = location, project = project, port = options.port })
+                if not ok or result ~= 0 then
+                    io.stderr:write('codeoutline: cannot remove ', target.id, ': ', tostring(result), '\n')
+                    status = 1
+                end
+            end
+        end
+    end
+    return status
 end
 
 return M

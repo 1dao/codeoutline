@@ -129,7 +129,12 @@ write(output .. '/npm/package.json', xutils.json_pack({ name = 'codeoutline', ve
     bin = { codeoutline = 'launcher/codeoutline.cjs' }, engines = { node = '>=20' },
     -- A global installation starts the shared service and registers it at
     -- login (Lua decides; CODEOUTLINE_AUTOSTART=0 opts out). Never fails npm.
-    scripts = { postinstall = 'node launcher/codeoutline.cjs install --npm || exit 0' },
+    scripts = {
+        postinstall = 'node launcher/codeoutline.cjs install --npm || exit 0',
+        -- Compatibility fallback for package managers that still invoke hooks.
+        -- npm 7+ ignores preuninstall; codeoutline remove is the complete path.
+        preuninstall = 'node launcher/codeoutline.cjs uninstall --npm || exit 0',
+    },
     files = { 'launcher/', 'LICENSE', '*.md' }, optionalDependencies = dependencies }) .. '\n')
 write(output .. '/npm/LICENSE', read(root .. '/LICENSE'))
 write(output .. '/npm/launcher/codeoutline.cjs', read(root .. '/launcher/codeoutline.cjs'))

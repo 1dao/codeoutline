@@ -117,6 +117,95 @@ test('agent installer merges all profiles, keeps unrelated settings, backs up an
     } finally { await rm(temp, { recursive: true, force: true }); }
 });
 
+test('agent instructions archive CodeGraph blocks and restore them only while its CLI exists', async () => {
+    const temp = await mkdtemp(join(tmpdir(), 'codeoutline-instructions-'));
+    const bin = join(temp, 'bin'), project = join(temp, 'project');
+    const win = process.platform === 'win32';
+    const graphCli = join(bin, win ? 'codegraph.cmd' : 'codegraph');
+    const paths = { claude: join(temp, 'claude/CLAUDE.md'), codex: join(temp, 'codex/AGENTS.md'),
+        gemini: join(temp, '.gemini/GEMINI.md'), opencode: join(temp, 'xdg/opencode/AGENTS.md') };
+    const blocks = {}, originals = {};
+    for (const dir of [bin, project, ...Object.values(paths).map(dirname)]) await mkdir(dir, { recursive: true });
+    await writeFile(graphCli, 'fixture command marker');
+    for (const [id, path] of Object.entries(paths)) {
+        const eol = id === 'codex' ? '\r\n' : '\n';
+        blocks[id] = ['<!-- CODEGRAPH_START -->', '## CodeGraph', 'Use codegraph first.', '<!-- CODEGRAPH_END -->'].join(eol);
+        originals[id] = (id === 'codex' ? '\ufeff' : '') + `User rules${eol}${blocks[id]}${eol}Keep these rules.${eol}`;
+        await writeFile(path, originals[id]);
+    }
+    const env = { ...process.env, USERPROFILE: temp, HOME: temp, CODEX_HOME: join(temp, 'codex'),
+        CLAUDE_CONFIG_DIR: join(temp, 'claude'), XDG_CONFIG_HOME: join(temp, 'xdg'),
+        APPDATA: join(temp, 'app'), LOCALAPPDATA: join(temp, 'local'),
+        HERMES_HOME: join(temp, 'hermes'), COPILOT_HOME: join(temp, 'copilot'),
+        CODEOUTLINE_AGENTS: '', PATH: bin + (win ? '' : ':/usr/bin:/bin') };
+    const run = (...args) => spawnSync(defaultRuntime, [join(root, 'scripts/codeoutline/command.lua'),
+        'LOG_LEVEL=ERROR', 'LOG_FILE=0', 'agents', ...args], { cwd: project, env, encoding: 'utf8', timeout: 15000 });
+    const success = (...args) => { const r = run(...args); assert.equal(r.status, 0, r.stdout + r.stderr); return r; };
+    const targets = '--target=claude,codex,gemini,opencode';
+    try {
+        success(targets);
+        const installed = {};
+        for (const [id, path] of Object.entries(paths)) {
+            installed[id] = await readFile(path, 'utf8');
+            assert.doesNotMatch(installed[id], /CODEGRAPH_START/);
+            assert.match(installed[id], /CODEOUTLINE_START/);
+            assert.match(installed[id], /codeoutline_explore/);
+            assert.match(installed[id], /Keep these rules/);
+            assert.equal(await readFile(join(dirname(path), 'codegraph.md'), 'utf8'), blocks[id]);
+        }
+        success(targets);
+        for (const [id, path] of Object.entries(paths)) assert.equal(await readFile(path, 'utf8'), installed[id]);
+        success(targets, '--remove');
+        for (const [id, path] of Object.entries(paths)) assert.equal(await readFile(path, 'utf8'), originals[id]);
+        success(targets);
+        await rm(graphCli);
+        success(targets, '--remove');
+        for (const [id, path] of Object.entries(paths)) {
+            assert.equal(await readFile(path, 'utf8'), originals[id].replace(blocks[id], ''));
+            assert.equal(await readFile(join(dirname(path), 'codegraph.md'), 'utf8'), blocks[id]);
+        }
+        // Unknown backup content must not be overwritten, even with --force.
+        await writeFile(paths.codex, originals.codex);
+        const backup = join(dirname(paths.codex), 'codegraph.md');
+        await writeFile(backup, 'User-owned Markdown file');
+        const mcp = join(temp, 'codex/config.toml');
+        const beforeMcp = await readFile(mcp, 'utf8');
+        const conflict = run('--target=codex', '--port=21990', '--force');
+        assert.notEqual(conflict.status, 0);
+        assert.match(conflict.stderr, /backup conflict/);
+        assert.equal(await readFile(backup, 'utf8'), 'User-owned Markdown file');
+        assert.equal(await readFile(paths.codex, 'utf8'), originals.codex);
+        assert.equal(await readFile(mcp, 'utf8'), beforeMcp);
+        await writeFile(backup, blocks.codex);
+        await writeFile(paths.codex, '<!-- CODEGRAPH_START --> incomplete');
+        const malformed = run('--target=codex');
+        assert.notEqual(malformed.status, 0); assert.match(malformed.stderr, /incomplete CODEGRAPH/);
+        assert.equal(await readFile(mcp, 'utf8'), beforeMcp);
+        // Project-local Codex and OpenCode share AGENTS.md, and Gemini shares
+        // its directory. Identical backups must serve both without collisions.
+        await writeFile(graphCli, 'fixture command marker');
+        const sharedBlock = blocks.gemini;
+        for (const name of ['AGENTS.md', 'GEMINI.md']) await writeFile(join(project, name), `Before\n${sharedBlock}\nAfter\n`);
+        success('--target=codex,opencode,gemini', '--location=local');
+        assert.equal(await readFile(join(project, 'codegraph.md'), 'utf8'), sharedBlock);
+        success('--target=codex,opencode,gemini', '--location=local', '--remove');
+        for (const name of ['AGENTS.md', 'GEMINI.md']) assert.equal(await readFile(join(project, name), 'utf8'), `Before\n${sharedBlock}\nAfter\n`);
+        // A shared backup belongs only to files that originally supplied a
+        // CodeGraph block, including after repeated setup or stale backups.
+        await writeFile(join(project, 'GEMINI.md'), 'Gemini user rules\n');
+        success('--target=codex,opencode,gemini', '--location=local');
+        success('--target=codex,opencode,gemini', '--location=local');
+        success('--target=codex,opencode,gemini', '--location=local', '--remove');
+        assert.equal(await readFile(join(project, 'AGENTS.md'), 'utf8'), `Before\n${sharedBlock}\nAfter\n`);
+        assert.doesNotMatch(await readFile(join(project, 'GEMINI.md'), 'utf8'), /CODEGRAPH|CODEOUTLINE/);
+        assert.match(await readFile(join(project, 'GEMINI.md'), 'utf8'), /^Gemini user rules\n/);
+        await writeFile(join(project, 'AGENTS.md'), 'Codex user rules\n');
+        success('--target=codex', '--location=local');
+        success('--target=codex', '--location=local', '--remove');
+        assert.doesNotMatch(await readFile(join(project, 'AGENTS.md'), 'utf8'), /CODEGRAPH|CODEOUTLINE/);
+    } finally { await rm(temp, { recursive: true, force: true }); }
+});
+
 test('config edits preserve JSONC strings/comments and TOML/YAML section boundaries', async () => {
     const temp = await mkdtemp(join(tmpdir(), 'codeoutline-agent-config-'));
     const input = join(temp, 'cases.json'), runner = join(temp, 'run.lua');

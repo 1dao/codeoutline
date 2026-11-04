@@ -112,6 +112,8 @@ function M.run(root, options)
         end
         return 0
     end
+    say('LSP (Language Server Protocol) connects CodeOutline to your editor for go-to-definition, references, symbols, hover and code completion.')
+    say('This step installs the CodeOutline editor extension for selected editors. Choose agent MCP setup for AI code exploration, editor LSP setup for navigation while editing, or both.')
     if not value then
         if os.getenv('CODEOUTLINE_INTERACTIVE') ~= '1' then
             say('Optional LSP clients: run codeoutline editors to choose, or codeoutline editors --editors all.')

@@ -4,7 +4,8 @@
 const { spawn, spawnSync } = require('node:child_process');
 const { createRequire } = require('node:module');
 const { join, dirname } = require('node:path');
-const { readFileSync, existsSync } = require('node:fs');
+const { readFileSync, existsSync, realpathSync, mkdtempSync, unlinkSync, rmdirSync } = require('node:fs');
+const { tmpdir } = require('node:os');
 const installTerminal = require('./install-terminal.cjs');
 
 try {
@@ -53,7 +54,7 @@ try {
         // Runtime owns editor selection; the launcher supplies terminal state.
         CODEOUTLINE_INTERACTIVE: process.stdin.isTTY && process.stdout.isTTY ? '1' : '0' };
     // Cleanup must run from the initial installation so update data can be purged.
-    if (process.argv[2] !== 'update' && process.argv[2] !== 'uninstall') {
+    if (!['update', 'uninstall', 'remove'].includes(process.argv[2])) {
         const selection = spawnSync(executable, [join(root, 'scripts/codeoutline/updater.lua'), ...logArgs, 'ACTION=select'], {
             stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8', windowsHide: true, timeout: 30000, env,
         });
@@ -68,6 +69,37 @@ try {
     }
     const terminal = installTerminal();
     env.CODEOUTLINE_INTERACTIVE = terminal.interactive ? '1' : '0';
+    // npm package lifecycle only: Lua still parses options and owns cleanup.
+    // An acknowledgement file prevents --help or invalid arguments from ever
+    // removing a package. Wait for runtime close before npm touches its binary.
+    let removal;
+    const npmCommand = (args) => process.platform === 'win32'
+        ? [process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `npm ${args.join(' ')}`]] : ['npm', args];
+    if (process.argv[2] === 'remove') {
+        const directory = mkdtempSync(join(tmpdir(), 'codeoutline-remove-'));
+        removal = { directory, ready: join(directory, 'ready') };
+        env.CODEOUTLINE_REMOVE_READY = removal.ready;
+        delete env.CODEOUTLINE_REMOVE_ERROR;
+        try {
+            const query = (args) => {
+                const [command, commandArgs] = npmCommand(args);
+                const result = spawnSync(command, commandArgs, { encoding: 'utf8', windowsHide: true });
+                if (result.error || result.status !== 0) throw new Error('Cannot locate npm global installation');
+                return result.stdout.trim();
+            };
+            const globalRoot = realpathSync(join(query(['root', '-g']), 'codeoutline'));
+            const ownRoot = realpathSync(join(__dirname, '..'));
+            const normalize = (path) => process.platform === 'win32' ? path.toLowerCase() : path;
+            if (normalize(globalRoot) !== normalize(ownRoot)) throw new Error('remove requires this package to be installed globally; use uninstall --purge for local/native cleanup');
+            removal.prefix = query(['prefix', '-g']);
+        } catch (err) { env.CODEOUTLINE_REMOVE_ERROR = err.message; }
+    }
+    const releaseRemoval = () => {
+        if (removal) {
+            try { unlinkSync(removal.ready); } catch {}
+            try { rmdirSync(removal.directory); } catch {}
+        }
+    };
     let child;
     try {
         child = spawn(executable, [join(root, 'scripts/codeoutline/command.lua'), ...logArgs, ...process.argv.slice(2)], {
@@ -81,10 +113,21 @@ try {
         process.on(signal, handler);
     }
     child.once('error', (err) => { console.error(`codeoutline: ${err.message}`); process.exitCode = 1; });
-    child.once('exit', (code, signal) => {
+    const finish = (code, signal) => {
+        releaseRemoval();
         for (const [name, handler] of handlers) process.removeListener(name, handler);
         if (signal && process.platform !== 'win32') process.kill(process.pid, signal);
         else process.exitCode = code ?? (signal === 'SIGINT' ? 130 : 1);
+    };
+    child.once('close', (code, signal) => {
+        if (code === 0 && !signal && removal?.prefix && existsSync(removal.ready)) {
+            releaseRemoval();
+            const [command, commandArgs] = npmCommand(['uninstall', '-g', 'codeoutline']);
+            child = spawn(command, commandArgs, { stdio: 'inherit', windowsHide: true,
+                cwd: tmpdir(), env: { ...process.env, npm_config_prefix: removal.prefix, CODEOUTLINE_REMOVE_CLEANED: '1' } });
+            child.once('error', (err) => { console.error(`codeoutline: npm removal failed: ${err.message}`); });
+            child.once('close', finish);
+        } else finish(code, signal);
     });
 } catch (err) {
     console.error(`codeoutline: ${err.message}`);

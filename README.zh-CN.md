@@ -86,7 +86,17 @@ codeoutline agents --target cursor --remove       # 只移除 CodeOutline 的 MC
 Hermes、Antigravity、Copilot CLI 和 Copilot JetBrains 仅支持用户级。
 `--port` 同时指定注册地址和服务启动端口。`agents` 只编辑配置，`install` 还会启动服务并登记自启动。
 完成后重启对应 Agent，即可发现 `codeoutline_explore` 等 MCP 工具；应用自身的工具审批仍然有效。
-安装器不会添加提示钩子、修改指令文件或自动放行权限。
+安装器不会添加提示钩子或自动放行权限。
+
+Claude、Codex、Gemini 和 OpenCode 的对应 `CLAUDE.md`、`AGENTS.md` 或 `GEMINI.md`
+会加入简短的 `CODEOUTLINE_START/END` 使用说明。
+若其中存在完整的 `CODEGRAPH_START/END` 块，会将其原文备份为同目录的 `codegraph.md`，
+再从活动说明中移走。其他说明保持不变；重复安装不会重复添加。
+已有不同内容的备份、残缺或重复标记会使安装停止，避免覆盖用户文件。
+卸载时移除自己的说明；仅向原先提供 CodeGraph 块的文件恢复备份，且要求 PATH 仍能找到
+`codegraph`、活动说明中没有 CodeGraph 块。
+备份会保留，以便手动恢复；全局安装不扫描或修改各项目的说明文件。
+`codegraph.md` 不是默认说明文件名，但被显式引用或主动读取时仍可能进入上下文。
 
 已有其他设置和 JSONC 注释会保留；首次修改非空配置文件前，会保存原始文件到 `<配置文件>.codeoutline.bak`。
 重复安装同样配置不会重写文件；已有不同的 `codeoutline` 配置会保留，需要显式加 `--force` 才替换。
@@ -112,7 +122,11 @@ claude mcp add --transport http codeoutline --scope user http://127.0.0.1:19876/
 
 原生安装或使用 `--ignore-scripts` 安装后，运行 `codeoutline install` 完成同样的操作；`--port` 可指定 19876 以外的端口。安装时设置 `CODEOUTLINE_AUTOSTART=0` 可不登记自启动。服务日志位于 `~/.codeoutline/logs`。
 
-卸载时先运行 `codeoutline uninstall`，再运行 `npm uninstall -g codeoutline`。
+npm 全局安装可直接运行 `codeoutline remove`：先清理集成和默认用户数据，
+等待运行时退出后再卸载 npm 包；清理失败时保留包，以便重试。
+使用 `codeoutline remove --project PATH` 可同时清理指定项目的 MCP 注册。
+
+如需分步操作，先运行 `codeoutline uninstall`，再运行 `npm uninstall -g codeoutline`。
 第一步停止服务、移除自启动项、用户级 Agent MCP 配置及 VS Code/Cursor/Zed 客户端。
 添加 `--purge` 同时清理 `~/.codeoutline` 下的缓存、更新和日志；
 使用 `--service-only` 则仅移除服务，保留集成。
@@ -120,6 +134,9 @@ claude mcp add --transport http codeoutline --scope user http://127.0.0.1:19876/
 删除包文件前请关闭或重载编辑器，以释放运行中的 LSP 进程。
 其他编辑器配置档、远程安装、自定义数据目录和原始配置备份需单独清理。
 npm 7+ 不执行卸载钩子，仅运行 `npm uninstall` 不会清理集成或停止服务。
+发布包仍提供 `preuninstall` 兼容钩子，供支持它的包管理器调用；
+仅在全局卸载时尝试清理集成，保留用户数据，并跳过升级及本地安装流程。
+当前 npm 请使用 `codeoutline remove` 完成完整清理。
 
 服务监听 `127.0.0.1:19876`，可访问本机任意位置的项目，在不同盘的项目之间切换无需额外配置；只有本机进程能连到它，而本机进程本来就有你的文件访问权限。共享服务没有自己的项目：客户端提供 roots 时使用 roots，否则由智能体传入 `projectPath`，缺少时工具会提示需要它。
 

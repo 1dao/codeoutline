@@ -20,6 +20,19 @@ test('unified Lua CLI: commands, JSON output, failures and MCP startup', async (
     try {
         await writeFile(join(project, 'demo.lua'), 'function hello_world() return 7 end\n');
         assert.match(success('--help'), /codeoutline doctor/);
+        const overview = success('--help');
+        for (const name of ['install', 'agents', 'editors', 'uninstall', 'remove', 'daemon',
+            'serve', 'lsp', 'explore', 'callers', 'affected', 'type-hierarchy', 'type-references',
+            'status', 'rebuild', 'doctor', 'update']) {
+            assert(overview.includes(`  ${name}: `), `missing command description: ${name}`);
+            const detail = success(name, '--help').replace(/\r\n/g, '\n');
+            assert(detail.startsWith(`codeoutline ${name} - `), `missing command help: ${name}`);
+            assert(detail.includes(`Usage:\n  codeoutline ${name} `), `missing usage: ${name}`);
+            assert(detail.includes(`Example: codeoutline ${name} `), `missing example: ${name}`);
+        }
+        assert.match(success('remove', '--help'), /purges ~\/.codeoutline/);
+        assert.match(success('agents', '--help'), /--print-config/);
+        assert.match(success('serve', '--help'), /--allow-origin/);
         assert.equal(success('--version').trim(), version);
         assert.equal(JSON.parse(success('doctor')).ok, true);
         assert.equal(JSON.parse(success('status')).files, 1);

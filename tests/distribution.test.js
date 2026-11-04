@@ -5,9 +5,10 @@ import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import net from 'node:net';
 import { existsSync } from 'node:fs';
-import { mkdtemp, mkdir, writeFile, readFile, chmod } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, chmod, rename } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
 import { root, defaultRuntime, version } from './node/helpers.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -60,6 +61,8 @@ test('packed npm and native artifacts work outside the checkout', { timeout: 120
     }
     npm(['install', '--offline', '--ignore-scripts', '--no-audit', '--no-fund', ...archives], install);
     const entry = join(install, 'node_modules/codeoutline/launcher/codeoutline.cjs');
+    const installedManifest = JSON.parse(await readFile(join(install, 'node_modules/codeoutline/package.json'), 'utf8'));
+    assert.equal(installedManifest.scripts.preuninstall, 'node launcher/codeoutline.cjs uninstall --npm || exit 0');
     const invoke = (...args) => run(process.execPath, [entry, ...args], project);
     // A new bootstrap can start over legacy state without loading hash-based
     // code, rewriting the state, or emitting the generic invalid-update error.
@@ -147,6 +150,104 @@ test('packed npm and native artifacts work outside the checkout', { timeout: 120
     npm(['install', '--offline', '--omit=optional', '--ignore-scripts', '--no-audit', '--no-fund', archives[1]], isolated);
     const missing = spawnSync(process.execPath, [join(isolated, 'node_modules/codeoutline/launcher/codeoutline.cjs'), '--version'], { env, encoding: 'utf8' });
     assert.notEqual(missing.status, 0); assert.match(missing.stderr, /Missing @codua\/codeoutline-/);
+    // Exercise real global npm removal under a temporary prefix. Only service
+    // and login operations are stubbed; Lua cleanup and npm uninstall are real.
+    const prefix = join(temp, 'global 中文'), profile = join(temp, 'remove-profile');
+    npm(['install', '-g', '--prefix', prefix, '--offline', '--ignore-scripts', '--no-audit', '--no-fund', ...archives]);
+    const globalModules = process.platform === 'win32' ? join(prefix, 'node_modules') : join(prefix, 'lib/node_modules');
+    const globalEntry = join(globalModules, 'codeoutline/launcher/codeoutline.cjs');
+    const globalRequire = createRequire(globalEntry);
+    let globalRuntime = dirname(globalRequire.resolve(`@codua/codeoutline-${target}/package.json`));
+    const nestedRuntime = join(globalModules, 'codeoutline/node_modules/@codua', `codeoutline-${target}`);
+    if (globalRuntime !== nestedRuntime) {
+        await mkdir(dirname(nestedRuntime), { recursive: true });
+        await rename(globalRuntime, nestedRuntime);
+        globalRuntime = nestedRuntime;
+    }
+    await writeFile(join(globalRuntime, 'scripts/codeoutline/daemon.lua'), `local M = { PORT = 19876 }
+function M.unregister() assert(not os.getenv('CO_TEST_CLEANUP_FAIL'), 'fixture cleanup failure'); return {} end
+function M.stop(_, _, done) done(true) end
+function M.state_dir() return os.getenv('USERPROFILE') .. '/.codeoutline' end
+return M
+`);
+    const shim = join(temp, 'npm-shim'); await mkdir(shim);
+    const npmShim = join(shim, process.platform === 'win32' ? 'npm.cmd' : 'npm');
+    await writeFile(npmShim, process.platform === 'win32'
+        ? '@echo off\r\nif "%~1"=="uninstall" if defined CO_TEST_NPM_REMOVE_FAIL exit /b 73\r\n"%CO_TEST_NODE%" "%CO_TEST_NPM%" %*\r\nexit /b %errorlevel%\r\n'
+        : '#!/bin/sh\nif test "$1" = uninstall && test -n "$CO_TEST_NPM_REMOVE_FAIL"; then exit 73; fi\nexec "$CO_TEST_NODE" "$CO_TEST_NPM" "$@"\n');
+    if (process.platform !== 'win32') await chmod(npmShim, 0o755);
+    await mkdir(join(profile, '.cursor'), { recursive: true });
+    const agentFile = join(profile, '.cursor/mcp.json');
+    const agentConfig = { keep: true, mcpServers: { codeoutline: { url: 'http://127.0.0.1:19876/mcp' } } };
+    await writeFile(agentFile, JSON.stringify(agentConfig));
+    await mkdir(join(profile, '.codeoutline/cache'), { recursive: true });
+    await writeFile(join(profile, '.codeoutline/cache/test.idx'), 'index');
+    const removeEnv = { ...env, npm_config_prefix: prefix, USERPROFILE: profile, HOME: profile,
+        CODEX_HOME: join(profile, '.codex'), CLAUDE_CONFIG_DIR: join(profile, '.claude'),
+        HERMES_HOME: join(profile, '.hermes'), COPILOT_HOME: join(profile, '.copilot'),
+        APPDATA: join(profile, 'app'), LOCALAPPDATA: join(profile, 'local'), ProgramFiles: join(profile, 'programs'),
+        XDG_CONFIG_HOME: join(profile, '.config'), XDG_DATA_HOME: join(profile, '.local/share'),
+        CO_TEST_NODE: process.execPath, CO_TEST_NPM: process.env.npm_execpath,
+        PATH: [shim, dirname(process.execPath), ...(process.platform === 'win32'
+            ? [join(process.env.SystemRoot, 'System32')] : ['/usr/bin', '/bin'])].join(process.platform === 'win32' ? ';' : ':') };
+    const remove = (args, extra = {}, launcher = globalEntry) => spawnSync(process.execPath, [launcher, 'remove', ...args],
+        { cwd: project, env: { ...removeEnv, ...extra }, encoding: 'utf8', timeout: 30000 });
+    const hook = (extra = {}) => spawnSync(process.execPath, [globalEntry, 'uninstall', '--npm'],
+        { cwd: project, env: { ...removeEnv, npm_config_global: 'true', npm_lifecycle_event: 'preuninstall',
+            npm_command: 'uninstall', ...extra }, encoding: 'utf8', timeout: 30000 });
+    for (const extra of [{ npm_command: 'install' }, { npm_command: 'update' }, { npm_config_global: 'false' },
+        { npm_lifecycle_event: 'postinstall' }, { CODEOUTLINE_REMOVE_CLEANED: '1' },
+        { npm_command: '', npm_config_argv: JSON.stringify({ original: ['install', '-g'] }) }]) {
+        const skippedHook = hook(extra);
+        assert.equal(skippedHook.status, 0, skippedHook.stdout + skippedHook.stderr);
+        assert(JSON.parse(await readFile(agentFile, 'utf8')).mcpServers.codeoutline, 'non-uninstall lifecycle removed agent config');
+    }
+    const failedHook = hook({ CO_TEST_CLEANUP_FAIL: '1' });
+    assert.notEqual(failedHook.status, 0, failedHook.stdout + failedHook.stderr);
+    assert.doesNotMatch(failedHook.stdout, /Uninstall hook cleanup completed/);
+    assert(existsSync(globalEntry), 'failed hook removed the npm package');
+    await writeFile(agentFile, JSON.stringify(agentConfig));
+    const hookCleanup = hook();
+    assert.equal(hookCleanup.status, 0, hookCleanup.stdout + hookCleanup.stderr);
+    assert.match(hookCleanup.stdout, /Uninstall hook cleanup completed/);
+    assert.equal(JSON.parse(await readFile(agentFile, 'utf8')).mcpServers.codeoutline, undefined);
+    assert(existsSync(globalEntry), 'hook recursively removed its own package');
+    assert(existsSync(join(profile, '.codeoutline/cache/test.idx')), 'hook purged user data');
+    await writeFile(agentFile, JSON.stringify(agentConfig));
+    const legacyHook = hook({ npm_command: '', npm_config_argv: JSON.stringify({ original: ['uninstall', '-g', 'codeoutline'] }) });
+    // An empty npm_command is equivalent to an absent value on some hosts.
+    assert.equal(legacyHook.status, 0, legacyHook.stdout + legacyHook.stderr);
+    assert.match(legacyHook.stdout, /Uninstall hook cleanup completed/);
+    assert.equal(JSON.parse(await readFile(agentFile, 'utf8')).mcpServers.codeoutline, undefined);
+    await writeFile(agentFile, JSON.stringify(agentConfig));
+    const help = remove(['--help']);
+    assert.equal(help.status, 0, help.stderr); assert(existsSync(globalEntry));
+    const invalidRemove = remove(['--unknown']);
+    assert.notEqual(invalidRemove.status, 0); assert(existsSync(globalEntry));
+    const localRemove = remove([], {}, entry);
+    assert.notEqual(localRemove.status, 0); assert(existsSync(globalEntry));
+    assert.match(localRemove.stderr, /installed globally/);
+    const failedRemove = remove([], { CO_TEST_CLEANUP_FAIL: '1' });
+    assert.notEqual(failedRemove.status, 0, failedRemove.stdout + failedRemove.stderr);
+    assert(existsSync(globalEntry), 'failed cleanup removed the npm package');
+    assert(existsSync(join(profile, '.codeoutline/cache/test.idx')), 'failed cleanup purged recovery data');
+    await writeFile(agentFile, JSON.stringify(agentConfig));
+    const npmFailed = remove([], { CO_TEST_NPM_REMOVE_FAIL: '1' });
+    assert.equal(npmFailed.status, 73, npmFailed.stdout + npmFailed.stderr);
+    assert(existsSync(globalEntry), 'failed npm uninstall unexpectedly removed the package');
+    // Use the actual global shim as well: on Windows the parent .cmd must not
+    // keep either itself or the runtime locked while npm removes the package.
+    const removed = process.platform === 'win32'
+        ? spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/c', join(prefix, 'codeoutline.cmd'), 'remove'],
+            { cwd: project, env: removeEnv, encoding: 'utf8', timeout: 30000 })
+        : remove([]);
+    assert.equal(removed.status, 0, removed.stdout + removed.stderr);
+    assert.match(removed.stdout, /Cleanup completed/);
+    assert(!existsSync(globalEntry), 'global npm package remains after remove');
+    assert(!existsSync(globalRuntime), 'runtime remains after remove; it may still be locked');
+    assert(!existsSync(join(profile, '.codeoutline')), 'remove did not purge user data');
+    const remainingAgent = JSON.parse(await readFile(agentFile, 'utf8'));
+    assert.equal(remainingAgent.keep, true); assert.equal(remainingAgent.mcpServers.codeoutline, undefined);
     // Retain artifacts for inspection and an independent pnpm installation.
     console.log(`Distribution preview: ${temp}`);
 });

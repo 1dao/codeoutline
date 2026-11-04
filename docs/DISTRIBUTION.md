@@ -237,7 +237,7 @@ project-scoped MCP entries. Unrelated configuration and original backups remain.
 The installer writes loopback HTTP entries for Claude Code, Cursor, Codex,
 Gemini CLI, OpenCode, Hermes, Kiro, Antigravity and Copilot (VS Code, CLI and
 JetBrains). These all connect to the shared service. It does not change agent
-instructions or tool-approval policy. JSONC comments and unrelated settings are
+tool-approval policy. JSONC comments and unrelated settings are
 preserved; edits use temporary files and atomic replacement, and the original
 nonempty config is backed up once as `<config>.codeoutline.bak`. It plans all
 selected edits first, rejecting malformed configs and conflicting CodeOutline
@@ -245,6 +245,17 @@ entries before any config is changed. `--force` allows replacing a different
 existing CodeOutline entry. Ambiguous inline/dotted TOML and flow-style YAML
 MCP mappings require manual configuration. Generated entries assume an
 unauthenticated local service; custom authentication must be configured manually.
+
+For Claude, Codex, Gemini and OpenCode, the same planned edit adds a compact
+CodeOutline marker block to the scoped instructions file. Existing CodeGraph
+marker blocks are archived byte-for-byte as adjacent `codegraph.md` before being
+replaced. Existing backups must match; malformed/duplicate blocks and conflicting
+backup files fail before writes. Removal restores CodeGraph only to a file that
+originally supplied the block, and only if its CLI is
+on PATH and the instructions do not already contain a CodeGraph block. Backups
+are retained, unrelated text is preserved, and shared local instruction paths
+are deduplicated. Ordinary `codegraph.md` is not automatically loaded as an
+instructions file; explicit references or agent reads can still include it.
 
 `install` registers a login entry for the installation it belongs to
 (launchers pass it as `CODEOUTLINE_INITIAL`; installed updates are deleted when
@@ -274,6 +285,20 @@ are rejected. Custom data directories, other editor profiles, remote extensions
 and project scopes not named with `--project` require separate cleanup.
 Run this command before `npm uninstall -g codeoutline`: npm 7+ has no uninstall
 lifecycle hooks, so a package cannot attach automatic cleanup to that command.
+For npm global installations, `codeoutline remove` combines `uninstall --purge`
+and npm package removal. Lua validates options and performs cleanup; only after
+an explicit successful-cleanup acknowledgement and runtime exit does the npm
+launcher invoke `npm uninstall -g codeoutline` with the verified global prefix.
+Local/native installations are rejected before cleanup. `remove --help` and
+invalid arguments never remove packages. npm failures keep their nonzero exit
+status so remaining package files can be diagnosed. `--project PATH` also cleans
+that project's MCP entries. No package lifecycle hook is required.
+Generated npm packages also include a best-effort `preuninstall` compatibility
+hook that invokes `uninstall --npm`. It only acts on global uninstall lifecycles
+(or an explicit global hook run), recognizes legacy npm 6 argv, skips upgrade
+and local dependency removal, and preserves user data. Errors remain visible
+but the shell fallback does not block package removal. npm 7+ ignores this hook;
+it cannot replace `codeoutline remove` on modern npm.
 Services from 0.1.7 and earlier ignore that file; they exit after installing an
 update. `CODEOUTLINE_AUTOSTART=0` skips the login entry; with `--npm` it also skips
 starting the service.

@@ -103,8 +103,22 @@ project scope; Hermes, Antigravity and Copilot CLI/JetBrains support user scope
 only. `--port` selects the shared service port for both registration and startup.
 `agents` edits configs only; use `install` to start/register the service too.
 Restart the agents after setup so they discover `codeoutline_explore` and the
-other MCP tools. Agent approval controls still apply; no prompt hooks,
-instructions files or auto-approval policies are changed.
+other MCP tools. Agent approval controls still apply; no prompt hooks or
+auto-approval policies are changed.
+
+For Claude, Codex, Gemini and OpenCode, setup also adds a short
+`CODEOUTLINE_START/END` block to their scoped `CLAUDE.md`, `AGENTS.md` or
+`GEMINI.md`. If a complete `CODEGRAPH_START/END` block exists there, it is saved
+verbatim as `codegraph.md` in the same directory and removed from active instructions.
+An unrelated/different existing backup or malformed markers stop setup before
+config writes. Repeated setup is idempotent; unrelated instructions are preserved.
+Uninstall removes our block and restores the saved CodeGraph block only to a
+file that originally supplied it, when
+the `codegraph` CLI is still on PATH and no CodeGraph block is already present.
+The backup remains available for manual recovery, including when CodeGraph is gone.
+Project instructions are changed only with explicit project-scoped setup/cleanup.
+`codegraph.md` is not a default instruction filename, but explicit imports or
+manual reads can still load it.
 
 The installer preserves unrelated settings and JSONC comments and stores the
 original nonempty file in `<config>.codeoutline.bak` before its first change.
@@ -134,7 +148,12 @@ claude mcp add --transport http codeoutline --scope user http://127.0.0.1:19876/
 
 `codeoutline install` does the same for a native installation, or after installing with `--ignore-scripts`; `--port` selects a port other than 19876. Set `CODEOUTLINE_AUTOSTART=0` when installing to skip the login entry. The service logs to `~/.codeoutline/logs`.
 
-To uninstall, first run `codeoutline uninstall`, then `npm uninstall -g codeoutline`.
+For a global npm installation, run `codeoutline remove` to clean integrations,
+purge the default user data and then uninstall the npm package. It waits for the
+runtime to exit before invoking npm; cleanup failure preserves the package for retry.
+Use `codeoutline remove --project PATH` to also remove a project's MCP registrations.
+
+For separate cleanup and package removal, first run `codeoutline uninstall`, then `npm uninstall -g codeoutline`.
 The first command stops the service, removes its login entry, user-level Agent MCP
 entries and the VS Code/Cursor/Zed clients. Use `--purge` to also remove
 `~/.codeoutline` caches, updates and logs, or `--service-only` to keep integrations.
@@ -143,6 +162,10 @@ Close/reload editors to release running LSP processes before deleting package fi
 Other editor profiles, remote installations, custom data directories and original
 configuration backups require separate cleanup. npm 7+ has no uninstall hooks;
 running only `npm uninstall` cannot clean integrations or stop the service.
+The package includes a best-effort `preuninstall` compatibility hook for package
+managers that invoke it. It only cleans global uninstall integrations, preserves
+user data, and skips upgrade/local-install lifecycles. Use `codeoutline remove`
+for reliable full cleanup on current npm.
 
 The service listens on `127.0.0.1:19876` and serves projects anywhere on the machine, so switching between projects on different drives needs no configuration. Only local processes can reach it, and they already have your file access. A shared service has no project of its own: it uses the client's roots when the client provides them, and otherwise the agent passes `projectPath`, which the tools ask for when it is missing.
 

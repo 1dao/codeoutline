@@ -7,6 +7,7 @@ set "CODEOUTLINE_BASE=%~dp0"
 set "CODEOUTLINE_INITIAL=%~dp0"
 if "%~1"=="update" goto run
 if "%~1"=="uninstall" goto run
+if "%~1"=="remove" goto run
 if not defined CODEOUTLINE_AUTO_UPDATE (
     set "CODEOUTLINE_AUTO_UPDATE=0"
     if "%~1"=="serve" set "CODEOUTLINE_AUTO_UPDATE=1"

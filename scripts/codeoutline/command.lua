@@ -6,7 +6,9 @@ package.path = scripts .. '/?.lua;' .. package.path
 local version = require('codeoutline.version')
 local help = [[CodeOutline - code exploration tool and LSP server, powered by Lua
 
-Code exploration (code_explore): agents use the MCP tool codeoutline_explore
+Agents are AI coding tools such as Claude Code, Codex and Cursor Agent.
+MCP connects agents to CodeOutline; LSP connects editors to CodeOutline.
+Code exploration: agents use the MCP tool codeoutline_explore
 to query symbols, line-numbered source, call paths and callers/callees.
 Use codeoutline explore for code exploration from a terminal.
 
@@ -23,10 +25,11 @@ You can also register the URL manually:
   claude mcp add --transport http codeoutline --scope user http://127.0.0.1:19876/mcp
 
 Usage:
-  codeoutline install [--yes] [--target auto|all|none|IDS] [--location global|local] [--port PORT] [--editors all|none|vscode,cursor,zed]
-  codeoutline agents [--list] [--target auto|all|none|IDS] [--location global|local] [--port PORT] [--remove] [--force]
+  codeoutline install [--yes] [--target auto|all|none|IDS] [--location global|local] [--project PATH] [--port PORT] [--editors all|none|vscode,cursor,zed] [--force] [--list] [--print ID]
+  codeoutline agents [--list] [--yes] [--target auto|all|none|IDS] [--location global|local] [--project PATH] [--port PORT] [--remove] [--force] [--print ID]
   codeoutline editors [--list] [--editors all|none|vscode,cursor,zed]
   codeoutline uninstall [--port PORT] [--project PATH] [--service-only] [--purge]
+  codeoutline remove [--port PORT] [--project PATH]
   codeoutline daemon [--port PORT]
   codeoutline serve --stdio [--project PATH] [--allow-root PATH ...]
   codeoutline lsp --stdio [--project PATH]
@@ -71,7 +74,7 @@ Agent MCP setup (independent of LSP clients):
   codeoutline agents --list                        show detection and config paths only
   codeoutline agents --target all                  configure all detected agents
   codeoutline agents --print codex                 print config only, without writing files
-  codeoutline agents --target cursor --remove      remove only CodeOutline's MCP entry
+  codeoutline agents --target cursor --remove      remove CodeOutline's agent configuration
 Targets: claude, cursor, codex, gemini, opencode, hermes, kiro, antigravity,
          copilot-vscode, copilot-cli, copilot-jetbrains.
 all and auto select detected targets; comma-separated ids select explicitly.
@@ -81,6 +84,10 @@ Antigravity, Hermes, Copilot CLI and Copilot JetBrains support global scope only
 while install also starts the service. Restart agents after configuration.
 Existing unrelated settings are preserved; original files get .codeoutline.bak
 backups. Different existing codeoutline settings require --force to replace.
+For Claude, Codex, Gemini and OpenCode, setup also adds a usage instruction block.
+Existing CodeGraph blocks are archived as adjacent codegraph.md files; removal
+restores them only to their original files while the CodeGraph CLI is on PATH.
+Other instructions remain.
 CODEOUTLINE_AGENTS=auto|all|none|IDS selects agents for unattended npm installs.
 Without an explicit selection or terminal, global npm configures detected agents.
 Set CODEOUTLINE_AGENTS=none and CODEOUTLINE_EDITORS=none to skip integrations.
@@ -91,6 +98,8 @@ stops it, removes its login entry, user-level MCP registrations and editor clien
 --project also removes MCP entries from that project; --service-only keeps integrations.
 --purge additionally removes ~/.codeoutline data after cleanup succeeds.
 Run uninstall before npm uninstall -g codeoutline; npm has no uninstall hooks.
+For npm global installations, remove performs full cleanup with --purge, then
+removes the npm package after the runtime exits. Cleanup failures keep the package.
 daemon is the service itself.
 editors detects VS Code, Cursor and Zed and offers optional LSP client installation.
 Use --editors or CODEOUTLINE_EDITORS to select clients without a prompt.
@@ -100,6 +109,181 @@ default to --project or the working directory.
 Project defaults to the working directory for one-shot commands.
 doctor reports JSON diagnostics and exits nonzero on a failed check.
 ]]
+
+local command_help = {
+    install = { 'Configure agents and editor clients, start the shared MCP service and register login startup.', [[
+--target auto|all selects detected agents; none skips agents; IDS is a comma-separated list.
+--yes selects detected agents without prompts; editors default to none unless selected.
+--editors all|none|vscode,cursor,zed selects editor LSP clients independently.
+--location global|local selects agent configuration scope (default global).
+--project PATH selects the project for local configuration (default working directory).
+--port PORT selects the shared MCP endpoint and service port (default 19876).
+--force replaces conflicting CodeOutline agent entries; unrelated settings remain.
+--list only lists agents; --print ID (alias --print-config) only prints an agent config.
+MCP lets AI agents explore code; LSP provides editor navigation and completion.
+With no explicit selections, a terminal prompts for each detected application.
+Global npm background setup configures detected applications automatically.
+Example: codeoutline install --target codex,claude --editors vscode
+]] },
+    agents = { 'Connect AI coding agents to the shared CodeOutline MCP service.', [[
+codeoutline_explore returns symbols, line-numbered source and call relationships.
+This command edits agent configuration and supported usage instructions; it does not start the service.
+--list shows detected agents and config paths without editing files.
+--target auto|all selects detected agents; none skips setup; IDS selects comma-separated ids.
+--yes selects detected agents without prompts.
+--location global|local selects scope; --project PATH selects the local project.
+--port PORT selects the MCP endpoint (default 19876).
+--print ID (alias --print-config) prints config without writing files.
+--remove removes CodeOutline MCP entries and its supported usage instruction blocks.
+--force replaces conflicting CodeOutline entries; unrelated settings remain.
+Targets: claude,cursor,codex,gemini,opencode,hermes,kiro,antigravity,
+         copilot-vscode,copilot-cli,copilot-jetbrains.
+Hermes, Antigravity and Copilot CLI/JetBrains support global scope only.
+Example: codeoutline agents --target codex --location local --project .
+]] },
+    editors = { 'Install optional CodeOutline LSP extensions for VS Code, Cursor and Zed.', [[
+LSP provides symbols, definitions, references, hover, call hierarchy, completion and signature help.
+--list shows detected editors without installing extensions.
+--editors all installs for detected editors; none skips installation.
+--editors vscode,cursor,zed selects a comma-separated set of editors.
+Without a selection, a terminal prompts for each detected editor.
+Reload VS Code/Cursor or restart Zed afterward. Agent MCP setup is independent.
+Example: codeoutline editors --editors vscode,cursor
+]] },
+    uninstall = { 'Stop the shared service and remove startup registration, agent integrations and editor clients.', [[
+--port PORT selects the service port (default 19876).
+--project PATH also removes agent configuration and supported usage instructions from that project.
+--service-only keeps agent integrations and editor clients.
+--purge also deletes default ~/.codeoutline data after cleanup succeeds.
+The npm package remains installed; run npm uninstall -g codeoutline afterward.
+For a single full-cleanup command on global npm installations, use codeoutline remove.
+Custom data directories and unnamed project scopes require separate cleanup.
+Example: codeoutline uninstall --project . --purge
+]] },
+    remove = { 'Clean up a global npm installation, delete default user data and uninstall the npm package.', [[
+--port PORT selects the service port (default 19876).
+--project PATH also removes agent configuration and supported usage instructions from that project.
+Stops the service, removes startup registration and integrations, and purges ~/.codeoutline.
+Only after successful cleanup and runtime exit does the launcher run npm uninstall -g codeoutline.
+Cleanup failure keeps the package for retry; npm failure returns a nonzero exit status.
+Requires the global npm launcher; native/local installations should use uninstall instead.
+Custom data directories and unnamed project scopes require separate cleanup.
+Example: codeoutline remove --project .
+]] },
+    daemon = { 'Run the shared background MCP HTTP service in the current process.', [[
+--port PORT selects the listening port (default 19876).
+Normally started by codeoutline install or the registered login entry.
+Use install to configure integrations and startup; daemon runs the service itself.
+Example: codeoutline daemon --port 19876
+]] },
+    serve = { 'Run an MCP server over stdio or HTTP for AI tools.', [[
+Choose exactly one of --stdio or --http.
+--project PATH selects the default project (default working directory).
+--host HOST and --port PORT configure HTTP listening (defaults 127.0.0.1 and 19876).
+--allow-root PATH restricts accessible project roots; repeat for multiple roots.
+Local HTTP without --allow-root can serve projects anywhere on the machine.
+Stdio and remote HTTP default to the selected project or working directory.
+--allow-host HOST and --allow-origin ORIGIN add permitted HTTP hosts/origins; repeat as needed.
+Remote HTTP requires CODEOUTLINE_TOKEN with at least 16 bytes.
+Example: codeoutline serve --stdio --project .
+Example: codeoutline serve --http --port 19876 --allow-root C:/src
+]] },
+    lsp = { 'Run the Language Server Protocol server for an editor client over stdio.', [[
+--stdio is required; --project PATH selects the initial project (default working directory).
+Provides symbols, definitions, references, hover, call hierarchy, completion and signature help.
+Normally started by an editor extension; use codeoutline editors to install bundled clients.
+This server runs separately from the shared MCP HTTP service.
+Example: codeoutline lsp --stdio --project .
+]] },
+    explore = { 'Find symbols or files and return source with line numbers and relevant call paths.', [[
+--query QUERY is required; accepts symbol names, file paths and code terms.
+Queries can use lang:LANG and path:PATH filters; quote queries containing spaces.
+--project PATH selects the project (default working directory).
+--budget BYTES bounds the output size. Results report applicable coverage limits.
+Example: codeoutline explore --project . --query "Session.save" --budget 16000
+Example: codeoutline explore --query "lang:lua path:scripts Session"
+]] },
+    callers = { 'Trace callers of a symbol through bounded reverse call paths.', [[
+--query SYMBOL is required; --project PATH defaults to the working directory.
+--depth N limits caller traversal (default 3, range 1-8).
+--max-nodes N limits returned graph nodes (default 200, range 1-2000).
+--budget BYTES bounds output size. Reported paths are analysis evidence, not proof of runtime execution.
+Example: codeoutline callers --query Session.save --depth 2
+]] },
+    affected = { 'Find code potentially affected by changed files using bounded caller traversal.', [[
+Provide --file FILE (repeatable), --files-from PATH, or both.
+--files-from - reads standard input; lists contain one path per line (maximum 64 KiB).
+Paths must resolve inside the selected project; --project PATH defaults to the working directory.
+--depth N limits traversal (default 3, range 1-8).
+--max-nodes N limits graph nodes (default 200, range 1-2000).
+--budget BYTES bounds output size. Results are potential impact, not guaranteed runtime effects.
+Example: codeoutline affected --project . --file src/session.lua --depth 2
+Example: codeoutline affected --files-from changes.txt
+]] },
+    ['type-hierarchy'] = { 'Inspect ancestors and descendants of a type, including inheritance and implementations.', [[
+--query TYPE is required; --project PATH defaults to the working directory.
+--direction both|ancestors|descendants selects traversal direction (default both).
+--depth N limits traversal (default 8, range 1-32).
+--max-nodes N limits graph nodes (default 200, range 1-2000).
+--budget BYTES bounds output size. Coverage depends on language support and available source evidence.
+Example: codeoutline type-hierarchy --query BaseService --direction descendants
+]] },
+    ['type-references'] = { 'Find explicit source uses of a type with resolved identity where supported.', [[
+--query TYPE is required; --project PATH defaults to the working directory.
+--max-nodes N limits results (default 200, range 1-2000).
+--budget BYTES bounds output size. Language and coverage limits are reported in results.
+These are type uses, rather than every textual occurrence of the name.
+Example: codeoutline type-references --query Session --max-nodes 100
+]] },
+    status = { 'Refresh the project index and print its current status as JSON.', [[
+--project PATH selects the project (default working directory).
+Reports file/symbol counts, languages, generation, refresh statistics, scanner and cache information.
+May create or update the project index cache; this is not a service health check.
+Example: codeoutline status --project .
+]] },
+    rebuild = { 'Rebuild the basic project index from source, bypassing the existing cache, and print JSON status.', [[
+--project PATH selects the project (default working directory).
+Use after cache problems or when a fresh base index is needed; ordinary queries refresh incrementally.
+Detailed semantic analysis still runs on demand rather than being collected by a full rebuild.
+Example: codeoutline rebuild --project .
+]] },
+    doctor = { 'Check the local runtime, project access, scanner and cache write access; print JSON diagnostics.', [[
+--project PATH selects the project (default working directory).
+Checks runtime APIs, GBK conversion availability, file enumeration and cache directory writes.
+Exits nonzero when a check fails; unavailable GBK conversion is a warning.
+This checks local prerequisites, not editor connections or a deployed service.
+Example: codeoutline doctor --project .
+]] },
+    update = { 'Check for or install a verified CodeOutline runtime update.', [[
+--check queries available updates without installing them.
+--channel CHANNEL selects the release channel (default CODEOUTLINE_UPDATE_CHANNEL or stable).
+Without --check, downloads, validates and activates the update; prints JSON and exits nonzero on failure.
+This updates the runtime through CodeOutline's updater, not npm package dependencies.
+Example: codeoutline update --check
+Example: codeoutline update --channel stable
+]] },
+}
+
+local function render_help(command)
+    if command_help[command] then
+        local entry, usages = command_help[command], {}
+        local prefix = '  codeoutline ' .. command .. ' '
+        for line in assert(help:match('Usage:\n(.-)\n\n')):gmatch('[^\n]+') do
+            if line:sub(1, #prefix) == prefix then
+                usages[#usages + 1] = line
+            end
+        end
+        return 'codeoutline ' .. command .. ' - ' .. entry[1] .. '\n\nUsage:\n'
+            .. table.concat(usages, '\n') .. '\n\n' .. entry[2]
+            .. '\nRun codeoutline --help for all commands and setup notes.\n'
+    end
+    local lines = {}
+    for name in ('install agents editors uninstall remove daemon serve lsp explore callers affected type-hierarchy type-references status rebuild doctor update'):gmatch('%S+') do
+        lines[#lines + 1] = '  ' .. name .. ': ' .. command_help[name][1]
+    end
+    return help .. '\nCommands:\n' .. table.concat(lines, '\n')
+        .. '\n\nUse codeoutline <command> --help for options and examples.\n'
+end
 
 local function parse(args)
     local clean = {}
@@ -126,7 +310,8 @@ local function parse(args)
             ['allow-root'] = true, ['allow-host'] = true, ['allow-origin'] = true },
         daemon = { port = true }, install = { port = true, npm = true, editors = true, target = true, yes = true,
             location = true, project = true, force = true, list = true, print = true, ['print-config'] = true },
-        uninstall = { port = true, project = true, ['service-only'] = true, purge = true },
+        uninstall = { port = true, project = true, ['service-only'] = true, purge = true, npm = true },
+        remove = { port = true, project = true },
         agents = { target = true, yes = true, location = true, project = true, port = true, list = true,
             ['print-config'] = true, print = true, remove = true, force = true },
         editors = { list = true, editors = true },
@@ -221,7 +406,7 @@ end
 
 local function run()
     local command, options = parse(arg or {})
-    if command == '--help' or command == '-h' or options.help then io.write(help); return 0 end
+    if command == '--help' or command == '-h' or options.help then io.write(render_help(command)); return 0 end
     if command == '--version' then io.write(version, '\n'); return 0 end
     if command == 'update' then
         return require('codeoutline.updater').run(options.check and 'check' or 'update', options)
@@ -232,7 +417,12 @@ local function run()
     if command == 'agents' or command == 'install' and (options.list or options.print or options['print-config']) then
         return require('codeoutline.agent_install').run(options)
     end
-    if command == 'daemon' or command == 'install' or command == 'uninstall' then
+    if command == 'remove' then
+        assert(os.getenv('CODEOUTLINE_REMOVE_READY'), 'remove requires the npm launcher; use uninstall --purge for a native installation')
+        assert(not os.getenv('CODEOUTLINE_REMOVE_ERROR'), os.getenv('CODEOUTLINE_REMOVE_ERROR'))
+        options.purge = true
+    end
+    if command == 'daemon' or command == 'install' or command == 'uninstall' or command == 'remove' then
         local daemon = require('codeoutline.daemon')
         local port = tonumber(options.port or daemon.PORT)
         assert(port and port % 1 == 0 and port >= 1 and port <= 65535, 'invalid --port')
@@ -244,6 +434,23 @@ local function run()
         -- service, and nothing here may fail the installation.
         local npm = options.npm
         if npm and os.getenv('npm_config_global') ~= 'true' then return 0 end
+        if npm and command == 'uninstall' then
+            if os.getenv('CODEOUTLINE_REMOVE_CLEANED') == '1' then return 0 end
+            if os.getenv('npm_lifecycle_event') ~= 'preuninstall' then return 0 end
+            local npm_command = os.getenv('npm_command')
+            if npm_command == '' then npm_command = nil end
+            if not npm_command then
+                -- npm 6 supplies argv rather than npm_command. During an
+                -- upgrade its preuninstall hook must not remove integrations.
+                local ok, argv = pcall(xutils.json_unpack, os.getenv('npm_config_argv') or '')
+                for _, item in ipairs(ok and type(argv) == 'table' and type(argv.original) == 'table' and argv.original or {}) do
+                    if item == 'uninstall' or item == 'un' or item == 'remove' or item == 'rm' or item == 'r' or item == 'unlink' then
+                        npm_command = 'uninstall'; break
+                    end
+                end
+            end
+            if npm_command ~= 'uninstall' and npm_command ~= 'run-script' then return 0 end
+        end
         local function say(text) io.write(text, '\n'); io.stdout:flush() end
         local status = 0
         local integrations_ok = true
@@ -256,7 +463,7 @@ local function run()
             end
             if automatic then say('Global npm setup: installing detected integrations by default. Use --foreground-scripts for per-application choices.') end
             options.installing = true
-            say('Step 1/2: AI tools - code_explore over MCP')
+            say('Step 1/2: AI agents - codeoutline_explore over MCP')
             local agent_ok, agent_result = pcall(require('codeoutline.agent_install').run, options)
             if not agent_ok then io.stderr:write('codeoutline: ', tostring(agent_result), '\n') end
             if not agent_ok or agent_result ~= 0 then integrations_ok = false end
@@ -269,11 +476,12 @@ local function run()
             if not ok then io.stderr:write('codeoutline: ', tostring(result), '\n') end
             if not ok or result ~= 0 then integrations_ok = false end
             if not npm then status = ok and result or 1 end
+            say('To fully uninstall a global npm installation, run codeoutline remove (also deletes default user data). npm uninstall alone leaves the service and integrations behind.')
             if npm and os.getenv('CODEOUTLINE_AUTOSTART') == '0' then return 0 end
         end
         local function attempt(fn, ...)
             local ok, err = pcall(fn, ...)
-            if not ok then io.stderr:write('codeoutline: ', tostring(err), '\n'); status = npm and 0 or 1 end
+            if not ok then io.stderr:write('codeoutline: ', tostring(err), '\n'); status = npm and command == 'install' and 0 or 1 end
             return ok and err
         end
         -- Launchers name the installation they belong to; unlike an installed
@@ -288,7 +496,7 @@ local function run()
         return {
             __init = function()
                 assert(xnet.init()); xtimer.init(16)
-                if command == 'uninstall' then
+                if command == 'uninstall' or command == 'remove' then
                     for _, removed in ipairs(attempt(daemon.unregister) or {}) do say('removed login entry ' .. removed) end
                     daemon.stop(port, 10000, function(stopped)
                         say(stopped and 'service on port ' .. port .. ' stopped' or 'service on port ' .. port .. ' is still running')
@@ -311,7 +519,14 @@ local function run()
                                 say('removed CodeOutline user data; custom cache/update directories require separate cleanup')
                             end)
                         end
-                        if status == 0 then say('Cleanup completed. Run npm uninstall -g codeoutline to remove the npm package.') end
+                        if status == 0 then
+                            if command == 'remove' then
+                                local ready = assert(io.open(os.getenv('CODEOUTLINE_REMOVE_READY'), 'wb'))
+                                assert(ready:write('ready\n')); assert(ready:close())
+                                say('Cleanup completed. Removing the npm global package after the runtime exits...')
+                            elseif npm then say('Uninstall hook cleanup completed.')
+                            else say('Cleanup completed. Run npm uninstall -g codeoutline to remove the npm package.') end
+                        end
                         finish(status)
                     end)
                     return

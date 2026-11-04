@@ -6421,7 +6421,15 @@ spec.describe('project search ranking', function()
         spec.equal(output, before_impact)
         local found = false
         for _, caller in ipairs(info.callers) do if caller.name == 'RankedNativeCaller' and caller.file == 'app.lua' then found = true end end
-        spec.truthy(found); svc.forget(root)
+        spec.truthy(found)
+        write(root .. '/app.lua', 'local store = require("store")\ng_exports.RankedNativeCaller = function() store.save() end')
+        output = svc.explore(root, 'RankedNativeCaller native_saved', opts)
+        spec.contains(output, 'RankedNativeCaller -> native_saved')
+        spec.contains(output, 'g_exports.RankedNativeCaller = function()')
+        svc.forget(root)
+        output = svc.explore(root, 'RankedNativeCaller native_saved', opts)
+        spec.contains(output, 'RankedNativeCaller -> native_saved')
+        svc.forget(root)
     end)
     spec.it('rejects invalid policy shapes, traversal, globs and excessive rules without changing resident symbols', function()
         local root = tmp_root .. '/ranking_invalid'; local opts = files(root)
@@ -6901,6 +6909,105 @@ type Combined interface { I; J }
         spec.equal(#C.method_set(type_id(G, 'Combined'), false).entries.Read.ids, 2)
         spec.equal(#base.entries.Read.ids, 1)
         spec.equal(G.nodes[base.entries.Read.ids[1]].qualified, 'I.Read')
+    end)
+end)
+
+spec.describe('agent query precision and source windows', function()
+    spec.it('keeps service commands as scoped candidates instead of same-name call edges', function()
+        local root = tmp_root .. '/command_precision'
+        write(root .. '/caller.lua', [[local skynet = require 'skynet'
+local agent = skynet.newservice('agent')
+function enter() skynet.call(agent, 'lua', 'login') end
+function remote(addr) skynet.call(addr, 'lua', 'start') end
+function qualifiedRemote(addr) skynet.call(addr, 'lua', 'library.start') end
+]])
+        write(root .. '/agent.lua', 'function Manager:CMD_login() end\n')
+        write(root .. '/other.lua', 'function Other:CMD_login() end\n')
+        write(root .. '/unrelated.lua', 'function library.login() end\nfunction library.start() end\n')
+        write(root .. '/.codeoutline.json', '{"rules":[{"kind":"target","call":"skynet.call","argument":3,"serviceArgument":1}]}')
+        local opts = { cache_path = root .. '/cache.idx', lister = 'walk', budget = 65536 }
+        local output, info = svc.explore(root, 'enter remote', opts)
+        spec.contains(output, 'unconfirmed dispatch candidate: Manager:CMD_login')
+        spec.truthy(not output:find('unconfirmed dispatch candidate: Other:CMD_login', 1, true))
+        spec.contains(output, 'not a call edge')
+        local _, G = svc.resident(root)
+        local Q = graph.query(G, { explain = true })
+        for _, name in ipairs({ 'enter', 'remote', 'qualifiedRemote' }) do
+            local edges = Q.out[G.by_name[name][1]]
+            for i = 3, #edges, graph.EDGE do spec.truthy(not edges[i]:match('^indirect:target')) end
+        end
+        spec.equal(#Q.inn[G.by_name.CMD_login[1]], 0)
+        spec.equal(#Q.inn[G.by_name.start[1]], 0)
+        local report = require('codeoutline.query_report').render(Q.report, G)
+        spec.contains(report, 'receiving service/module binding unconfirmed')
+        for _, rec in pairs(G.files) do spec.nil_value(rec.dispatch_sites) end
+        write(root .. '/.codeoutline.json', '{"rules":[]}')
+        output = svc.explore(root, 'enter', opts)
+        spec.truthy(not output:find('unconfirmed dispatch candidate:', 1, true))
+        svc.forget(root)
+    end)
+    spec.it('protects middle call sites on named paths under a bounded source window', function()
+        local root = tmp_root .. '/middle_windows'
+        local source = { 'function window_entry()' }
+        for i = 2, 300 do source[i] = i == 170 and '    window_goal()' or '    local value_' .. i .. ' = ' .. i end
+        source[301] = 'end'; source[302] = 'function window_goal() end'
+        write(root .. '/main.lua', table.concat(source, '\n'))
+        local opts = { cache_path = root .. '/cache.idx', lister = 'walk', budget = 65536 }
+        local output, info = svc.explore(root, 'window_entry window_goal', opts)
+        spec.contains(output, 'window_entry -> window_goal')
+        spec.contains(output, '170\t    window_goal()')
+        spec.contains(output, '1\tfunction window_entry()')
+        spec.contains(output, '301\tend')
+        spec.contains(output, 'lines omitted')
+        local count = 0
+        for line in output:gmatch('\n(%d+)\t') do if tonumber(line) <= 301 then count = count + 1 end end
+        spec.truthy(count <= explore.SEED_FULL_LINES)
+        write(root .. '/main.lua', table.concat(source, '\n'):gsub('window_goal%(%)', 'window_next()'))
+        output = svc.explore(root, 'window_entry window_next', opts)
+        spec.contains(output, '170\t    window_next()')
+        spec.truthy(not output:find('170\t    window_goal()', 1, true))
+        svc.forget(root)
+    end)
+    spec.it('samples actual middle calls when exploring one long function', function()
+        local root = tmp_root .. '/single_window'
+        local lines = { 'function single_window()' }
+        for i = 2, 260 do lines[i] = i == 190 and '    middle_operation()' or '    local v' .. i .. ' = ' .. i end
+        lines[261] = 'end'; lines[262] = 'function middle_operation() end'
+        write(root .. '/main.lua', table.concat(lines, '\n'))
+        local output = svc.explore(root, 'single_window', { cache_path = root .. '/cache.idx', lister = 'walk', budget = 65536 })
+        spec.contains(output, '190\t    middle_operation()')
+        spec.contains(output, '261\tend')
+        svc.forget(root)
+    end)
+    spec.it('bounds dispatch suggestions and reports omitted candidates', function()
+        local records = { ['send.lua'] = ci.parse('send.lua', "function sendCommand(addr) rpc.send(addr, 'open') end", { dispatch = true }) }
+        for i = 1, 8 do
+            local path = 'handler' .. i .. '.lua'
+            records[path] = ci.parse(path, 'function Handler' .. i .. '.open() end')
+        end
+        local G = graph.build({ files = records })
+        local Q = graph.query(G, { explain = true, dispatch_rules = {{ kind = 'target', call = 'rpc.send', argument = 2 }} })
+        local edges = Q.out[G.by_name.sendCommand[1]]
+        for i = 3, #edges, graph.EDGE do spec.truthy(not edges[i]:match('^indirect:target')) end
+        local count = 0; for _, e in ipairs(Q.report.entries) do if e.candidate then count = count + 1 end end
+        spec.equal(count, 4); spec.truthy(Q.report.truncated)
+    end)
+    spec.it('demotes minified assets and builtin stubs but honors explicit requests', function()
+        local root = tmp_root .. '/noise_ranking'
+        write(root .. '/assets/widget.min.js', 'function saveWidget() { return 1; }')
+        write(root .. '/editor/builtins/api.js', 'function saveWidget() { return 2; }')
+        write(root .. '/src/main.js', 'function saveWidget() { return 3; }')
+        write(root .. '/editor/builtins/global.lua', 'function Builtin.saveSpecial() end')
+        local opts = { cache_path = root .. '/cache.idx', lister = 'walk' }
+        local output, info = svc.explore(root, 'saveWidget', opts)
+        local _, G = svc.resident(root)
+        spec.equal(G.files[G.node_file[info.seeds[1]]].path, 'src/main.js')
+        output = svc.explore(root, 'Builtin.saveSpecial', opts)
+        spec.contains(output, 'Builtin.saveSpecial')
+        output, info = svc.explore(root, 'assets/widget.min.js', opts)
+        spec.contains(output, 'assets/widget.min.js (outline)')
+        spec.equal(#info.seeds, 0, 'path segments must not become loose symbol seeds')
+        svc.forget(root)
     end)
 end)
 

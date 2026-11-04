@@ -10,7 +10,7 @@
 --      grouped by file, as `line<TAB>code` like the Read tool
 --   3. callers / callees of the named symbols (locations only)
 --   4. other matches that did not fit, as pointers
--- Big bodies are cut to head + tail; classes over the limit collapse to a
+-- Big bodies keep their head/tail and relevant call windows; classes over the limit collapse to a
 -- member outline; anything past the budget becomes a pointer line.
 
 local graph = require('codeoutline.graph')
@@ -79,6 +79,14 @@ local function terms(query)
         local key = kind .. ':' .. text
         if not seen[key] then seen[key] = true; out[#out + 1] = { kind = kind, text = text } end
     end
+    -- A path is one term, not a bag of directory names such as src/login.
+    query = query:gsub('\\', '/'):gsub('[%w_%-%./]+%.[%a][%w_]*', function(path)
+        local ext = path:match('%.(%a+)$')
+        if path:find('/') or ext and require('codeoutline.parse').EXTENSIONS[ext:lower()] then
+            add('file', path); return string.rep(' ', #path)
+        end
+        return path
+    end)
     for chain in query:gmatch('[%a_][%w_]*[%.:%->]+[%a_][%w_%.:%->]*') do
         if chain:match('%.%a+$') and chain:match('^[%w_/%-]+%.%a+$') and not chain:find('::') then
             add('file', chain)
@@ -111,7 +119,7 @@ local function find_seeds(G, query, filters, ranking)
     local predicate = require('codeoutline.query_filters')
     local function seed_score(id, exact, explicit)
         local s = (KIND_WEIGHT[G.nodes[id].kind] or 1) + (exact and 20 or 0)
-        return s - ranking.penalty(G.files[G.node_file[id]].path, explicit)
+        return s - ranking.penalty(G.files[G.node_file[id]].path, explicit, G.nodes[id])
     end
     local cands = {}          -- id -> score
     local files = {}          -- file indices named in the query
@@ -204,14 +212,13 @@ local function find_seeds(G, query, filters, ranking)
     end
     if query == '' then
         local count = 0
-        -- With a configured policy, select the candidate window from preferred
+        -- With either policy, select the candidate window from preferred
         -- files first so an early generated directory cannot fill all 512 slots.
-        for pass = 1, ranking.configured and 2 or 1 do
+        for pass = 1, 2 do
             for _, f in ipairs(G.file_order) do
                 control.check()
                 local rec = G.files[f]
-                if predicate.file(filters, rec) and (not ranking.configured
-                    or (ranking.penalty(rec.path) > 0) == (pass == 2)) then
+                if predicate.file(filters, rec) and (ranking.penalty(rec.path) > 0) == (pass == 2) then
                     for i, id in ipairs(G.id_of[f]) do
                         if i % 256 == 0 then control.check() end
                         if predicate.id(filters, G, id) then
@@ -300,9 +307,9 @@ local function render_range(lines, a, b, out)
     end
 end
 
--- Source block for one node, cut to `full` lines (head + tail beyond).
+-- Source block for one node, capped at `full` source lines, preserving call sites.
 -- Classes/structs over the limit collapse to their member outline.
-local function node_block(G, idx, id, full)
+local function node_block(G, idx, id, full, focus)
     local node = G.nodes[id]
     local lines = file_lines(idx, G.files[G.node_file[id]].path)
     local a, b = node.line, math.max(node.end_line, node.line)
@@ -329,9 +336,55 @@ local function node_block(G, idx, id, full)
             end
             out[#out + 1] = string.format('\t... (%s body of %d lines outlined; explore a member for its source)', node.kind, span)
         else
-            render_range(lines, a, a + M.CUT_HEAD - 1, out)
-            out[#out + 1] = string.format('\t... (%d lines omitted) ...', span - M.CUT_HEAD - M.CUT_TAIL)
-            render_range(lines, b - M.CUT_TAIL + 1, b, out)
+            local selected, count = {}, 0
+            local function keep(first, last)
+                for line = math.max(a, first), math.min(b, last) do
+                    if not selected[line] and count < full then selected[line], count = true, count + 1 end
+                end
+            end
+            local head, tail = math.min(32, math.floor(full / 3)), math.min(8, math.floor(full / 8))
+            keep(a, a + head - 1); keep(b - tail + 1, b)
+            local points, seen = {}, {}
+            for _, line in ipairs(focus or {}) do
+                if line >= a and line <= b and not selected[line] and not seen[line] and #points < 4 then
+                    points[#points + 1], seen[line] = line, true
+                end
+            end
+            -- When no named path spans the body, sample actual call sites
+            -- across it rather than spending every line on the function head.
+            if #points == 0 then
+                local refs, calls = G.files[G.node_file[id]].refs, {}
+                local from = id - G.id_of[G.node_file[id]][1] + 1
+                for i, line in ipairs(refs.line) do
+                    if i % 128 == 0 then control.check() end
+                    if refs.from[i] == from and line > a + head and line < b - tail
+                        and (refs.kind[i] == 'call' or refs.kind[i] == 'member_call') then
+                        calls[#calls + 1] = line
+                        if (refs.name[i] == 'pcall' or refs.name[i] == 'xpcall') and not seen[line] and #points < 2 then
+                            points[#points + 1], seen[line] = line, true
+                        end
+                    end
+                end
+                table.sort(calls)
+                for i = 1, math.min(3, #calls) do
+                    local line = calls[math.ceil(#calls * i / (math.min(3, #calls) + 1))]
+                    if not seen[line] and #points < 4 then points[#points + 1], seen[line] = line, true end
+                end
+            end
+            local radius = math.max(0, math.min(12, math.floor((full - count) / math.max(1, #points) / 2) - 1))
+            for _, line in ipairs(points) do keep(line - radius, line + radius) end
+            if #points == 0 then
+                keep(a, a + math.min(M.CUT_HEAD, full - tail) - 1)
+                keep(b - M.CUT_TAIL + 1, b)
+            end
+            local ordered = {}; for line in pairs(selected) do ordered[#ordered + 1] = line end
+            table.sort(ordered)
+            local previous = a - 1
+            for _, line in ipairs(ordered) do
+                if line > previous + 1 then out[#out + 1] = string.format('\t... (%d lines omitted) ...', line - previous - 1) end
+                render_range(lines, line, line, out); previous = line
+            end
+            if previous < b then out[#out + 1] = string.format('\t... (%d lines omitted) ...', b - previous) end
         end
     end
     return table.concat(out, '\n'), span > full
@@ -566,6 +619,13 @@ local function run(G, idx, query, opts)
     elseif #candidates.entries > 0 then candidate_cut = true end
     omitted = omitted or candidate_cut
 
+    local focus = {}
+    for _, hops in ipairs(flow_edges) do
+        for _, hop in ipairs(hops) do
+            focus[hop.source] = focus[hop.source] or {}
+            focus[hop.source][#focus[hop.source] + 1] = hop.line
+        end
+    end
     local reserve = math.floor(budget * 0.15)     -- keep room for sections 3-4
     for _, f in ipairs(file_order) do
         local rec = G.files[f]
@@ -587,7 +647,7 @@ local function run(G, idx, query, opts)
         elseif items.outline then omitted = true end
         for _, item in ipairs(items) do
             if not shown[item.id] and used + #header + 16 < budget - reserve then
-                local block, source_cut = node_block(G, idx, item.id, item.full)
+                local block, source_cut = node_block(G, idx, item.id, item.full, focus[item.id])
                 omitted = omitted or source_cut
                 local need = #block + (wrote_header and 0 or #header + 1) + 1
                 if used + need < budget - reserve then

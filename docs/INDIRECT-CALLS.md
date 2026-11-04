@@ -215,7 +215,16 @@ Rules are read per request; editing them does not require rebuilding.
 }
 ```
 
-- `target`: `worker.post(worker_id, 'handle')` links the caller to `handle`.
+- `target`: a literal command can link to a lexically resolved free function
+  when the contract has no service/module scope. Member handlers, Lua
+  `CMD_`/`NTF_` handlers, and commands preceded by a symbolic/string service
+  argument are unconfirmed candidates, not traversable call edges. An explicit
+  `serviceArgument` selects the service argument; a validated service-constructor
+  alias can narrow candidates to a matching Lua filename. Filename matching is
+  still only a candidate hint, not proof of delivery. At most four candidates
+  per site are reported from bounded same-name scans. Dynamic addresses cannot
+  establish a receiver identity. Callback/event registration contracts retain
+  their existing behavior.
 - `callback`: `schedule(delay, handle)` links to the named callback. C/C++
   `&handle` is accepted too.
 - `event`: `bus.emit('tick')` links to handlers registered with

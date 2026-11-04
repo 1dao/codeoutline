@@ -42,10 +42,9 @@ function M.policy(root)
     local cache = {}
     local P = { configured = configured, stats = { configured = configured,
         rules = configured and #prefixes or #defaults, checked_files = 0, matched_files = 0 } }
-    function P.penalty(path, explicit)
-        -- Keep legacy scores unchanged without configuration. A configured
-        -- directory never penalizes an explicitly qualified symbol request.
-        if configured and explicit then return 0 end
+    function P.penalty(path, explicit, node)
+        -- Exact qualified requests bypass both configured and default hints.
+        if explicit then return 0 end
         local amount = cache[path]
         if amount == nil then
             amount = 0
@@ -57,12 +56,16 @@ function M.policy(root)
                 for _, pattern in ipairs(defaults) do
                     if path:find(pattern) then amount = M.PENALTY; break end
                 end
+                local lower = '/' .. path:lower()
+                if lower:match('%.min%.[cm]?js$') or lower:match('%.bundle%.js$') then amount = math.max(amount, 18) end
+                if lower:find('/builtins/', 1, true) or lower:find('/typings/', 1, true)
+                    or lower:match('%.d%.[cm]?ts$') then amount = math.max(amount, 10) end
             end
             cache[path] = amount
             P.stats.checked_files = P.stats.checked_files + 1
             if amount > 0 then P.stats.matched_files = P.stats.matched_files + 1 end
         end
-        return amount
+        return amount + (not configured and node and (node.decl or node.kind == 'prototype') and 4 or 0)
     end
     return P
 end

@@ -27,7 +27,7 @@ function M.new(limit)
     local seen = {}
     function report:add(entry)
         local key = table.concat({ entry.source or '', entry.target or '', entry.line or '',
-            entry.kind or '', entry.reason or '', entry.rule or '', entry.call or '' }, ':')
+            entry.kind or '', entry.reason or '', entry.rule or '', entry.call or '', entry.candidate or '' }, ':')
         if seen[key] then return end
         if #self.entries >= (limit or 64) then self.truncated = true; return end
         seen[key] = true
@@ -153,8 +153,12 @@ function M.render(report, G)
         if e.call then detail = detail .. ' via ' .. e.call end
         if e.rule then detail = detail .. ' (rule #' .. e.rule .. ', argument ' .. e.argument .. ')' end
         if e.registered_at then detail = detail .. '; registered at ' .. e.registered_at end
+        if e.candidate then
+            detail = detail .. '; unconfirmed dispatch candidate: ' .. G.nodes[e.candidate].qualified
+                .. ' (' .. require('codeoutline.graph').where(G, e.candidate) .. '); not a call edge'
+        end
         append(string.format('- %s:%d %s%s: %s', path, e.line or 0,
-            source and source.qualified or '?', target and ' -> ' .. target or '', detail), { e.source, e.target }, e.registered_at)
+            source and source.qualified or '?', target and ' -> ' .. target or '', detail), { e.source, e.target or e.candidate }, e.registered_at)
     end
     if report.truncated then append('Evidence limit reached; additional explanations omitted.') end
     return finish()

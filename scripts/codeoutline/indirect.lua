@@ -236,6 +236,52 @@ function M.query(G, rules, report)
         registrations_by_rule[ri] = registrations
         return registrations
     end
+    -- A command string is not a receiver binding. Keep member handlers and
+    -- service-addressed commands as suggestions until registration evidence
+    -- proves which module/instance receives them. Never traverse suggestions.
+    local function command_targets(f, site, arg, rule)
+        if not arg or not arg.literal then return {}, {} end
+        local name = arg.literal
+        local short = name:match('^([%a_][%w_]*)$')
+        local address = site.args[rule.serviceArgument or (rule.argument - 1)]
+        local scoped = rule.serviceArgument ~= nil or address and (address.symbol or address.service or address.literal)
+        if not short then
+            local ids = targets(f, site, arg, true)
+            if not scoped then return ids, {} end
+            local candidates = {}
+            for i = 1, math.min(#ids, 4) do candidates[i] = ids[i] end
+            if #ids > 4 and report then report.truncated = true end
+            return {}, candidates
+        end
+        local service = address and address.service
+        if not service and rule.serviceArgument then service = address and address.literal end
+        local candidates, edges, seen, resolved = {}, {}, {}, {}
+        if not scoped then for _, id in ipairs(targets(f, site, arg, true)) do resolved[id] = true end end
+        -- Prefer explicit handler conventions before generic library methods.
+        local keys = G.files[f].language == 'lua' and { 'CMD_' .. short, 'NTF_' .. short, short } or { short }
+        for _, key in ipairs(keys) do
+            local list = G.by_name[key] or {}
+            if #list > 128 and report then report.truncated = true end
+            for i = 1, math.min(#list, 128) do
+                if i % 32 == 0 then control.check() end
+                local id = list[i]
+                local node, rec = G.nodes[id], G.files[G.node_file[id]]
+                local callable = node.kind == 'function' or node.kind == 'method'
+                local suffix = service and service .. '.lua'
+                local fits = not suffix or rec.path == suffix or rec.path:sub(-#suffix - 1) == '/' .. suffix
+                if callable and rec.language == G.files[f].language and fits and not seen[id] then
+                    seen[id] = true
+                    if resolved[id] and key == short and node.qualified == short then
+                        -- An explicit name-dispatch contract can still name a
+                        -- free function; ordinary lexical checks remain authoritative.
+                        edges[#edges + 1] = id
+                    elseif #candidates < 4 then candidates[#candidates + 1] = id
+                    elseif report then report.truncated = true end
+                end
+            end
+        end
+        return edges, candidates
+    end
     local function scan(only, wanted)
         local out = {}
         local literals
@@ -247,6 +293,8 @@ function M.query(G, rules, report)
                 for id in pairs(wanted) do
                     local node = G.nodes[id]
                     literals[node.name], literals[node.qualified or node.name] = true, true
+                    local command = node.name:match('^CMD_(.+)$') or node.name:match('^NTF_(.+)$')
+                    if command then literals[command] = true end
                 end
             end
         end
@@ -261,13 +309,23 @@ function M.query(G, rules, report)
                     file_sites = file_sites or sites(f, literals)
                     for _, site in ipairs(file_sites) do
                         if (site.call == rule.call or site.api == rule.call) and site.from > 0 and (not only or G.id_of[f][site.from] == only) then
-                            local ids, arg, registered = {}, site.args[rule.argument], nil
+                            local ids, arg, registered, suggestions = {}, site.args[rule.argument], nil, {}
                             if rule.kind == 'event' then
                                 registered = registrations(ri, rule)
                                 for id in pairs(arg and arg.literal and registered[rec.language .. '\0' .. arg.literal] or {}) do ids[#ids + 1] = id end
                                 table.sort(ids, function(a, b) return graph.before(G, a, b) end)
-                            else ids = targets(f, site, arg, rule.kind == 'target') end
+                            elseif rule.kind == 'target' then ids, suggestions = command_targets(f, site, arg, rule)
+                            else ids = targets(f, site, arg, false) end
                             local src = G.id_of[f][site.from]
+                            if report and (only or wanted) then
+                                for _, id in ipairs(suggestions) do
+                                    if not wanted or wanted[id] then
+                                        report:add({ source = src, candidate = id, line = site.line, rule = ri,
+                                            argument = rule.argument, call = rule.call,
+                                            reason = 'command name matches; receiving service/module binding unconfirmed' })
+                                    end
+                                end
+                            end
                             if report and only and #ids == 0 then
                                 local static = arg and (rule.kind == 'callback' and arg.symbol or rule.kind ~= 'callback' and arg.literal)
                                 report:add({ source = src, line = site.line, rule = ri, argument = rule.argument, call = rule.call,

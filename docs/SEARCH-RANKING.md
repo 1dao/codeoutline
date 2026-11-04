@@ -24,10 +24,14 @@ parent traversal, wildcard characters `*`/`?`, NUL and line breaks are rejected.
 At most 32 entries of 1,024 UTF-8 bytes each are accepted; the existing 64 KiB
 project-config size limit also applies.
 
-If the field is omitted, the existing built-in vendor/third-party directory
-heuristics and their scores remain unchanged. An explicit array replaces those
-defaults; include any vendor paths you still want demoted. An empty array turns
-off directory penalties:
+If the field is omitted, vendor/third-party directory matches subtract six
+points, `*.min.js`/`*.min.mjs`/`*.min.cjs` and `*.bundle.js` subtract eighteen,
+and `builtins`/`typings` directories and `*.d.ts`/`*.d.mts`/`*.d.cts` subtract ten.
+Overlapping path heuristics use the largest penalty. Declaration-only nodes
+and prototypes receive four additional points of demotion. These are cheap
+path/declaration hints, not content-based generated-code detection.
+An explicit array replaces these defaults; include any vendor paths you still
+want demoted. An empty array turns off all ranking penalties:
 
 ```json
 {"deprioritize": []}
@@ -35,7 +39,8 @@ off directory penalties:
 
 Explicitly named files retain their normal outline/source output. Explicitly
 qualified symbols (including the existing `module.function` lookup) bypass
-configured penalties. `path:` filters continue to select matching files,
+all penalties. Paths are consumed as whole query terms; their directory and
+filename segments do not also seed unrelated symbols. `path:` filters continue to select matching files,
 including deprioritized ones. Existing query budgets and seed caps still apply;
 a precise query is not a guarantee of unlimited output.
 

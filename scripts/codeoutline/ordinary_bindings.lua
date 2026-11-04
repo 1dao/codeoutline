@@ -191,6 +191,7 @@ function M.context(G, ctx, source, options)
         data.type_sites, data.type_parameters = parsed.type_sites, parsed.type_parameters
         data.type_exclusions = parsed.type_exclusions
         data.go_methods = parsed.go_methods
+        data.go_frameworks = parsed.go_frameworks
         data.cpp_receivers = parsed.cpp_receivers
         data.cpp_macros = parsed.cpp_macros
         data.automatic_events = parsed.automatic_events
@@ -214,6 +215,7 @@ function M.context(G, ctx, source, options)
             + (parsed.go_methods and (#parsed.nodes * 384 + #parsed.go_methods.bindings * 256
                 + (parsed.go_methods.receiver_weight or 0)) or 0)
             + (parsed.cpp_receivers and parsed.cpp_receivers.weight or 0)
+            + (parsed.go_frameworks and parsed.go_frameworks.weight or 0)
             + #(parsed.automatic_events or {}) * 512
             + (parsed.shared_events and parsed.shared_events.weight or 0)
             + (parsed.lua_callback_loops and parsed.lua_callback_loops.weight or 0)

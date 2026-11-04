@@ -7011,6 +7011,242 @@ function qualifiedRemote(addr) skynet.call(addr, 'lua', 'library.start') end
     end)
 end)
 
+spec.describe('query-owned Go framework bridges', function()
+    local fw = require('codeoutline.go_frameworks')
+    local function build(files)
+        local records = {}
+        for path, source in pairs(files) do records[path] = ci.parse(path, source, { ordinary_bindings = true }) end
+        return graph.build({ files = records })
+    end
+    local function edges(G, name, incoming)
+        local id = assert((G.by_qualified[name] or G.by_name[name] or {})[1], name)
+        local Q = graph.query(G, { explain = true })
+        local list = incoming and Q.inn[id] or Q.out[id]
+        local out = {}
+        for i = 1, #list, graph.EDGE do
+            if list[i + 2]:find('possible:go-', 1, true) then
+                out[#out + 1] = G.nodes[list[i]].qualified .. ':' .. list[i + 2]
+            end
+        end
+        table.sort(out)
+        return table.concat(out, '\n'), Q
+    end
+    spec.it('connects HTTP method patterns and Gin groups to every named handler', function()
+        local G = build({ ['app.go'] = [[package app
+import "net/http"
+import "github.com/gin-gonic/gin"
+func Auth() {}
+func List() {}
+func Setup() {
+    r := gin.Default()
+    v1 := r.Group("/v1", Auth)
+    r.Use(Auth)
+    v1.GET("/users", Auth, List)
+    http.HandleFunc("GET /health", List)
+    http.HandleFunc("invalid", Auth)
+}
+]] })
+        local text, Q = edges(G, 'Setup')
+        spec.contains(text, 'Auth:possible:go-middleware')
+        spec.contains(text, 'Auth:possible:go-route GET /v1/users')
+        spec.contains(text, 'List:possible:go-route GET /health')
+        spec.equal(text:find('invalid', 1, true), nil)
+        local report = require('codeoutline.query_report').render(Q.report, G)
+        spec.contains(report, 'runtime execution unverified')
+        spec.contains(report, 'registered at app.go:')
+        spec.contains(edges(G, 'List', true), 'Setup:possible:go-route GET /v1/users')
+    end)
+    spec.it('rejects comments, non-router verbs, dynamic handlers and shadowed import roots', function()
+        local G = build({ ['app.go'] = [[package app
+import "github.com/gin-gonic/gin"
+func Handler() {}
+func Unknown(cache any) { cache.GET("/users", Handler) }
+func Shadow(gin any) { r := gin.New(); r.GET("/users", Handler) }
+func OutOfScope(r any) { if true { r := gin.New() }; r.GET("/users", Handler) }
+func Dynamic() {
+    // r.GET("/fake", Handler)
+    r := gin.New()
+    r.GET("/closure", func(){ Handler() })
+    r.GET("/call", Handler())
+    r = other
+    r.GET("/changed", Handler)
+}
+]] })
+        for _, name in ipairs({ 'Unknown', 'Shadow', 'Dynamic', 'OutOfScope' }) do spec.equal(edges(G, name), '', name) end
+    end)
+    spec.it('bridges the Gin indexed dispatcher to registered middleware and route handlers', function()
+        local G = build({ ['gin/context.go'] = [[package gin
+type Context struct { handlers []func(*Context); index int }
+func (c *Context) Next() { c.handlers[c.index](c) }
+]], ['app.go'] = [[package app
+import "github.com/gin-gonic/gin"
+func Auth() {}
+func Handle() {}
+func Setup() { r := gin.New(); r.Use(Auth); r.GET("/", Handle) }
+]] })
+        local text = edges(G, 'Context.Next')
+        spec.contains(text, 'Auth:possible:go-gin middleware dispatch')
+        spec.contains(text, 'Handle:possible:go-gin middleware dispatch')
+        spec.contains(edges(G, 'Auth', true), 'Context.Next:possible:go-gin middleware dispatch')
+    end)
+    spec.it('closes generated gRPC assertion, interface and embedded server implementation paths', function()
+        local G = build({ ['service_grpc.pb.go'] = [[package app
+type Request struct {}
+type Reply struct {}
+type GreeterServer interface { Say(*Request) (*Reply, error) }
+type UnimplementedGreeterServer struct {}
+func (UnimplementedGreeterServer) Say(*Request) (*Reply, error) { return nil, nil }
+func Invoke(srv any, req *Request) { srv.(GreeterServer).Say(req) }
+]], ['server.go'] = [[package app
+type Server struct { UnimplementedGreeterServer }
+func (*Server) Say(req *Request) (*Reply, error) { return nil, nil }
+type Unrelated struct {}
+func (*Unrelated) Say(req *Request) (*Reply, error) { return nil, nil }
+type Wrong struct { UnimplementedGreeterServer }
+func (*Wrong) Say(string) (*Reply, error) { return nil, nil }
+]] })
+        spec.contains(edges(G, 'Invoke'), 'GreeterServer.Say:possible:go-grpc server assertion')
+        for _, name in ipairs({ 'GreeterServer.Say', 'UnimplementedGreeterServer.Say' }) do
+            local text = edges(G, name)
+            spec.contains(text, 'Server.Say:possible:go-grpc server implementation')
+            spec.equal(text:find('Unrelated.Say', 1, true), nil)
+            spec.equal(text:find('Wrong.Say', 1, true), nil)
+        end
+        spec.contains(edges(G, 'Server.Say', true), 'UnimplementedGreeterServer.Say:possible:go-grpc server implementation')
+    end)
+    spec.it('bounds query expansion and never collects framework evidence during compact indexing', function()
+        local raw = 'package app\nimport "net/http"\nfunc H() {}\nfunc Setup() { http.HandleFunc("/", H) }'
+        local compact = ci.parse('a.go', raw, { ranges = false })
+        spec.nil_value(compact.go_frameworks)
+        local G = build({ ['a.go'] = raw })
+        local old = fw.MAX_LINKS; fw.MAX_LINKS = 0
+        local ok, err = pcall(function()
+            local text, Q = edges(G, 'Setup')
+            spec.equal(text, ''); spec.truthy(Q.incomplete)
+            spec.truthy(Q.stats.incomplete_reasons.go_framework_analysis_incomplete)
+        end)
+        fw.MAX_LINKS = old; assert(ok, err)
+    end)
+    spec.it('resolves imported handlers, typed method values and versioned router imports', function()
+        local G = build({ ['handlers/a.go'] = 'package handlers\nfunc Serve() {}', ['app.go'] = [[package app
+import "net/http"
+import h "handlers"
+import "github.com/labstack/echo/v4"
+import "github.com/gofiber/fiber/v3"
+import "github.com/go-chi/chi/v5"
+type Controller struct {}
+func (*Controller) Serve() {}
+func Setup(c *Controller) {
+    http.HandleFunc("/import", h.Serve)
+    http.HandleFunc("/method", c.Serve)
+    e := echo.New()
+    e.GET("/echo", h.Serve)
+    f := fiber.New()
+    f.Get("/fiber", h.Serve)
+    r := chi.NewRouter()
+    r.Get("/chi", h.Serve)
+}
+]] })
+        local text = edges(G, 'Setup')
+        spec.contains(text, 'Serve:possible:go-route ANY /import')
+        spec.contains(text, 'Controller.Serve:possible:go-route ANY /method')
+        for _, path in ipairs({ 'echo', 'fiber', 'chi' }) do spec.contains(text, 'route GET /' .. path) end
+    end)
+    spec.it('bridges qualified gRPC types across packages without requiring external source', function()
+        local G = build({ ['pb/service_grpc.pb.go'] = [[package pb
+import "context"
+type Request struct {}
+type Reply struct {}
+type GreeterServer interface { Say(context.Context, *Request) (*Reply, error) }
+type UnimplementedGreeterServer struct {}
+func (UnimplementedGreeterServer) Say(context.Context, *Request) (*Reply, error) { return nil, nil }
+]], ['app.go'] = [[package app
+import "context"
+import proto "pb"
+type Server struct { proto.UnimplementedGreeterServer }
+func (*Server) Say(ctx context.Context, req *proto.Request) (*proto.Reply, error) { return nil, nil }
+]] })
+        spec.contains(edges(G, 'UnimplementedGreeterServer.Say'), 'Server.Say:possible:go-grpc server implementation')
+    end)
+    spec.it('refreshes route evidence after source edits and disk reloads', function()
+        local root = tmp_root .. '/go_framework_refresh'
+        local function source(path, handler)
+            return 'package app\nimport "net/http"\nfunc A() {}\nfunc B() {}\nfunc Setup() { http.HandleFunc("'
+                .. path .. '", ' .. handler .. ') }'
+        end
+        write(root .. '/go.mod', 'module example.test/app\n')
+        write(root .. '/app.go', source('/old', 'A'))
+        local opts = { cache_path = root .. '/cache.idx', lister = 'walk' }
+        local idx, G = svc.get(root, opts)
+        spec.contains(edges(G, 'Setup'), 'A:possible:go-route ANY /old')
+        for _, rec in pairs(idx.files) do spec.nil_value(rec.go_frameworks) end
+        idx:save(); svc.forget(root); idx, G = svc.get(root, opts)
+        spec.truthy(idx.cache_loaded)
+        spec.contains(edges(G, 'Setup'), 'A:possible:go-route ANY /old')
+        write(root .. '/app.go', source('/new', 'B'))
+        idx, G = svc.get(root, opts)
+        local text = edges(G, 'Setup')
+        spec.contains(text, 'B:possible:go-route ANY /new')
+        spec.equal(text:find('/old', 1, true), nil)
+        local result = svc.explore(root, 'Setup B', opts)
+        spec.contains(result, 'possible:go-route ANY /new')
+        svc.forget(root)
+    end)
+    spec.it('reports file and discovery limits and preserves cancellation', function()
+        local G = build({ ['app.go'] = [[package app
+import "net/http"
+func H() {}
+func Setup() { http.HandleFunc("/", H) }
+]] })
+        for _, field in ipairs({ 'MAX_FILES', 'MAX_BYTES', 'MAX_TIME_MS', 'MAX_SCANNED_FILES' }) do
+            local old = fw[field]; fw[field] = field == 'MAX_TIME_MS' and -1 or 0
+            local ok, err = pcall(function()
+                local _, Q = edges(G, field == 'MAX_SCANNED_FILES' and 'H' or 'Setup', field == 'MAX_SCANNED_FILES')
+                spec.truthy(Q.incomplete, field)
+            end)
+            fw[field] = old; assert(ok, err)
+        end
+        local control = require('codeoutline.control'); local cancelled = control.cancelled()
+        control.callback = function() error(cancelled, 0) end
+        local ok, err = pcall(edges, G, 'Setup')
+        control.callback = nil; spec.equal(ok, false); spec.equal(err, cancelled)
+    end)
+    spec.it('renders complete Gin and generated gRPC relationship paths to business code', function()
+        local root = tmp_root .. '/go_framework_paths'
+        write(root .. '/go.mod', 'module example.test/app\n')
+        write(root .. '/gin/context.go', [[package gin
+type Context struct { handlers []func(*Context); index int }
+func (c *Context) Next() { c.handlers[c.index](c) }
+]])
+        write(root .. '/service_grpc.pb.go', [[package app
+type Request struct {}
+type Reply struct {}
+type GreeterServer interface { Say(*Request) (*Reply, error) }
+type UnimplementedGreeterServer struct {}
+func (UnimplementedGreeterServer) Say(*Request) (*Reply, error) { return nil, nil }
+func Invoke(srv any, req *Request) { srv.(GreeterServer).Say(req) }
+]])
+        write(root .. '/app.go', [[package app
+import "github.com/gin-gonic/gin"
+func Business() {}
+func Handle() { Business() }
+func Setup() { r := gin.New(); r.GET("/", Handle) }
+type Server struct { UnimplementedGreeterServer }
+func (*Server) Say(req *Request) (*Reply, error) { Business(); return nil, nil }
+]])
+        local opts = { lister = 'walk' }
+        local grpc = svc.explore(root, 'Invoke Business', opts)
+        spec.contains(grpc, '## Relationship paths')
+        spec.contains(grpc, 'possible:go-grpc server assertion')
+        spec.contains(grpc, 'Server.Say')
+        local gin = svc.explore(root, 'Context.Next Business', opts)
+        spec.contains(gin, '## Relationship paths')
+        spec.contains(gin, 'possible:go-gin middleware dispatch')
+        spec.contains(gin, 'Handle')
+        svc.forget(root)
+    end)
+end)
+
 return {
     __init = function()
         local failed = spec.finish()

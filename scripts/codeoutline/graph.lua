@@ -659,11 +659,14 @@ function M.query(symbols, opts)
     Q.stats.events = events.stats
     local callback_loops = require('codeoutline.lua_callback_loops').context(symbols, js_context, report)
     Q.stats.callback_loops = callback_loops.stats
+    local go_frameworks = require('codeoutline.go_frameworks').context(symbols, js_context, report)
+    Q.stats.go_frameworks = go_frameworks.stats
     local function context_limits()
         if js_context.include_incomplete then incomplete('include_closure_limit') end
         if js_context.workspace_incomplete then incomplete('js_workspace_analysis_incomplete') end
         if js_context.go_incomplete then incomplete('go_module_analysis_incomplete') end
         if js_context.go_methods_incomplete then incomplete('go_method_set_analysis_incomplete') end
+        if go_frameworks.incomplete then incomplete('go_framework_analysis_incomplete') end
         if js_context.cpp_receivers_incomplete then incomplete('cpp_receiver_analysis_incomplete') end
         if js_context.rust_incomplete then incomplete('rust_resolution_incomplete') end
     end
@@ -768,6 +771,12 @@ function M.query(symbols, opts)
             edges[#edges + 1] = edge.kind
         end
         if callback_loops.incomplete then incomplete('lua_callback_analysis_incomplete') end
+        for _, edge in ipairs(go_frameworks.outgoing(id)) do
+            edges[#edges + 1] = edge.target
+            edges[#edges + 1] = edge.line
+            edges[#edges + 1] = edge.kind
+        end
+        if go_frameworks.incomplete then incomplete('go_framework_analysis_incomplete') end
         for _, i in ipairs(grouped[id] or {}) do
             control.check()
             for _, dst in ipairs(targets(f, i, true) or {}) do
@@ -814,6 +823,10 @@ function M.query(symbols, opts)
         if progress then progress(incoming) end
         if implementations.incomplete then incomplete('implementation_analysis_incomplete') end
         local indirect_incoming = indirect.incoming(wanted)
+        for src, edges in pairs(go_frameworks.incoming(wanted)) do
+            for _, edge in ipairs(edges) do push3(incoming, edge.target, src, edge.line, edge.kind) end
+        end
+        if go_frameworks.incomplete then incomplete('go_framework_analysis_incomplete') end
         for src, edges in pairs(callback_loops.incoming(wanted)) do
             for _, edge in ipairs(edges) do push3(incoming, edge.target, src, edge.line, edge.kind) end
         end

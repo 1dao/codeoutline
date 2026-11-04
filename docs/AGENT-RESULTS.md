@@ -48,7 +48,7 @@ explanations (`evidence_omitted`, `definition_candidates_omitted`,
 Graph limits identify `graph_expansion_limit`, `candidate_scan_limit`,
 `tied_candidate_limit` and `include_closure_limit`. Other incomplete analysis
 identifies the responsible stage, such as `cpp_macro_analysis_incomplete`,
-`go_module_analysis_incomplete`, `go_method_set_analysis_incomplete`,
+`go_module_analysis_incomplete`, `go_method_set_analysis_incomplete`, `go_framework_analysis_incomplete`,
 `cpp_receiver_analysis_incomplete`, `js_workspace_analysis_incomplete`,
 `rust_resolution_incomplete`, `implementation_analysis_incomplete`,
 `automatic_event_analysis_incomplete` and `lua_callback_analysis_incomplete`.

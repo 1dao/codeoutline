@@ -72,3 +72,39 @@ type identities, structural anonymous types, complex factory/assignment flow and
 ambiguous build-tag variants are not inferred. Control-header declarations are
 kept conservative. Empty interfaces are excluded from implementation enumeration.
 This change does not add Go to declared type-hierarchy queries.
+
+## Agent framework paths
+
+Explore, callers and impact queries also derive bounded framework relationships
+from source through the same validated ordinary binding cache:
+
+- `net/http.Handle`/`HandleFunc` and local `NewServeMux` registrations, including
+  Go 1.22 `"METHOD /path"` patterns.
+- Local Gin, Echo, Fiber and Chi router constructors; literal group prefixes;
+  named local/imported functions and supported typed method values as handlers.
+  Gin `Use`, group middleware and the indexed `Context.Next` handler-slice dispatcher connect to
+  registered middleware/handlers as possible execution targets.
+- Generated `*_grpc.pb.go` server assertions connect to server interface methods.
+  Generated server-interface and `Unimplemented...Server` methods connect to
+  matching handwritten methods only when the concrete type actually embeds that
+  service's indexed generated stub. Parameter/result shapes must match, including
+  package-qualified types; unavailable external names retain their import paths.
+
+Paths use `possible:go-route METHOD /path`, `possible:go-middleware`,
+`possible:go-gin middleware dispatch` and `possible:go-grpc ...` labels. Evidence
+includes registration locations. These links do not establish execution order,
+router-instance identity or an actual RPC across processes. Route registrations
+are anchored to their enclosing function; no persistent route nodes are added.
+
+Framework evidence is absent during compact indexing. Each framework query is
+bounded to 64 parsed files, 8 MiB of source, 256 sites per collection, 512 emitted
+links, 512 gRPC candidates, 4096 file-discovery visits and a 1500 ms soft deadline;
+the shared Go method-analysis and source-cache limits also apply. Exhaustion
+reports `go_framework_analysis_incomplete` (or the relevant shared-analysis reason).
+
+Dynamic paths, inline closures, handler factories, routers passed through arbitrary
+variables/parameters, computed registrations, Chi callback groups and full gRPC
+client/server transport inference remain unsupported. Constructor reassignment,
+import shadowing and out-of-scope router bindings are rejected. Gin dispatch
+lists possible registrations across the indexed project, not one runtime engine.
+Framework bridges are agent relationships, not new LSP definition targets.

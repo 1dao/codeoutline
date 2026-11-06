@@ -1,4 +1,4 @@
--- Small, lossless JSON/JSONC editor for MCP entries. No reserialization of
+-- Small, lossless JSON/JSONC editor for MCP entries and editor settings. No reserialization of
 -- surrounding settings: comments, key order and unrelated bytes survive.
 local M = {}
 local function encode(value) return assert(xutils.json_pack(value)) end
@@ -134,6 +134,26 @@ function M.has(text, path)
         node = node.children[key]
     end
     return true
+end
+
+-- Editor settings also allow language-specific override objects. Only inspect
+-- those containers, never unrelated nested objects that happen to use our name.
+function M.remove_editor_settings(text)
+    if text == '' then return text, false end
+    local root, paths = parse(text), {}
+    local function collect(node, parent)
+        for key, child in pairs(node.children) do
+            if key:match('^codeoutline%.') then
+                paths[#paths + 1] = parent and { parent, key } or { key }
+            elseif not parent and key:match('^%[.*%]$') and child.kind == '{' then
+                collect(child, key)
+            end
+        end
+    end
+    collect(root)
+    table.sort(paths, function(a, b) return table.concat(a, '\0') < table.concat(b, '\0') end)
+    for _, path in ipairs(paths) do text = M.json(text, path, {}, true, false) end
+    return text, #paths > 0
 end
 
 -- TOML keeps all unrelated tables verbatim. Reject ambiguous inline/dotted

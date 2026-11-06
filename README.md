@@ -157,9 +157,11 @@ For separate cleanup and package removal, first run `codeoutline uninstall`, the
 The first command stops the service, removes its login entry, user-level Agent MCP
 entries and the VS Code/Cursor/Zed clients. Use `--purge` to also remove
 `~/.codeoutline` caches, updates and logs, or `--service-only` to keep integrations.
+Cleanup also removes `codeoutline.*` settings from VS Code/Cursor user settings
+and named profiles, including language overrides, preserving other settings and comments.
 Use `--project PATH` to also remove MCP registrations in a specific project.
 Close/reload editors to release running LSP processes before deleting package files.
-Other editor profiles, remote installations, custom data directories and original
+Workspace settings, custom editor data directories, remote installations and original
 configuration backups require separate cleanup. npm 7+ has no uninstall hooks;
 running only `npm uninstall` cannot clean integrations or stop the service.
 The package includes a best-effort `preuninstall` compatibility hook for package

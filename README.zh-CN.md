@@ -128,11 +128,13 @@ npm 全局安装可直接运行 `codeoutline remove`：先清理集成和默认�
 
 如需分步操作，先运行 `codeoutline uninstall`，再运行 `npm uninstall -g codeoutline`。
 第一步停止服务、移除自启动项、用户级 Agent MCP 配置及 VS Code/Cursor/Zed 客户端。
+同时清理 VS Code/Cursor 用户设置及命名配置档中的 `codeoutline.*` 配置，
+包括语言专属设置，保留其他设置和注释。
 添加 `--purge` 同时清理 `~/.codeoutline` 下的缓存、更新和日志；
 使用 `--service-only` 则仅移除服务，保留集成。
 添加 `--project PATH` 可同时移除指定项目的 MCP 注册。
 删除包文件前请关闭或重载编辑器，以释放运行中的 LSP 进程。
-其他编辑器配置档、远程安装、自定义数据目录和原始配置备份需单独清理。
+工作区设置、编辑器自定义数据目录、远程安装和原始配置备份需单独清理。
 npm 7+ 不执行卸载钩子，仅运行 `npm uninstall` 不会清理集成或停止服务。
 发布包仍提供 `preuninstall` 兼容钩子，供支持它的包管理器调用；
 仅在全局卸载时尝试清理集成，保留用户数据，并跳过升级及本地安装流程。

@@ -154,6 +154,7 @@ Example: codeoutline editors --editors vscode,cursor
 --port PORT selects the service port (default 19876).
 --project PATH also removes agent configuration and supported usage instructions from that project.
 --service-only keeps agent integrations and editor clients.
+Also removes codeoutline.* settings from VS Code/Cursor user settings and named profiles.
 --purge also deletes default ~/.codeoutline data after cleanup succeeds.
 The npm package remains installed; run npm uninstall -g codeoutline afterward.
 For a single full-cleanup command on global npm installations, use codeoutline remove.
@@ -164,6 +165,7 @@ Example: codeoutline uninstall --project . --purge
 --port PORT selects the service port (default 19876).
 --project PATH also removes agent configuration and supported usage instructions from that project.
 Stops the service, removes startup registration and integrations, and purges ~/.codeoutline.
+Also removes codeoutline.* settings from VS Code/Cursor user settings and named profiles.
 Only after successful cleanup and runtime exit does the launcher run npm uninstall -g codeoutline.
 Cleanup failure keeps the package for retry; npm failure returns a nonzero exit status.
 Requires the global npm launcher; native/local installations should use uninstall instead.

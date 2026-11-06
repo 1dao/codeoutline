@@ -36,16 +36,18 @@ end
 function M.detect()
     local kind, h = platform(), home()
     local vscode, cursor, zed = on_path('code'), on_path('cursor'), on_path('zed') or on_path('zeditor')
-    local zed_data
+    local zed_data, config
     if kind == 'windows' then
         local local_app = os.getenv('LOCALAPPDATA') or h .. '/AppData/Local'
         local program = os.getenv('ProgramFiles') or 'C:/Program Files'
+        config = os.getenv('APPDATA') or h .. '/AppData/Roaming'
         vscode = vscode or first({ local_app .. '/Programs/Microsoft VS Code/bin/code.cmd', program .. '/Microsoft VS Code/bin/code.cmd' })
         cursor = cursor or first({ local_app .. '/Programs/cursor/resources/app/bin/cursor.cmd', program .. '/cursor/resources/app/bin/cursor.cmd' })
         zed = zed or first({ local_app .. '/Programs/Zed/bin/zed.exe', local_app .. '/Programs/Zed/zed.exe',
             program .. '/Zed/bin/zed.exe', program .. '/Zed/zed.exe' })
         zed_data = local_app .. '/Zed'
     elseif kind == 'darwin' then
+        config = h .. '/Library/Application Support'
         for _, dir in ipairs({ '/Applications', h .. '/Applications' }) do
             vscode = vscode or first({ dir .. '/Visual Studio Code.app/Contents/Resources/app/bin/code' })
             cursor = cursor or first({ dir .. '/Cursor.app/Contents/Resources/app/bin/cursor' })
@@ -53,14 +55,15 @@ function M.detect()
         end
         zed_data = h .. '/Library/Application Support/Zed'
     else
+        config = os.getenv('XDG_CONFIG_HOME') or h .. '/.config'
         vscode = vscode or first({ '/usr/share/code/bin/code', '/snap/bin/code' })
         cursor = cursor or first({ '/opt/Cursor/resources/app/bin/cursor', h .. '/.local/bin/cursor' })
         zed = zed or first({ h .. '/.local/bin/zed' })
         zed_data = (os.getenv('XDG_DATA_HOME') or h .. '/.local/share') .. '/zed'
     end
     return {
-        { id = 'vscode', name = 'VS Code', command = vscode, detected = vscode ~= nil, extensions = h .. '/.vscode/extensions' },
-        { id = 'cursor', name = 'Cursor', command = cursor, detected = cursor ~= nil, extensions = h .. '/.cursor/extensions' },
+        { id = 'vscode', name = 'VS Code', command = vscode, detected = vscode ~= nil, extensions = h .. '/.vscode/extensions', user = config .. '/Code/User' },
+        { id = 'cursor', name = 'Cursor', command = cursor, detected = cursor ~= nil, extensions = h .. '/.cursor/extensions', user = config .. '/Cursor/User' },
         { id = 'zed', name = 'Zed', command = zed, data = zed_data, detected = zed ~= nil },
     }
 end
@@ -167,7 +170,7 @@ function M.run(root, options)
     return status
 end
 
--- Remove only our extension, including Zed's per-extension downloaded runtime.
+-- Remove our extension and VS Code/Cursor user settings, including profiles.
 -- Continue with other editors when one editor is unavailable or reports errors.
 function M.remove()
     local status = 0
@@ -181,6 +184,31 @@ function M.remove()
         assert(not exists(target), 'extension directory remains: ' .. target)
     end
     for _, editor in ipairs(M.detect()) do
+        -- Settings cleanup does not require a working editor CLI. Keep errors
+        -- independent so a damaged profile cannot block its peers or extension removal.
+        if editor.user then
+            local paths = { editor.user .. '/settings.json' }
+            for _, entry in ipairs(xutils.list_dir(editor.user .. '/profiles') or {}) do
+                if entry.dir then paths[#paths + 1] = editor.user .. '/profiles/' .. entry.name .. '/settings.json' end
+            end
+            for _, path in ipairs(paths) do
+                local ok, err = pcall(function()
+                    if not exists(path) then return end
+                    local before = read(path)
+                    local after, changed = require('codeoutline.agent_config').remove_editor_settings(before)
+                    if not changed then return end
+                    local temp = assert(xutils.temp_file(assert(path:match('^(.*)/[^/]+$'))))
+                    local saved, reason = pcall(function()
+                        write(temp, after)
+                        assert(read(path) == before, 'editor settings changed; close the editor and retry')
+                        assert(xutils.replace_file(temp, path), 'cannot update editor settings')
+                    end)
+                    if not saved then os.remove(temp); error(reason) end
+                    say('Removed CodeOutline settings from ' .. path)
+                end)
+                if not ok then io.stderr:write('codeoutline: cannot clean ', path, ': ', tostring(err), '\n'); status = 1 end
+            end
+        end
         local ok, err = pcall(function()
             if editor.id == 'zed' then
                 for _, kind in ipairs({ 'installed', 'work', 'staging' }) do

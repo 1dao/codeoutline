@@ -90,6 +90,23 @@ return dofile(os.getenv('CO_TEST_COMMAND'))
 `);
         const cleanup = (...args) => spawnSync(defaultRuntime, [runner, 'LOG_LEVEL=ERROR', 'LOG_FILE=0', 'uninstall', ...args],
             { cwd: temp, env: { ...env, CO_TEST_COMMAND: join(root, 'scripts/codeoutline/command.lua') }, encoding: 'utf8', timeout: 15000 });
+        const config = win ? env.APPDATA : process.platform === 'darwin'
+            ? join(temp, 'Library/Application Support') : env.XDG_CONFIG_HOME;
+        const settings = [join(config, 'Code/User/settings.json'), join(config, 'Cursor/User/settings.json'),
+            join(config, 'Cursor/User/profiles/work/settings.json')];
+        const originalSettings = '\ufeff{\r\n  // keep this comment\r\n  "editor.fontSize": 15,\r\n'
+            + '  "codeoutline.serverPath": "C:/source/old/bin/xnet.exe",\r\n'
+            + '  "codeoutline.serverArguments": ["old.lua", "lsp"],\r\n'
+            + '  "[lua][cpp]": {"codeoutline.enabled": false, "editor.tabSize": 4},\r\n'
+            + '  "other": {"codeoutline.enabled": "keep nested data"},\r\n'
+            + '  "codeoutline.features": {"definition": false},\r\n}\r\n';
+        const expectedSettings = '\ufeff{\r\n  // keep this comment\r\n  "editor.fontSize": 15,\r\n'
+            + '  \r\n  \r\n  "[lua][cpp]": { "editor.tabSize": 4},\r\n'
+            + '  "other": {"codeoutline.enabled": "keep nested data"},\r\n  \r\n}\r\n';
+        for (const path of settings) {
+            await mkdir(join(path, '..'), { recursive: true });
+            await writeFile(path, originalSettings);
+        }
         const mcp = join(temp, '.cursor/mcp.json');
         await mkdir(join(temp, '.cursor'), { recursive: true });
         await writeFile(mcp, JSON.stringify({ keep: true, mcpServers: { other: { command: 'keep' }, codeoutline: { url: 'http://127.0.0.1:19876/mcp' } } }));
@@ -104,11 +121,13 @@ return dofile(os.getenv('CO_TEST_COMMAND'))
         await writeFile(join(temp, '.vscode/extensions/other.extension-1.0.0/package.json'), '{"keep":true}');
         const serviceOnly = cleanup('--service-only');
         assert.equal(serviceOnly.status, 0, serviceOnly.stderr);
+        for (const path of settings) assert.equal(await readFile(path, 'utf8'), originalSettings);
         assert(JSON.parse(await readFile(mcp, 'utf8')).mcpServers.codeoutline);
         assert.equal(await readFile(join(data, 'extensions/work/codeoutline/runtime'), 'utf8'), 'downloaded server');
         const removed = cleanup('--purge');
         assert.equal(removed.status, 0, removed.stdout + removed.stderr);
         assert.match(removed.stdout, /Cleanup completed/);
+        for (const path of settings) assert.equal(await readFile(path, 'utf8'), expectedSettings);
         const remaining = JSON.parse(await readFile(mcp, 'utf8'));
         assert.equal(remaining.keep, true);
         assert.equal(remaining.mcpServers.codeoutline, undefined);
@@ -123,6 +142,16 @@ return dofile(os.getenv('CO_TEST_COMMAND'))
         assert.match(await readFile(log, 'utf8'), /--uninstall-extension/);
         const repeated = cleanup('--purge');
         assert.equal(repeated.status, 0, repeated.stdout + repeated.stderr);
+        for (const path of settings) assert.equal(await readFile(path, 'utf8'), expectedSettings);
+        // Invalid JSONC remains intact, while other profiles still get cleaned.
+        await writeFile(settings[0], '{ broken');
+        await writeFile(settings[1], originalSettings);
+        const brokenSettings = cleanup('--purge');
+        assert.notEqual(brokenSettings.status, 0);
+        assert.match(brokenSettings.stderr, /cannot clean .*settings.json/);
+        assert.equal(await readFile(settings[0], 'utf8'), '{ broken');
+        assert.equal(await readFile(settings[1], 'utf8'), expectedSettings);
+        await writeFile(settings[0], '{}');
         // A broken agent profile is reported, peers are still cleaned, and
         // purge must not erase recovery data after an incomplete cleanup.
         await mkdir(join(temp, '.gemini'), { recursive: true });

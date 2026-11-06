@@ -3048,6 +3048,27 @@ spec.describe('query-owned Cargo packages', function()
         for path, source in pairs(files) do records[path] = ci.parse(path, source, { ordinary_bindings = true }) end
         return graph.build({ files = records, root = root })
     end
+    spec.it('binds Self calls to the lexical impl with and without Cargo configuration', function()
+        local root = tmp_root .. '/rust_self_impl'
+        write(root .. '/Cargo.toml', '[package]\nname="self-impl"\n')
+        local source = 'mod left { struct Store<T> {} impl<T> Store<T> { fn save() {} fn LeftRun() { Self::save(); } } }\n'
+            .. 'mod right { struct Store {} impl Store { fn save() {} fn RightRun() { Self::save(); } } }\n'
+            .. 'trait Save { fn save(); } struct Other {} impl Save for Other { fn save() {} fn TraitRun() { Self::save(); } }\n'
+            .. 'struct Empty {} impl Empty { fn MissingRun() { Self::save(); } }\n'
+            .. 'fn OutsideRun() { Self::save(); }'
+        for _, project in ipairs({ false, root }) do
+            local G = build({ ['src/lib.rs'] = source }, project or nil)
+            local Q = graph.query(G)
+            for _, name in ipairs({ 'LeftRun', 'RightRun', 'TraitRun' }) do
+                local id = G.by_name[name][1]
+                spec.equal(#Q.out[id], graph.EDGE)
+                local target = G.nodes[Q.out[id][1]]
+                spec.equal(target.name, 'save'); spec.equal(target.parent, G.nodes[id].parent)
+            end
+            spec.equal(#Q.out[G.by_name.MissingRun[1]], 0)
+            spec.equal(#Q.out[G.by_name.OutsideRun[1]], 0)
+        end
+    end)
     spec.it('resolves path dependencies, renamed crates and custom library entry names without sibling guesses', function()
         local root = tmp_root .. '/cargo_paths'
         write(root .. '/app/Cargo.toml', '[package]\nname="app"\n[dependencies]\nselected={path="../actual", package="actual-package"}\n'

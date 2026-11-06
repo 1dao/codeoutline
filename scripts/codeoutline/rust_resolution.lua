@@ -228,9 +228,34 @@ function M.path(G, f, path, ctx, scope)
     return cargo.guard(ctx, walk, G, f, path, ctx, scope or '', {}, 0)
 end
 function M.resolve(G, f, src, name, recv, evidence, ctx)
-    if not cargo.owner(G, f, ctx) then return ctx.rust_incomplete and {} or nil, ctx.rust_error end
     if evidence == 'rust:member' then return nil end
     local path = evidence and evidence:match('^rust:path:(.*)$') or (recv and recv .. '::' .. name or name)
+    if path:match('^Self::') then
+        -- Self belongs to the lexical impl, not to a same-named type elsewhere.
+        -- Use declaration parents rather than the parser's shortened type name
+        -- (which omits generic arguments and module prefixes).
+        local node = src and G.nodes[src]
+        local parent = node and node.parent
+        while parent do
+            local owner = G.files[f].nodes[parent]
+            if owner.kind == 'impl' then
+                local member = path:match('^Self::([%w_]+)$')
+                local ids = {}
+                for n, candidate in ipairs(nodes(G, f, ctx)) do
+                    if member and candidate.parent == parent and candidate.name == member
+                        and (candidate.kind == 'method' or candidate.kind == 'constant') then
+                        ids[#ids + 1] = G.id_of[f][n]
+                    end
+                end
+                return ids, #ids == 0 and 'Self member is not declared in the enclosing impl' or 'Rust lexical impl binding'
+            end
+            -- A trait's Self is not a concrete impl receiver.
+            if owner.kind == 'interface' then break end
+            parent = owner.parent
+        end
+        return {}, 'Self has no enclosing impl'
+    end
+    if not cargo.owner(G, f, ctx) then return ctx.rust_incomplete and {} or nil, ctx.rust_error end
     local found, reason = M.path(G, f, path, ctx, scope_of(G, f, src))
     return found and found.ids or {}, reason or 'Cargo crate/module target is not indexed or visible'
 end

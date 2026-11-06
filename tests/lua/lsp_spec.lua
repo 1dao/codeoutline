@@ -1066,6 +1066,28 @@ Manager* Factory();
         spec.equal(#found, 1); spec.equal(found[1].range.start.line, 2)
         navigation.close('js-typed')
     end)
+    spec.it('jumps from Self calls to the enclosing impl in Cargo projects and standalone files', function()
+        local prefix = 'rust-self-definition/'
+        assert(xutils.mkdir_p(nav_root .. '/' .. prefix .. 'src'))
+        local source = 'mod left { struct Store<T> {} impl<T> Store<T> {\n'
+            .. 'fn save() {}\nfn run() { Self::save(); }\n} }\n'
+            .. 'mod right { struct Store {} impl Store {\n'
+            .. 'fn save() {}\nfn run() { Self::save(); }\n} }\n'
+            .. 'struct Empty {} impl Empty { fn run() { Self::save(); } }\n'
+        nav_write(prefix .. 'src/lib.rs', source)
+        for _, cargo in ipairs({ false, true }) do
+            if cargo then nav_write(prefix .. 'Cargo.toml', '[package]\nname="self-definition"\n') end
+            service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+            local doc = docs.read(nav_root .. '/' .. prefix .. 'src/lib.rs')
+            for _, case in ipairs({ { 2, 1 }, { 6, 5 }, { 8, false } }) do
+                local line = doc.source:match('^' .. string.rep('[^\n]*\n', case[1]) .. '([^\n]*)')
+                local result = nav({ method = 'lsp_definition', uri = doc.uri,
+                    position = { line = case[1], character = assert(line:find('Self::save', 1, true)) + 5 } })
+                spec.equal(#result, case[2] and 1 or 0)
+                if case[2] then spec.equal(result[1].range.start.line, case[2]); spec.equal(range_text(prefix .. 'src/lib.rs', result[1].range), 'save') end
+            end
+        end
+    end)
     spec.it('shares Cargo package aliases, module paths, references and completion after manifest and draft changes', function()
         local prefix = 'cargo-workspace-lsp/'
         for _, path in ipairs({ 'app/src', 'first', 'second' }) do assert(xutils.mkdir_p(nav_root .. '/' .. prefix .. path)) end

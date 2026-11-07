@@ -10,3 +10,4 @@
 /.update-test/
 /tests/__pycache__/
 .codeoutline.json
+/docs

@@ -1,0 +1,788 @@
+local documents = require('codeoutline.query.documents')
+local paths = require('codeoutline.shared.path')
+local text = require('codeoutline.shared.text')
+local M = { MAX_HEADER = 16384, MAX_MESSAGE = 4194304, MAX_ROOTS = 16,
+    MAX_DOCUMENTS = 128, MAX_DRAFT_BYTES = 33554432, MAX_PENDING = 64,
+    MAX_QUERY = 4096, MAX_SYMBOLS = 200, POLL_MS = 1000, WARM_DELAY_MS = 150,
+    LIMIT_WARNING_MS = 10000 }
+local null = xutils.json_null
+local function array(t) return setmetatable(t or {}, xutils.json_array_mt) end
+local function object(t) return type(t) == 'table' and getmetatable(t) ~= xutils.json_array_mt end
+local function valid_id(id) return type(id) == 'string' or (type(id) == 'number' and id % 1 == 0) end
+local kinds = { namespace = 3, impl = 3, class = 5, method = 6, property = 7, field = 8,
+    constructor = 9, destructor = 9, enum = 10, interface = 11, ['function'] = 12, prototype = 12,
+    variable = 13, constant = 14, enum_member = 22, struct = 23, union = 23, record = 23,
+    typedef = 13, macro = 12, annotation_type = 11 }
+
+function M.frame(message)
+    local body = xutils.json_pack(message)
+    return 'Content-Length: ' .. #body .. '\r\n\r\n' .. body
+end
+
+function M.reader()
+    local self = { buffer = '', length = nil }
+    function self:feed(data, accept)
+        self.buffer = self.buffer .. data
+        while true do
+            if not self.length then
+                local stop = self.buffer:find('\r\n\r\n', 1, true)
+                assert((stop or #self.buffer) <= M.MAX_HEADER, 'LSP header too large')
+                if not stop then return end
+                local header = self.buffer:sub(1, stop - 1)
+                local length
+                for line in (header .. '\r\n'):gmatch('(.-)\r\n') do
+                    local name, value = line:match('^([%w%-]+):%s*(.-)%s*$')
+                    assert(name, 'invalid LSP header')
+                    if name:lower() == 'content-length' then
+                        assert(not length and value:match('^%d+$'), 'invalid Content-Length')
+                        length = tonumber(value)
+                    elseif name:lower() == 'content-type' then
+                        local charset = value:lower():match('charset%s*=%s*([^;%s]+)')
+                        assert(not charset or charset == 'utf-8' or charset == 'utf8', 'unsupported LSP charset')
+                    end
+                end
+                assert(length and length <= M.MAX_MESSAGE, 'missing or excessive Content-Length')
+                self.length, self.buffer = length, self.buffer:sub(stop + 4)
+            end
+            if #self.buffer < self.length then return end
+            local body = self.buffer:sub(1, self.length)
+            self.buffer, self.length = self.buffer:sub(self.length + 1), nil
+            accept(body)
+        end
+    end
+    function self:complete() return self.length == nil and self.buffer == '' end
+    return self
+end
+
+local function kind(node) return kinds[node.kind] or 13 end
+M.symbol_kind = kind
+local function location(doc, node) return { uri = doc.uri, range = doc:range(node.name_start, node.name_end) } end
+
+function M.document_symbols(doc, hierarchical)
+    local rec, result, entries = doc:parse(), array(), {}
+    for i, node in ipairs(rec.nodes) do
+        local item
+        if hierarchical then
+            item = { name = node.name, detail = node.sig, kind = kind(node),
+                range = doc:range(node.start_byte, node.end_byte), selectionRange = doc:range(node.name_start, node.name_end) }
+        else item = { name = node.name, kind = kind(node), location = location(doc, node),
+            containerName = node.parent and rec.nodes[node.parent].qualified or nil } end
+        entries[i] = item
+        local pn = node.parent and rec.nodes[node.parent]
+        if hierarchical and pn and entries[node.parent]
+            and pn.start_byte <= node.start_byte and node.end_byte <= pn.end_byte then
+            local parent = entries[node.parent]
+            parent.children = parent.children or array()
+            parent.children[#parent.children + 1] = item
+            -- Logical parents of out-of-line methods are not lexical containers.
+        else result[#result + 1] = item end
+    end
+    return result
+end
+
+-- initializationOptions.features may disable any of these, e.g. in assistant mode
+-- next to another language server; disabled features are not advertised.
+M.FEATURES = { 'documentSymbol', 'workspaceSymbol', 'definition', 'implementation', 'hover', 'references', 'callHierarchy', 'completion', 'signatureHelp' }
+local feature_of = { ['textDocument/documentSymbol'] = 'documentSymbol', ['workspace/symbol'] = 'workspaceSymbol',
+    ['textDocument/definition'] = 'definition', ['textDocument/implementation'] = 'implementation', ['textDocument/hover'] = 'hover',
+    ['textDocument/references'] = 'references', ['textDocument/prepareCallHierarchy'] = 'callHierarchy',
+    ['callHierarchy/incomingCalls'] = 'callHierarchy', ['callHierarchy/outgoingCalls'] = 'callHierarchy',
+    ['textDocument/completion'] = 'completion', ['textDocument/signatureHelp'] = 'signatureHelp' }
+local sessions = 0
+
+function M.new(config, emit, submit, cancel, stop, await_worker)
+    config = config or {}
+    sessions = sessions + 1
+    local self = { state = 'new', documents = {}, roots = {}, pending = {}, scans = {}, ready = {},
+        document_bytes = 0, document_count = 0, session = config.session or ('lsp-' .. sessions),
+        synced = {}, features = {} }
+    local trace = require('codeoutline.protocol.lsp_trace').open(os.getenv('CODEOUTLINE_LSP_TRACE'), self.session)
+    if trace then
+        local transport_emit = emit
+        emit = function(msg) trace:message('send', msg); transport_emit(msg) end
+        trace:record('start', { source = debug.getinfo(1, 'S').source })
+    end
+    local progress, server_pending, next_id, next_poll = {}, {}, 0, 0
+    local navigation_flights, navigation_epoch = {}, 0
+    -- Clients also query definitions while restoring focus or showing links.
+    -- Preserve every incomplete report in the log without stacking popups.
+    local limit_warnings = {}
+    local warm_pending, warm_active, warm_done, warm_pump, focused_uri
+    local handlers = {}
+    local function error_response(id, code, message)
+        emit({ jsonrpc = '2.0', id = id == nil and null or id, error = { code = code, message = message } })
+    end
+    local function reply(id, value) emit({ jsonrpc = '2.0', id = id, result = value == nil and null or value }) end
+    local function progress_value(job, value)
+        emit({ jsonrpc = '2.0', method = '$/progress', params = { token = job.token, value = value } })
+    end
+    function self:begin_index(root)
+        if not self.work_done or self.state ~= 'ready' or progress[root] then return end
+        next_id = next_id + 1
+        local id = 'codeoutline-progress-' .. next_id
+        local job = { token = id, root = root }
+        progress[root], server_pending[id] = job, job
+        emit({ jsonrpc = '2.0', id = id, method = 'window/workDoneProgress/create', params = { token = id } })
+    end
+    function self:end_index(root, message)
+        local job = progress[root]
+        if not job then return end
+        job.done, job.message = true, message
+        if job.started then
+            progress_value(job, { kind = 'end', message = message })
+            progress[root] = nil
+        end
+    end
+    local function root_for(path)
+        for _, root in ipairs(self.roots) do if paths.contains(root, path) then return root end end
+    end
+    -- Clients may name a workspace through a symlink, junction or short name
+    -- (/var for /private/var, RUNNER~1), while roots and the index use the
+    -- canonical spelling. Paths are mapped at this boundary: the worker sees
+    -- canonical paths and URIs, and results return in the client's spelling.
+    local aliases = {}
+    local function rebase(path, from, to)
+        if not paths.contains(from, path) then return nil end
+        local rest = path:sub(#from + 1):gsub('^/', '')
+        if rest == '' then return to end
+        return (to:sub(-1) == '/' and to or to .. '/') .. rest
+    end
+    local function server_path(path)
+        for _, alias in ipairs(aliases) do
+            local mapped = rebase(path, alias.client, alias.root)
+            if mapped then return mapped end
+        end
+        return path
+    end
+    local function server_uri(uri)
+        local path = #aliases > 0 and documents.path(uri)
+        local mapped = path and server_path(path)
+        return mapped and mapped ~= path and documents.uri(mapped) or uri
+    end
+    local function client_uri(uri)
+        local path = documents.path(uri)
+        for _, alias in ipairs(aliases) do
+            local mapped = path and rebase(path, alias.root, alias.client)
+            if mapped then return documents.uri(mapped) end
+        end
+        return uri
+    end
+    -- Rewrites result URIs in place; call hierarchy data stays canonical.
+    local function to_client(value)
+        if #aliases == 0 or type(value) ~= 'table' then return value end
+        for key, item in pairs(value) do
+            if key == 'uri' and type(item) == 'string' then value[key] = client_uri(item)
+            elseif key ~= 'data' then to_client(item) end
+        end
+        return value
+    end
+    local function document_path(uri)
+        local path = documents.path(uri)
+        return path and server_path(path)
+    end
+    local function cancel_warm()
+        local job = warm_active
+        if not job then return end
+        warm_active = nil
+        cancel(job.id)
+        for uri, version in pairs(job.sent or {}) do
+            if self.synced[uri] == version then self.synced[uri] = nil end
+        end
+    end
+    local function navigation_enabled()
+        for name, value in pairs(self.features) do
+            if value and name ~= 'documentSymbol' and name ~= 'workspaceSymbol' then return true end
+        end
+        return false
+    end
+    local function schedule_warm(uri, focused, delay)
+        if not navigation_enabled() then return end
+        if focused then focused_uri = uri end
+        if focused_uri and self.documents[focused_uri] and focused_uri ~= uri then return end
+        local doc = self.documents[uri]
+        if not doc then return end
+        for _, job in pairs({ warm_done, warm_active, warm_pending }) do
+            if job.uri == uri and job.version == doc.version and job.epoch == navigation_epoch then return end
+        end
+        if warm_active then cancel_warm() end
+        warm_pending = { uri = uri, version = doc.version, epoch = navigation_epoch,
+            due = xtimer.now_ms() + (delay or M.WARM_DELAY_MS) }
+    end
+    local function scan(root, hints)
+        local existing = self.scans[root]
+        if existing then
+            for _, path in ipairs(hints or {}) do existing.hints[path] = true end
+            return
+        end
+        local job = { hints = {} }
+        self.scans[root] = job
+        if not self.ready[root] then self:begin_index(root) end
+        local id, err = submit({ method = 'lsp_refresh', projectPath = root, allowedRoots = self.roots,
+            paths = hints, prepare_navigation = navigation_enabled() }, function(ok, result)
+            if self.scans[root] ~= job then return end
+            self.scans[root] = nil
+            self.ready[root] = ok or nil
+            self:end_index(root, ok and 'Ready' or tostring(result))
+            if not ok then
+                emit({ jsonrpc = '2.0', method = 'window/logMessage', params = { type = 1, message = tostring(result) } })
+            end
+            local pending = {}
+            for path in pairs(job.hints) do pending[#pending + 1] = path end
+            if #pending > 0 and self.state == 'ready' then scan(root, pending) end
+        end)
+        job.id = id
+        if not id then self.scans[root] = nil; self:end_index(root, err) end
+    end
+    function self:poll()
+        if self.state ~= 'ready' then return end
+        if warm_pump then warm_pump() end
+        if warm_active or next(self.pending) or xtimer.now_ms() < next_poll then return end
+        next_poll = xtimer.now_ms() + M.POLL_MS
+        for _, root in ipairs(self.roots) do scan(root) end
+    end
+    local function set_roots(folders)
+        local roots, spelled = {}, {}
+        assert(type(folders) == 'table' and #folders <= M.MAX_ROOTS, 'too many workspace folders')
+        for _, folder in ipairs(folders) do
+            local path = documents.path(folder.uri)
+            local root = path and paths.canonical(path)
+            assert(root, 'workspace folder must be an existing local directory')
+            roots[#roots + 1] = root
+            if paths.key(path) ~= paths.key(root) then spelled[#spelled + 1] = { client = path, root = root } end
+        end
+        table.sort(roots, function(a, b) return #a < #b or (#a == #b and a < b) end)
+        -- The longest client spelling wins when aliases nest.
+        table.sort(spelled, function(a, b) return #a.client > #b.client end)
+        aliases = spelled
+        self.roots = {}
+        for _, root in ipairs(roots) do
+            if not root_for(root) then self.roots[#self.roots + 1] = root end
+        end
+        self.folders = folders
+        local retained = {}
+        for _, root in ipairs(self.roots) do retained[root] = true end
+        for root, job in pairs(self.scans) do
+            if not retained[root] then cancel(job.id); self.scans[root] = nil; self:end_index(root, 'Workspace removed') end
+        end
+        for root in pairs(self.ready) do if not retained[root] then self.ready[root] = nil end end
+        if self.state == 'ready' then next_poll = 0; self:poll() end
+    end
+    local function document(params)
+        assert(object(params.textDocument) and type(params.textDocument.uri) == 'string', 'document URI required')
+        local uri = params.textDocument.uri
+        local doc = self.documents[uri]
+        if doc then return doc end
+        local path = document_path(uri)
+        assert(path and root_for(path), 'document is outside the workspace')
+        local canonical = xutils.realpath(path)
+        assert(canonical and root_for(paths.normalize(canonical)), 'document is outside the workspace')
+        doc = documents.read(canonical)
+        if doc then doc.uri = uri end
+        return doc
+    end
+    local function cancel_pending(id, silent)
+        local job = self.pending[id]
+        if trace then trace:record('cancel', { id = id, pending = job ~= nil, silent = silent or false }) end
+        if job then
+            self.pending[id] = nil
+            if job.flight then
+                local flight = job.flight
+                flight.waiters[id] = nil
+                if not next(flight.waiters) then
+                    if navigation_flights[flight.key] == flight then navigation_flights[flight.key] = nil end
+                    cancel(flight.id)
+                end
+            else cancel(job.id) end
+            if not silent then error_response(id, -32800, 'Request cancelled') end
+        end
+    end
+    local function cancel_completions(uri)
+        local ids = {}
+        for id, job in pairs(self.pending) do
+            if job.method == 'lsp_completion' and job.uri == uri then ids[#ids + 1] = id end
+        end
+        for _, id in ipairs(ids) do cancel_pending(id) end
+    end
+    function self:close()
+        if self.state == 'closed' then return end
+        self.state = 'closed'
+        warm_pending = nil; cancel_warm()
+        -- The transport may already be disconnected. Cancel worker jobs without
+        -- writing responses into a pipe the editor has stopped reading.
+        for id in pairs(self.pending) do cancel_pending(id, true) end
+        for _, job in pairs(self.scans) do cancel(job.id) end
+        if next(self.synced) or self.worker_session then submit({ method = 'lsp_close', session = self.session }, function() end) end
+        self.scans, self.documents, self.ready = {}, {}, {}
+        progress, server_pending = {}, {}
+        if trace then trace:record('close'); trace:close() end
+    end
+    handlers.initialize = function(id, params)
+        assert(self.state == 'new', 'server already initialized')
+        local folders = params.workspaceFolders
+        if folders == null or folders == nil then
+            local uri = params.rootUri
+            if uri == null or uri == nil then
+                local root = params.rootPath ~= null and params.rootPath or config.project
+                uri = root and documents.uri(assert(paths.canonical(root)))
+            end
+            folders = uri and { { uri = uri } } or {}
+        end
+        set_roots(folders)
+        local td = (params.capabilities or {}).textDocument or {}
+        local window = (params.capabilities or {}).window or {}
+        self.work_done = window.workDoneProgress == true
+        self.hierarchical = td.documentSymbol and td.documentSymbol.hierarchicalDocumentSymbolSupport == true
+        local options = object(params.initializationOptions) and params.initializationOptions.features
+        assert(options == nil or options == false or object(options), 'initializationOptions.features must be an object')
+        for _, name in ipairs(M.FEATURES) do self.features[name] = not options or options[name] ~= false end
+        -- Extra C/C++ include directories searched before the detected system ones.
+        local includes = object(params.initializationOptions) and params.initializationOptions.includePaths or nil
+        assert(includes == nil or (type(includes) == 'table' and #includes <= M.MAX_ROOTS * 4),
+            'initializationOptions.includePaths must be an array')
+        self.include_paths = {}
+        for _, dir in ipairs(includes or {}) do
+            assert(type(dir) == 'string' and dir ~= '' and not dir:find('%z'), 'include paths must be strings')
+            self.include_paths[#self.include_paths + 1] = dir
+        end
+        self.state = 'initialized'
+        local f = self.features
+        reply(id, { capabilities = { positionEncoding = 'utf-16',
+            textDocumentSync = { openClose = true, change = 1, save = { includeText = false } },
+            documentSymbolProvider = f.documentSymbol or nil, workspaceSymbolProvider = f.workspaceSymbol or nil,
+            definitionProvider = f.definition or nil, implementationProvider = f.implementation or nil, hoverProvider = f.hover or nil,
+            referencesProvider = f.references or nil, callHierarchyProvider = f.callHierarchy or nil,
+            completionProvider = f.completion and { triggerCharacters = { '.', ':', '>' }, resolveProvider = false } or nil,
+            signatureHelpProvider = f.signatureHelp and { triggerCharacters = { '(', ',' }, retriggerCharacters = { ')' } } or nil,
+            workspace = { workspaceFolders = { supported = true, changeNotifications = true } } },
+            serverInfo = { name = 'codeoutline', version = require('codeoutline.version') } })
+    end
+    handlers.initialized = function()
+        if self.state == 'initialized' then self.state = 'ready'; self:poll() end
+    end
+    handlers.shutdown = function(id)
+        self.state = 'shutdown'
+        warm_pending = nil; cancel_warm()
+        for request_id in pairs(self.pending) do cancel_pending(request_id) end
+        for _, job in pairs(self.scans) do cancel(job.id) end
+        self.scans = {}
+        reply(id, nil)
+    end
+    handlers['textDocument/didOpen'] = function(_, params)
+        local td = assert(params.textDocument, 'textDocument required')
+        assert(type(td.version) == 'number' and td.version % 1 == 0, 'invalid document version')
+        assert(not self.documents[td.uri], 'document already open')
+        local doc = documents.new(td.uri, td.text, td.version, td.languageId)
+        assert(self.document_count < M.MAX_DOCUMENTS and self.document_bytes + #doc.source <= M.MAX_DRAFT_BYTES, 'open document limit reached')
+        self.documents[td.uri] = doc
+        self.document_count, self.document_bytes = self.document_count + 1, self.document_bytes + #doc.source
+        schedule_warm(td.uri)
+    end
+    handlers['textDocument/didChange'] = function(_, params)
+        local td = assert(params.textDocument, 'textDocument required')
+        local doc = assert(self.documents[td.uri], 'document is not open')
+        assert(type(td.version) == 'number' and td.version % 1 == 0 and td.version > doc.version, 'stale document version')
+        local source = doc.source
+        assert(type(params.contentChanges) == 'table' and #params.contentChanges > 0, 'contentChanges required')
+        for _, change in ipairs(params.contentChanges) do
+            assert(change.range == nil and type(change.text) == 'string', 'server requires full document synchronization')
+            source = change.text
+        end
+        local updated = documents.new(td.uri, source, td.version, doc.language)
+        assert(self.document_bytes - #doc.source + #updated.source <= M.MAX_DRAFT_BYTES, 'open document limit reached')
+        self.documents[td.uri] = updated
+        self.document_bytes = self.document_bytes - #doc.source + #updated.source
+        cancel_completions(server_uri(td.uri))
+        schedule_warm(td.uri, false, 500)
+    end
+    handlers['textDocument/didClose'] = function(_, params)
+        local uri = params.textDocument.uri
+        cancel_completions(server_uri(uri))
+        if warm_pending and warm_pending.uri == uri then warm_pending = nil end
+        if warm_active and warm_active.uri == uri then cancel_warm() end
+        if focused_uri == uri then focused_uri = nil end
+        local doc = self.documents[uri]
+        if doc then
+            self.document_count, self.document_bytes = self.document_count - 1, self.document_bytes - #doc.source
+            self.documents[uri] = nil
+            self.synced[uri] = nil
+        end
+    end
+    local function hint(uri)
+        local path = document_path(uri)
+        local root = path and root_for(path)
+        if root then scan(root, { path }) end
+    end
+    handlers['textDocument/didSave'] = function(_, params) hint(params.textDocument.uri) end
+    handlers['workspace/didChangeWatchedFiles'] = function(_, params)
+        assert(type(params.changes) == 'table', 'changes required')
+        for _, change in ipairs(params.changes) do hint(change.uri) end
+    end
+    handlers['workspace/didChangeWorkspaceFolders'] = function(_, params)
+        local folders, removed = {}, {}
+        for _, folder in ipairs(params.event.removed) do removed[folder.uri] = true end
+        for _, folder in ipairs(self.folders) do if not removed[folder.uri] then folders[#folders + 1] = folder end end
+        for _, folder in ipairs(params.event.added) do folders[#folders + 1] = folder end
+        set_roots(folders)
+    end
+    handlers['textDocument/documentSymbol'] = function(id, params)
+        assert(id ~= nil, 'symbol query must be a request')
+        local doc = document(params)
+        reply(id, doc and M.document_symbols(doc, self.hierarchical) or array())
+        schedule_warm(params.textDocument.uri)
+    end
+    handlers['codeoutline/visibleDocument'] = function(id, params)
+        assert(id == nil, 'visibleDocument must be a notification')
+        local td = params.textDocument
+        assert(object(td) and type(td.uri) == 'string', 'document URI required')
+        local doc = self.documents[td.uri]
+        if doc and (td.version == nil or td.version == doc.version) then schedule_warm(td.uri, true) end
+    end
+    -- Callback transports remain usable by embedders/tests. Production LSP
+    -- supplies an RPC transport; both expose the same yielding interface.
+    await_worker = await_worker or function(req, started)
+        local co = assert(coroutine.running())
+        local waiting, completed, outcome, value = false, false, nil, nil
+        local id, err = submit(req, function(ok, result)
+            completed, outcome, value = true, ok, result
+            if waiting then assert(coroutine.resume(co)) end
+        end)
+        if not id then return false, err end
+        started(id)
+        if not completed then waiting = true; coroutine.yield() end
+        return outcome, value
+    end
+    -- Each query owns a coroutine; cancelled/replaced requests discard replies.
+    local function request(id, req, started, key)
+        cancel_warm()
+        if req.method == 'lsp_completion' then cancel_completions(req.uri) end
+        if warm_pending and req.uri == server_uri(warm_pending.uri) then warm_pending = nil end
+        local count = 0
+        for _ in pairs(self.pending) do count = count + 1 end
+        assert(count < M.MAX_PENDING, 'too many pending requests')
+        local job = { coroutine = coroutine.running(), method = req.method, uri = req.uri }
+        local started_ms = trace and xtimer.now_ms()
+        if trace then trace:record('query', { id = id, method = req.method, uri = req.uri,
+            position = req.position, epoch = navigation_epoch, shared = key and navigation_flights[key] ~= nil or false }) end
+        self.pending[id] = job
+        local called, ok, result
+        local flight = key and navigation_flights[key]
+        if flight then
+            job.flight, flight.waiters[id] = flight, job
+            coroutine.yield()
+            called, ok, result = true, job.ok, job.result
+        else
+            if key then
+                flight = { key = key, waiters = { [id] = job } }
+                job.flight, navigation_flights[key] = flight, flight
+            end
+            called, ok, result = pcall(await_worker, req, function(job_id)
+                job.id = job_id
+                if flight then flight.id = job_id end
+                if started then started() end
+            end)
+            if flight then
+                if navigation_flights[key] == flight then navigation_flights[key] = nil end
+                local waiters = flight.waiters
+                flight.waiters = {}
+                for waiter_id, waiter in pairs(waiters) do
+                    if waiter ~= job and self.pending[waiter_id] == waiter then
+                        if called then waiter.ok, waiter.result = ok, result
+                        else waiter.ok, waiter.result = false, ok end
+                        local resumed, err = coroutine.resume(waiter.coroutine)
+                        if not resumed then
+                            self.pending[waiter_id] = nil
+                            error_response(waiter_id, -32603, tostring(err))
+                        end
+                    end
+                end
+            end
+        end
+        if not called then result, ok = ok, false end
+        -- Even a cancelled request may fail before its drafts reach the worker.
+        if not ok and req.changed then self.synced = {} end
+        if self.pending[id] ~= job then return nil, false end
+        self.pending[id] = nil
+        if trace then trace:record('query_done', { id = id, method = req.method,
+            ms = xtimer.now_ms() - started_ms, ok = ok,
+            incomplete = type(result) == 'table' and result.incomplete or false }) end
+        if not ok then
+            error_response(id, -32603, tostring(result))
+            return nil, false
+        end
+        return result, true
+    end
+    handlers['workspace/symbol'] = function(id, params)
+        assert(id ~= nil, 'symbol query must be a request')
+        assert(type(params.query) == 'string' and #params.query <= M.MAX_QUERY, 'invalid symbol query')
+        local drafts, exclude, result = {}, {}, array()
+        for _, doc in pairs(self.documents) do
+            local path = doc.path and server_path(doc.path)
+            if path and root_for(path) then
+                drafts[#drafts + 1] = doc
+                exclude[paths.key(path)] = true
+            end
+        end
+        table.sort(drafts, function(a, b) return a.uri < b.uri end)
+        local needle = params.query:lower()
+        for _, doc in ipairs(drafts) do
+            for _, node in ipairs(doc:parse().nodes) do
+                if #result < M.MAX_SYMBOLS and node.qualified:lower():find(needle, 1, true) then
+                    result[#result + 1] = { name = node.name, kind = kind(node), location = location(doc, node),
+                        containerName = node.qualified ~= node.name and node.qualified or nil }
+                end
+            end
+        end
+        for _, root in ipairs(self.roots) do
+            if not self.ready[root] then reply(id, result); return end
+        end
+        local symbols, ok = request(id, { method = 'lsp_symbols', roots = self.roots, exclude = exclude,
+            query = params.query, limit = M.MAX_SYMBOLS - #result })
+        if not ok then return end
+        for _, symbol in ipairs(to_client(symbols)) do result[#result + 1] = symbol end
+        reply(id, result)
+    end
+    -- Navigation runs in the worker against the session's drafts: every request
+    -- carries the open set and the text of versions the worker has not seen.
+    local function drafts(req, only)
+        self.worker_session = true
+        local open, changed, sent = {}, {}, {}
+        for uri, doc in pairs(self.documents) do
+            if doc.path and root_for(server_path(doc.path)) then
+                local key = server_uri(uri)
+                open[key] = doc.version
+                if self.synced[uri] ~= doc.version and (not only or uri == only) then
+                    changed[key] = { source = doc.source, version = doc.version, language = doc.language }
+                    sent[uri] = doc.version
+                end
+            end
+        end
+        req.session, req.open, req.changed = self.session, open, changed
+        req.includePaths = self.include_paths
+        return sent
+    end
+    warm_pump = function()
+        if not warm_pending or warm_active or next(self.pending) or next(self.scans)
+            or xtimer.now_ms() < warm_pending.due then return end
+        local uri = warm_pending.uri
+        local doc = self.documents[uri]
+        local root = doc and doc.path and root_for(server_path(doc.path))
+        if not root then warm_pending = nil; return end
+        if not self.ready[root] then return end
+        warm_pending = nil
+        if #doc.source > 1048576 then return end
+        local req = { method = 'lsp_warm', root = root, uri = server_uri(uri) }
+        local job = { uri = uri, version = doc.version, epoch = navigation_epoch, sent = drafts(req, uri) }
+        warm_active = job
+        local id = submit(req, function(ok)
+            if warm_active ~= job then return end
+            job.failed = not ok
+            if not ok then cancel_warm()
+            else
+                for changed, version in pairs(job.sent) do self.synced[changed] = version end
+                warm_done, warm_active, job.sent = job, nil, nil
+            end
+        end)
+        job.id = id
+        if id and not job.failed then
+            for changed, version in pairs(job.sent or {}) do self.synced[changed] = version end
+        elseif warm_active == job then warm_active = nil end
+    end
+    local function navigate(id, req, finish, key)
+        assert(id ~= nil, 'navigation must be a request')
+        cancel_warm()
+        local sent = drafts(req)
+        local value, ok = request(id, req, function()
+            -- Record submission before yielding so subsequent requests send only
+            -- newer drafts. The worker applies drafts even to cancelled jobs.
+            for uri, version in pairs(sent) do self.synced[uri] = version end
+        end, key)
+        if not ok then return end
+        if value.error then error_response(id, -32803, value.error); return end
+        if value.incomplete then
+            if trace then trace:record('limit', { id = id, method = req.method, uri = req.uri,
+                position = req.position, epoch = navigation_epoch }) end
+            local message = req.method == 'lsp_definition'
+                and 'CodeOutline: definition lookup reached a candidate, source or visibility limit; some definitions may be omitted'
+                or req.method == 'lsp_references'
+                and 'CodeOutline: results were truncated; too many matching references'
+                or 'CodeOutline: lookup reached a query limit; some results may be omitted'
+            local now, previous = xtimer.now_ms(), limit_warnings[message]
+            local show = not previous or now - previous >= M.LIMIT_WARNING_MS
+            if show then limit_warnings[message] = now end
+            local detail = message
+            if not show then
+                local position = req.position or {}
+                detail = message .. ' [' .. req.method .. ' ' .. (req.uri or '')
+                    .. ':' .. tostring(position.line or 0) .. ':' .. tostring(position.character or 0) .. ']'
+            end
+            emit({ jsonrpc = '2.0', method = show and 'window/showMessage' or 'window/logMessage',
+                params = { type = 2, message = detail } })
+        end
+        reply(id, to_client(finish(value.result)))
+    end
+    -- Worker results lose array metatables in transit; empty lists must stay JSON arrays.
+    local function list(value) return array(value or nil) end
+    local function calls(value)
+        local result = array(value or nil)
+        for _, call in ipairs(result) do call.fromRanges = array(call.fromRanges) end
+        return result
+    end
+    -- Position requests outside every workspace root answer empty without a job.
+    local function at(id, params, method, empty, finish, extra)
+        assert(object(params.textDocument) and type(params.textDocument.uri) == 'string', 'document URI required')
+        assert(object(params.position), 'position required')
+        local path = document_path(params.textDocument.uri)
+        local root = path and root_for(path)
+        if not root then reply(id, empty); return end
+        local req = { method = method, root = root, uri = server_uri(params.textDocument.uri), position = params.position }
+        for key, value in pairs(extra or {}) do req[key] = value end
+        local key
+        if method ~= 'lsp_signature' and method ~= 'lsp_completion' then
+            local doc = self.documents[params.textDocument.uri]
+            local point = tostring(params.position.line) .. ':' .. tostring(params.position.character)
+            if doc then
+                local offset = doc:offset(params.position)
+                -- Cursor motion over one identifier asks the same read-only
+                -- question. Only share work while it is in flight; document
+                -- notifications invalidate the key, and results are not cached.
+                local first, last = offset, offset
+                while first > 0 and offset - first < 1024 and doc.source:sub(first, first):match('[%w_]') do first = first - 1 end
+                while last < #doc.source and last - offset < 1024 and doc.source:sub(last + 1, last + 1):match('[%w_]') do last = last + 1 end
+                if last > first then point = tostring(first) .. ':' .. tostring(last) end
+            end
+            key = table.concat({ method, root, req.uri, tostring(navigation_epoch), point,
+                tostring(req.includeDeclaration == true) }, '\0')
+        end
+        navigate(id, req, finish, key)
+    end
+    handlers['textDocument/definition'] = function(id, params)
+        at(id, params, 'lsp_definition', array(), list)
+    end
+    handlers['textDocument/implementation'] = function(id, params)
+        at(id, params, 'lsp_implementation', array(), list)
+    end
+    handlers['textDocument/hover'] = function(id, params)
+        at(id, params, 'lsp_hover', nil, function(value) return value or nil end)
+    end
+    handlers['textDocument/signatureHelp'] = function(id, params)
+        at(id, params, 'lsp_signature', nil, function(value)
+            if not value then return nil end
+            value.signatures = array(value.signatures)
+            for _, signature in ipairs(value.signatures) do signature.parameters = array(signature.parameters) end
+            return value
+        end)
+    end
+    handlers['textDocument/references'] = function(id, params)
+        local context = object(params.context) and params.context or {}
+        at(id, params, 'lsp_references', array(), list, { includeDeclaration = context.includeDeclaration == true })
+    end
+    handlers['textDocument/completion'] = function(id, params)
+        local context = object(params.context) and params.context or {}
+        -- Trigger characters complete only after member operators (`a.`, `a->`, `A::`).
+        local trigger = context.triggerKind == 2 and type(context.triggerCharacter) == 'string' or nil
+        at(id, params, 'lsp_completion', { isIncomplete = false, items = array() }, function(value)
+            value = value or {}
+            return { isIncomplete = value.isIncomplete == true, items = array(value.items or nil) }
+        end, { trigger = trigger })
+    end
+    handlers['textDocument/prepareCallHierarchy'] = function(id, params)
+        at(id, params, 'lsp_prepare_calls', nil, function(value) return value and array(value) or nil end)
+    end
+    -- Items carry their root; only this session's roots are accepted.
+    local function hierarchy(method)
+        return function(id, params)
+            local data = object(params.item) and params.item.data
+            local root
+            for _, candidate in ipairs(self.roots) do
+                if object(data) and type(data.root) == 'string' and paths.key(data.root) == paths.key(candidate) then
+                    root = candidate
+                end
+            end
+            if not root then reply(id, array()); return end
+            navigate(id, { method = method, root = root, data = data }, calls)
+        end
+    end
+    handlers['callHierarchy/incomingCalls'] = hierarchy('lsp_incoming')
+    handlers['callHierarchy/outgoingCalls'] = hierarchy('lsp_outgoing')
+    local navigation = { ['textDocument/definition'] = true, ['textDocument/implementation'] = true, ['textDocument/hover'] = true, ['textDocument/signatureHelp'] = true,
+        ['textDocument/references'] = true, ['textDocument/prepareCallHierarchy'] = true,
+        ['callHierarchy/incomingCalls'] = true, ['callHierarchy/outgoingCalls'] = true }
+    local function dispatch(msg)
+        local id, method, params = msg.id, msg.method, msg.params or {}
+        if method == 'exit' then
+            local code = self.state == 'shutdown' and 0 or 1
+            self:close(); stop(code); return
+        end
+        if self.state == 'closed' then return end
+        if method == '$/cancelRequest' then cancel_pending(params.id); return end
+        if method == 'textDocument/didOpen' or method == 'textDocument/didChange'
+            or method == 'textDocument/didClose' or method == 'textDocument/didSave'
+            or method == 'workspace/didChangeWatchedFiles' or method == 'workspace/didChangeWorkspaceFolders' then
+            navigation_epoch = navigation_epoch + 1
+        end
+        if self.pending[id] then error_response(id, -32600, 'Request ID is already pending'); return end
+        if method == 'initialize' then handlers.initialize(id, params); return end
+        if self.state == 'new' then if id ~= nil then error_response(id, -32002, 'Server not initialized') end; return end
+        if method == 'initialized' then handlers.initialized(); return end
+        if self.state == 'shutdown' then if id ~= nil then error_response(id, -32600, 'Server is shutting down') end; return end
+        if method == 'shutdown' then handlers.shutdown(id); return end
+        if self.state ~= 'ready' then if id ~= nil then error_response(id, -32002, 'Initialization is incomplete') end; return end
+        if navigation[method] or method == 'textDocument/completion' then
+            for _, root in ipairs(self.roots) do
+                if not self.ready[root] then
+                    if id ~= nil then
+                        if method == 'textDocument/completion' then reply(id, { isIncomplete = true, items = array() })
+                        else error_response(id, -32803, 'Project is indexing; retry when indexing completes') end
+                    end
+                    return
+                end
+            end
+        end
+        local handler = handlers[method]
+        if handler and feature_of[method] and not self.features[feature_of[method]] then handler = nil end
+        if handler then handler(id, params)
+        elseif id ~= nil then error_response(id, -32601, 'Method not found: ' .. method) end
+    end
+    function self:accept(body)
+        local ok, msg = pcall(xutils.json_unpack, body)
+        if not ok or text.valid(body) ~= body then error_response(nil, -32700, 'Invalid JSON'); return end
+        if trace and object(msg) then trace:message('receive', msg) end
+        if object(msg) and msg.jsonrpc == '2.0' and msg.method == nil and valid_id(msg.id)
+            and ((msg.result ~= nil and msg.error == nil) or (msg.result == nil and object(msg.error))) then
+            local job = server_pending[msg.id]
+            if not job then return end
+            server_pending[msg.id] = nil
+            if msg.error or self.state ~= 'ready' then progress[job.root] = nil; return end
+            job.started = true
+            progress_value(job, { kind = 'begin', title = 'CodeOutline indexing', message = job.root, cancellable = false })
+            if job.done then self:end_index(job.root, job.message) end
+            return
+        end
+        -- Some clients send `"params": null` for parameterless requests such as
+        -- shutdown; treat it as omitted.
+        if object(msg) and msg.params == null then msg.params = nil end
+        if not object(msg) or msg.jsonrpc ~= '2.0' or type(msg.method) ~= 'string'
+            or (msg.id ~= nil and not valid_id(msg.id)) or (msg.params ~= nil and not object(msg.params)) then
+            -- Echo a readable id so the client can fail that request instead of waiting.
+            error_response(object(msg) and valid_id(msg.id) and msg.id or nil, -32600, 'Invalid JSON-RPC request'); return
+        end
+        if (msg.method == 'initialize' or msg.method == 'shutdown') and msg.id == nil then return end
+        local function handle()
+            local dispatched, err = pcall(dispatch, msg)
+            if not dispatched then
+                if msg.id ~= nil then error_response(msg.id, -32602, tostring(err))
+                else io.stderr:write('[codeoutline lsp] ', tostring(err), '\n') end
+            end
+        end
+        -- Lifecycle and document notifications remain ordered on the main loop.
+        -- Queries run immediately up to their first wait, capturing that state.
+        if msg.id ~= nil and feature_of[msg.method] then
+            local co = coroutine.create(handle)
+            local resumed, err = coroutine.resume(co)
+            if not resumed then error_response(msg.id, -32603, tostring(err)) end
+        else handle() end
+    end
+    return self
+end
+
+return M

@@ -2,11 +2,11 @@
 -- project files or the index cache.
 -- bin/xnet tools/benchmark-relationships.lua ROOT=C:/src/project QUERIES=90 UPDATES=300
 package.path = 'scripts/?.lua;' .. package.path
-local index = require('codeoutline.index')
-local graph = require('codeoutline.graph')
-local explore = require('codeoutline.explore')
-local text = require('codeoutline.text')
-local control = require('codeoutline.control')
+local index = require('codeoutline.indexing.index')
+local graph = require('codeoutline.analysis.graph')
+local explore = require('codeoutline.query.explore')
+local text = require('codeoutline.shared.text')
+local control = require('codeoutline.shared.control')
 local options = {}
 for _, value in ipairs(arg or {}) do
     local key, item = value:match('^([A-Z_]+)=(.*)$')

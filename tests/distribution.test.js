@@ -164,7 +164,7 @@ test('packed npm and native artifacts work outside the checkout', { timeout: 120
         await rename(globalRuntime, nestedRuntime);
         globalRuntime = nestedRuntime;
     }
-    await writeFile(join(globalRuntime, 'scripts/codeoutline/daemon.lua'), `local M = { PORT = 19876 }
+    await writeFile(join(globalRuntime, 'scripts/codeoutline/install/daemon.lua'), `local M = { PORT = 19876 }
 function M.unregister() assert(not os.getenv('CO_TEST_CLEANUP_FAIL'), 'fixture cleanup failure'); return {} end
 function M.stop(_, _, done) done(true) end
 function M.state_dir() return os.getenv('USERPROFILE') .. '/.codeoutline' end

@@ -2,12 +2,12 @@
 -- bin/xnet tools/evaluate-queries.lua ROOT=... CASES=... OUT=tmp/evaluation.json
 package.path = 'scripts/?.lua;tools/?.lua;' .. package.path
 local eval = require('query-evaluation')
-local index = require('codeoutline.index')
-local graph = require('codeoutline.graph')
-local paths = require('codeoutline.path')
-local parser = require('codeoutline.parse')
-local control = require('codeoutline.control')
-local pool = require('codeoutline.parse_pool')
+local index = require('codeoutline.indexing.index')
+local graph = require('codeoutline.analysis.graph')
+local paths = require('codeoutline.shared.path')
+local parser = require('codeoutline.parsing.parse')
+local control = require('codeoutline.shared.control')
+local pool = require('codeoutline.indexing.parse_pool')
 local options = {}
 for _, arg in ipairs(arg or {}) do
     local k, v = arg:match('^([A-Z_]+)=(.*)$'); if k then options[k] = v end
@@ -33,7 +33,7 @@ local function run()
     assert(timeout > 0, 'TIMEOUT_MS must be positive')
     report = { schema = 1, engine = 'codeoutline', version = require('codeoutline.version'), root = root,
         runtime = _VERSION, created_at = os.time(), complete = false,
-        manifest_sha256 = xutils.sha256_hex(source), scanner = require('codeoutline.xscan') == _G.xscan and 'native' or 'lua',
+        manifest_sha256 = xutils.sha256_hex(source), scanner = require('codeoutline.parsing.xscan') == _G.xscan and 'native' or 'lua',
         threads = pool.THREADS, cases = {}, source_hashes = {}, passed = 0, failed = 0,
         timing_scope = 'query only, round 1 first access / round 2 same process; not cold disk; index excluded' }
     -- Check evidence before running. Changes invalidate the corpus rather than passing vacuously.
@@ -131,7 +131,7 @@ end
 return {
     __init = function()
         assert(xnet.init()); assert(xshared.create('codeoutline_control', 65536, 256))
-        pool.configure(assert(xutils.realpath('scripts/codeoutline/parse_worker.lua')), pool.THREADS)
+        pool.configure(assert(xutils.realpath('scripts/codeoutline/runtime/parse_worker.lua')), pool.THREADS)
         job = coroutine.create(run); pool.bind(job); resume()
     end,
     __thread_handle = function(_, op, token, results, failure)

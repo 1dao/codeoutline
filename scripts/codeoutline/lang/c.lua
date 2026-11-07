@@ -7,8 +7,8 @@
 -- does it: keep the first live #if branch (xscan pp_first_branch), so both
 -- arms of an #ifdef never meet in one token stream.
 
-local xscan = require('codeoutline.xscan')
-local common = require('codeoutline.common')
+local xscan = require('codeoutline.parsing.xscan')
+local common = require('codeoutline.parsing.common')
 
 local M = {}
 

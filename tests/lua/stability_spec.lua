@@ -1,9 +1,9 @@
 package.path = 'scripts/?.lua;' .. package.path
 local spec = dofile('tests/lua/spec_helper.lua')
 local service = require('codeoutline.service')
-local index = require('codeoutline.index')
-local paths = require('codeoutline.path')
-local text = require('codeoutline.text')
+local index = require('codeoutline.indexing.index')
+local paths = require('codeoutline.shared.path')
+local text = require('codeoutline.shared.text')
 local root = assert(xutils.temp_file(os.getenv('TEMP') or os.getenv('TMPDIR') or '/tmp')):gsub('\\', '/')
 os.remove(root)
 assert(xutils.mkdir_p(root .. '/中文 项目'))
@@ -31,7 +31,7 @@ spec.describe('service stability', function()
         spec.equal(stats.parsed, 1); spec.equal(idx.files['中文.lua'].nodes[1].name, 'hinted')
         idx.list_files = original
         -- An interrupted full pass keeps its committed files and runs again next time.
-        local control = require('codeoutline.control')
+        local control = require('codeoutline.shared.control')
         control.callback = function() error(control.cancelled(), 0) end
         local ok = pcall(idx.refresh_all, idx)
         control.callback = nil
@@ -387,7 +387,7 @@ do
             local idx = index.open(dir, { cache_path = file_cache, lister = 'walk', rebuild = true })
             idx:refresh_all(); assert(idx:save()); idx:query_source('a.lua'); assert(idx:save())
             local patch = read(file_cache .. '.repairs')
-            local repair = require('codeoutline.cache_repairs')
+            local repair = require('codeoutline.indexing.cache_repairs')
             spec.nil_value(next(repair.load(file_cache, 'different-base', index.VERSION, paths.key(idx.root))))
             write(file_cache .. '.repairs', 'broken')
             local loaded = index.open(dir, { cache_path = file_cache, lister = 'walk' })
@@ -411,7 +411,7 @@ do
             spec.equal(current, symbols); spec.equal(current.out, nil)
             spec.equal(idx.files['lazy_tail.lua'].encoding, 'gbk')
             spec.truthy(idx.generation > generation); spec.equal(current.generation, idx.generation)
-            local graph = require('codeoutline.graph')
+            local graph = require('codeoutline.analysis.graph')
             spec.equal(#current.by_name.lazy_helper, #graph.build(idx).by_name.lazy_helper)
             spec.equal(output, svc.explore(project, 'lazy_tail lazy_helper', opts))
         end)

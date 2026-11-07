@@ -5,8 +5,8 @@
 package.path = 'scripts/?.lua;' .. package.path
 
 local spec = dofile('tests/lua/spec_helper.lua')
-local xscan = require('codeoutline.xscan')
-local ci = require('codeoutline.parse')
+local xscan = require('codeoutline.parsing.xscan')
+local ci = require('codeoutline.parsing.parse')
 
 -- "kind qualified@line" for each node, for compact assertions.
 local function names(r)
@@ -35,10 +35,10 @@ spec.describe('native Lua exports', function()
         local source = f:read('a'); f:close()
         local rec = native_parse('lua_xthread.c', source, { ranges = false })
         local node = rec.nodes[rec.foreign_exports.lua.xthread.create_thread]
-        local signature = require('codeoutline.foreign').signature(node, 'lua', 'create_thread')
+        local signature = require('codeoutline.analysis.foreign').signature(node, 'lua', 'create_thread')
         spec.equal(signature.label, 'create_thread(id:int, name:string, script_path:string)')
         spec.contains(node.sig, 'lua_State')
-        spec.nil_value(require('codeoutline.foreign').signature(node, 'c', 'create_thread'))
+        spec.nil_value(require('codeoutline.analysis.foreign').signature(node, 'c', 'create_thread'))
     end)
     spec.it('retains positional gaps, checked types, defaults and unknown dynamic indices', function()
         local rec = native_parse('native.c', [[
@@ -55,7 +55,7 @@ static const luaL_Reg api[] = {{"call", call}, {NULL, NULL}};
 int luaopen_test(lua_State *L) { luaL_newlib(L, api); return 1; }
 ]])
         local node = rec.nodes[rec.foreign_exports.lua.test.call]
-        spec.equal(require('codeoutline.foreign').signature(node, 'lua', 'call').label,
+        spec.equal(require('codeoutline.analysis.foreign').signature(node, 'lua', 'call').label,
             'call(arg1:unknown, arg2:table, text?:string = "hello", ...:unknown)')
     end)
     spec.it('keeps modules separate and ignores unregistered C functions in C and C++', function()
@@ -103,7 +103,7 @@ static const luaL_Reg funcs[] = {
  {"conditional", conditional}, {"called", called}, {"conflict", conflict}, {"mixed", mixed}, {"consistent", consistent}, {"wrapper", wrapper}, {NULL, NULL}};
 int luaopen_test(lua_State *L) { luaL_newlib(L, funcs); return 1; }
 ]])
-        local foreign = require('codeoutline.foreign')
+        local foreign = require('codeoutline.analysis.foreign')
         for _, name in ipairs({ 'discarded', 'popped', 'changed', 'conflict', 'mixed', 'conditional', 'called' }) do
             spec.nil_value(foreign.returns(rec.nodes[rec.foreign_exports.lua.test[name]], 'lua'), name)
         end
@@ -115,7 +115,7 @@ int luaopen_test(lua_State *L) { luaL_newlib(L, funcs); return 1; }
         local f = assert(io.open('xnet2lua/xlua/lua_xrecord.c', 'rb'))
         local source = f:read('a'); f:close()
         local rec = native_parse('lua_xrecord.c', source, { ranges = false })
-        local foreign = require('codeoutline.foreign')
+        local foreign = require('codeoutline.analysis.foreign')
         local handle = assert(rec.foreign_exports.lua['xrecord.handle'])
         local schema = assert(rec.foreign_exports.lua['xrecord.schema'])
         spec.truthy(handle.get)
@@ -732,7 +732,7 @@ end)
 -- Regressions from the 2026-09-25 review: each case is checked against what
 -- the language actually means, not against the other xscan implementation.
 spec.describe('review regressions', function()
-    local graph_mod = require('codeoutline.graph')
+    local graph_mod = require('codeoutline.analysis.graph')
     local function build(files)
         local idx = { files = {}, generation = 1 }
         for p, s in pairs(files) do idx.files[p] = ci.parse(p, s) end
@@ -818,7 +818,7 @@ spec.describe('review regressions', function()
         spec.equal(table.concat(ends, ' '), 'first:1-6 first.inner:4-5 second:7-8')
     end)
     spec.it('rejects roots that would be interpreted by the shell', function()
-        local index = require('codeoutline.index')
+        local index = require('codeoutline.indexing.index')
         for _, bad in ipairs({ '" & echo PWNED & rem "', 'C:/x%PATH%', '/tmp/$(id)', '--pre=calc' }) do
             local ok = pcall(index.open, bad, { cache_path = (os.getenv('TEMP') or '.') .. '/never.idx' })
             spec.equal(ok, false, 'rejected: ' .. bad)
@@ -884,11 +884,11 @@ write(tmp_root .. '/cc/shape.hpp', 'namespace geo {\nclass Shape {\npublic:\n   
 write(tmp_root .. '/cc/shape.cpp', '#include "shape.hpp"\n#include "../net.h"\nnamespace geo {\ndouble Shape::area() const { return net_send(1); }\n}\n')
 
 local svc = require('codeoutline.service')
-local explore = require('codeoutline.explore')
-local graph = require('codeoutline.graph')
+local explore = require('codeoutline.query.explore')
+local graph = require('codeoutline.analysis.graph')
 
 spec.describe('startup GC lifecycle', function()
-    local index = require('codeoutline.index')
+    local index = require('codeoutline.indexing.index')
     spec.it('restores custom GC settings after loading and preparing a project', function()
         svc.forget(tmp_root)
         local pause = collectgarbage('setpause', 137)
@@ -921,7 +921,7 @@ spec.describe('startup GC lifecycle', function()
         local pause = collectgarbage('setpause', 141)
         local stepmul = collectgarbage('setstepmul', 291)
         local original_open = index.open
-        local cancelled = require('codeoutline.control').cancelled()
+        local cancelled = require('codeoutline.shared.control').cancelled()
         index.open = function() error(cancelled, 0) end
         local ok, err = pcall(svc.get, tmp_root, { cache_path = cache })
         index.open = original_open
@@ -938,7 +938,7 @@ spec.describe('agent query reclamation', function()
     spec.it('collects after successful and cancelled analysis without changing GC parameters', function()
         svc.get(tmp_root, { cache_path = cache })
         local original_gc, collected = collectgarbage, 0
-        local control = require('codeoutline.control')
+        local control = require('codeoutline.shared.control')
         local original_callback = control.callback
         local pause = original_gc('setpause', 143)
         local stepmul = original_gc('setstepmul', 293)
@@ -979,7 +979,7 @@ spec.describe('scheduled idle collection', function()
             end,
             del = function(id) pending[id] = nil end,
         }
-        local gc = require('codeoutline.idle_gc').new({ timer = timer, delay_ms = 1,
+        local gc = require('codeoutline.runtime.idle_gc').new({ timer = timer, delay_ms = 1,
             busy = function() return busy end,
             request = function() cycles = cycles + 1 end,
             step = function() steps = steps + 1; return steps < 2 end })
@@ -1034,7 +1034,7 @@ end
 
 spec.describe('mcp roots', function()
     spec.it('maps file URIs to local paths', function()
-        local uri_path = require('codeoutline.mcp').uri_path
+        local uri_path = require('codeoutline.protocol.mcp').uri_path
         spec.equal(uri_path('file:///C:/src/%E4%B8%AD%E6%96%87%20app'), 'C:/src/中文 app')
         spec.equal(uri_path('file:///c%3A/src'), 'c:/src')
         spec.equal(uri_path('file:///home/me/app'), '/home/me/app')
@@ -1044,7 +1044,7 @@ spec.describe('mcp roots', function()
         spec.equal(uri_path(nil), nil)
     end)
     spec.it('limits projects to allowed roots unless access is unrestricted', function()
-        local paths = require('codeoutline.path')
+        local paths = require('codeoutline.shared.path')
         spec.equal(paths.allowed(false, 'F:/any/project'), true)
         spec.equal(paths.allowed({ 'C:/', 'D:/src' }, 'D:/src/app'), true)
         spec.equal(paths.allowed({ 'C:/', 'D:/src' }, 'D:/srcx'), false)
@@ -1190,7 +1190,7 @@ spec.describe('query-time relationships', function()
         local idx = svc.refresh(tmp_root, { cache_path = cache })
         local G = idx:symbols()
         local generation = idx.generation
-        local control = require('codeoutline.control')
+        local control = require('codeoutline.shared.control')
         control.callback = function() error(control.cancelled(), 0) end
         local ok, err = pcall(function()
             idx:commit('commit_probe.lua', ci.parse('commit_probe.lua', 'function commit_probe() end', { ranges = false }))
@@ -1232,9 +1232,9 @@ spec.describe('query-time relationships', function()
         local output, info = explore.run(symbols, idx, 'run net_send', { max_expanded = 1 })
         spec.truthy(info.relationships_incomplete)
         spec.contains(output, 'Relationships incomplete')
-        spec.truthy(require('codeoutline.coverage').summarize(info).partial)
+        spec.truthy(require('codeoutline.query.coverage').summarize(info).partial)
         local lazy = graph.query(symbols)
-        local control = require('codeoutline.control')
+        local control = require('codeoutline.shared.control')
         control.callback = function() error(control.cancelled(), 0) end
         local ok, err = pcall(lazy.load_incoming, lazy, { symbols.by_name.net_send[1] })
         control.callback = nil
@@ -1296,7 +1296,7 @@ spec.describe('explore', function()
         os.remove(path)
     end)
     spec.it('walks the tree without rg, honoring .gitignore and hidden dirs', function()
-        local index = require('codeoutline.index')
+        local index = require('codeoutline.indexing.index')
         local wr = tmp_root .. '_walk'          -- its own tree: the shared one feeds other cases
         write(wr .. '/net.c', 'int net(void) { return 0; }\n')
         write(wr .. '/.gitignore', 'gen/\n*.pb.go\n/only_root.c\n')
@@ -1324,7 +1324,7 @@ spec.describe('explore', function()
 end)
 
 spec.describe('agent exploration contract', function()
-    local coverage = require('codeoutline.coverage')
+    local coverage = require('codeoutline.query.coverage')
     local function project(files)
         local records = {}
         for path, source in pairs(files) do records[path] = ci.parse(path, source, { ordinary_bindings = true, static_dispatch = true }) end
@@ -1360,7 +1360,7 @@ spec.describe('agent exploration contract', function()
         local _, info = explore.run(G, idx, 'entry')
         spec.equal(info.query_stats.resolution.unresolved_sites, 1)
         spec.contains(table.concat(coverage.summarize(info).reasons, ','), 'unresolved_calls')
-        local resolution = require('codeoutline.resolution')
+        local resolution = require('codeoutline.analysis.resolution')
         local status, observe = resolution.new()
         observe(1, 1, 'call', {}, 'ambiguous binding')
         observe(1, 1, 'call', {}, 'ambiguous binding')
@@ -1460,7 +1460,7 @@ spec.describe('agent exploration contract', function()
     end)
     spec.it('preserves structured query errors and queue rejection through MCP', function()
         local failure, rejected = 'source changed during query; retry', false
-        local mcp = require('codeoutline.mcp').new({ project = tmp_root, roots = { tmp_root }, workdir = tmp_root },
+        local mcp = require('codeoutline.protocol.mcp').new({ project = tmp_root, roots = { tmp_root }, workdir = tmp_root },
             function(_, done)
                 if rejected then return nil, 'worker queue is full' end
                 done(false, failure); return 'test-job'
@@ -1497,7 +1497,7 @@ spec.describe('agent exploration contract', function()
 end)
 
 spec.describe('watched refresh', function()
-    local index = require('codeoutline.index')
+    local index = require('codeoutline.indexing.index')
     local wr = tmp_root .. '_watch'         -- its own tree: the shared one feeds other cases
     write(wr .. '/a.c', 'int a(void) { return 0; }\n')
     write(wr .. '/b.c', 'int b(void) { return a(); }\n')
@@ -1953,7 +1953,7 @@ void function_pointer(Callback a) { a->save(); }
         local function check(which)
             local text = explore.run(G, idx, 'alias_entry ' .. which .. '::save')
             spec.contains(text, 'alias_entry -> ' .. which .. '::save')
-            local _, info = require('codeoutline.callers').run(G, idx, which .. '::save')
+            local _, info = require('codeoutline.query.callers').run(G, idx, which .. '::save')
             spec.equal(#info.callers, 1); spec.equal(info.callers[1].name, 'alias_entry')
             for _, rec in pairs(idx.files) do spec.nil_value(rec.cpp_aliases) end
         end
@@ -1961,14 +1961,14 @@ void function_pointer(Callback a) { a->save(); }
         write(root .. '/types.hpp', header:gsub('Selected = AliasA', 'Selected = AliasB'))
         idx, G = svc.get(root, options)
         check('AliasB')
-        local _, info = require('codeoutline.callers').run(G, idx, 'AliasA::save')
+        local _, info = require('codeoutline.query.callers').run(G, idx, 'AliasA::save')
         spec.equal(#info.callers, 0)
         svc.forget(root)
     end)
 end)
 
 spec.describe('query-owned C/C++ call-result receivers', function()
-    local receivers = require('codeoutline.cpp_receivers')
+    local receivers = require('codeoutline.analysis.cpp.cpp_receivers')
     local function build(files)
         local records = {}
         for path, source in pairs(files) do records[path] = ci.parse(path, source, { ordinary_bindings = true }) end
@@ -2007,7 +2007,7 @@ Record Value(void);
 void Use(void) { int a = Factory()->value; int b = Value().value; }
 ]]
         local G = build({ ['a.c'] = source }); local ctx = {}
-        ctx.ordinary = require('codeoutline.ordinary_bindings').context(G, ctx)
+        ctx.ordinary = require('codeoutline.analysis.ordinary_bindings').context(G, ctx)
         local C = receivers.context(G, ctx)
         for _, fragment in ipairs({ 'Factory()->value', 'Value().value' }) do
             local at = assert(source:find(fragment, 1, true)) + #fragment - #'value' - 1
@@ -2067,7 +2067,7 @@ void UseTrailing() { Trailing()->Run(); }
             end)
             receivers[field] = old; assert(ok, err)
         end
-        local control = require('codeoutline.control'); local stopped = control.cancelled()
+        local control = require('codeoutline.shared.control'); local stopped = control.cancelled()
         control.callback = function() error(stopped, 0) end
         local ok, err = pcall(targets, G, 'Use'); control.callback = nil
         spec.equal(ok, false); spec.equal(err, stopped)
@@ -2093,7 +2093,7 @@ void UseTrailing() { Trailing()->Run(); }
         local idx, G = svc.get(root, { cache_path = root .. '/cache.idx', lister = 'walk' })
         local f = G.file_index['a.hpp']
         local storage = { entries = {}, order = {}, bytes = 0 }
-        local C = require('codeoutline.ordinary_bindings').context(G, {}, nil, { cache = storage })
+        local C = require('codeoutline.analysis.ordinary_bindings').context(G, {}, nil, { cache = storage })
         local aliases = C.cpp_aliases(f)
         spec.equal(#aliases, 1); spec.equal(aliases[1].name, 'Alias')
         spec.truthy(storage.entries[G.files[f].nodes].data.cpp_aliases_only)
@@ -2103,7 +2103,7 @@ void UseTrailing() { Trailing()->Run(); }
         spec.equal(C.cpp_aliases(f), detail.cpp_aliases)
         spec.equal(#storage.order, 1); spec.truthy(storage.bytes <= 8388608)
         write(root .. '/a.hpp', '#define READY 0\nnamespace n { struct B { void Run() {} }; }\nusing Alias = n::B;\nAlias* Factory();\n')
-        local fresh = require('codeoutline.ordinary_bindings').context(G, {}, nil, { cache = storage })
+        local fresh = require('codeoutline.analysis.ordinary_bindings').context(G, {}, nil, { cache = storage })
         local ok, err = pcall(fresh.cpp_aliases, f)
         spec.equal(ok, false); spec.contains(err, 'source changed')
         svc.forget(root)
@@ -2112,7 +2112,7 @@ void UseTrailing() { Trailing()->Run(); }
         local root = tmp_root .. '/cpp_alias_eviction'
         for i = 1, 24 do write(root .. '/h' .. i .. '.hpp', 'struct Type' .. i .. ' {}; using Alias' .. i .. ' = Type' .. i .. ';\n') end
         local idx, G = svc.get(root, { cache_path = root .. '/cache.idx', lister = 'walk' })
-        local ordinary = require('codeoutline.ordinary_bindings')
+        local ordinary = require('codeoutline.analysis.ordinary_bindings')
         local storage = { entries = {}, order = {}, bytes = 0 }
         local C = ordinary.context(G, {}, nil, { cache = storage, max_files = 1 })
         for round = 1, 3 do
@@ -2166,7 +2166,7 @@ void Use() { Factory()->Next(1)->Run(); }
         local G = build({ ['api.hpp'] = 'struct Global { static Global* Get(); void Run() {} };',
             ['aliases.hpp'] = 'using Irrelevant = Global;', ['use.cpp'] = source })
         local ctx, read = {}, {}
-        ctx.ordinary = require('codeoutline.ordinary_bindings').context(G, ctx)
+        ctx.ordinary = require('codeoutline.analysis.ordinary_bindings').context(G, ctx)
         local aliases = ctx.ordinary.cpp_aliases
         ctx.ordinary.cpp_aliases = function(f) read[G.files[f].path] = true; return aliases(f) end
         local f = G.file_index['use.cpp']
@@ -2295,7 +2295,7 @@ void cycle() { X::missing(); }
         local function check(ns)
             local text = explore.run(G, idx, 'namespace_entry ' .. ns .. '::run')
             spec.contains(text, 'namespace_entry -> ' .. ns .. '::run')
-            local _, info = require('codeoutline.callers').run(G, idx, ns .. '::run')
+            local _, info = require('codeoutline.query.callers').run(G, idx, ns .. '::run')
             spec.equal(#info.callers, 1)
             spec.equal(targets(G, 'namespace_entry'), ns .. '::Store::save,' .. ns .. '::run')
             for _, rec in pairs(idx.files) do spec.nil_value(rec.cpp_aliases); spec.nil_value(rec.refs.binding) end
@@ -2303,7 +2303,7 @@ void cycle() { X::missing(); }
         check('A')
         write(root .. '/types.hpp', header:gsub('api = A', 'api = B'))
         idx, G = svc.get(root, options); check('B')
-        local _, info = require('codeoutline.callers').run(G, idx, 'A::run')
+        local _, info = require('codeoutline.query.callers').run(G, idx, 'A::run')
         spec.equal(#info.callers, 0); svc.forget(root)
     end)
     spec.it('skips include sources that cannot introduce unindexed imports', function()
@@ -2412,7 +2412,7 @@ class TsCycleA extends TsCycleB implements TsI { run(): void {} }
 class TsCycleB extends TsCycleA { run(): void {} }
 ]] })
         local found, Q = links(G, 'TsI.run'); spec.equal(found, 'TsA.run,TsB.run'); spec.truthy(Q.incomplete)
-        local impl = require('codeoutline.implementations'); local previous = impl.MAX_TARGETS; impl.MAX_TARGETS = 1
+        local impl = require('codeoutline.analysis.implementations'); local previous = impl.MAX_TARGETS; impl.MAX_TARGETS = 1
         local ok, err = pcall(function() local _, limited = links(G, 'TsI.run'); spec.truthy(limited.incomplete) end)
         impl.MAX_TARGETS = previous; assert(ok, err)
     end)
@@ -2449,7 +2449,7 @@ class TsUnknown extends Missing implements TsArray { save(value: number[]): stri
         spec.equal(links(G, 'TsI.run'), 'TsStore.run')
         local output, info = explore.run(G, idx, 'tsRun TsStore.run', { explain = true })
         spec.contains(output, 'TsI.run -> TsStore.run'); spec.equal(info.relationships_incomplete, false)
-        local _, result = require('codeoutline.callers').run(G, idx, 'TsStore.run')
+        local _, result = require('codeoutline.query.callers').run(G, idx, 'TsStore.run')
         local names = {}; for _, item in ipairs(result.callers) do names[item.name] = true end
         spec.truthy(names['TsI.run'] and names.tsRun)
         for _, rec in pairs(idx.files) do spec.nil_value(rec.implementation_evidence) end
@@ -2471,7 +2471,7 @@ class Use { void Run(IStore value) { value.Save(1); } }
         spec.equal(G.nodes[Q.out[G.by_qualified['Use.Run'][1]][1]].qualified, 'Api.IStore.Save')
         spec.equal(#Q.inn[G.by_qualified['Store.Save'][1]], graph.EDGE)
         spec.equal(Q.inn[G.by_qualified['Store.Save'][1]][3], 'implementation')
-        spec.contains(require('codeoutline.query_report').render(Q.report, G), 'possible implementation')
+        spec.contains(require('codeoutline.query.query_report').render(Q.report, G), 'possible implementation')
     end)
     spec.it('links C# abstract and virtual methods without linking hidden, static or private members', function()
         local G = build({ ['types.cs'] = [[
@@ -2549,11 +2549,11 @@ class Use { void call(I value) { { Object value = unknown; value.run(1); } value
         spec.contains(output, 'I.Save -> Store.Save')
         spec.contains(output, 'possible implementation')
         spec.equal(info.relationships_incomplete, false)
-        local _, callers = require('codeoutline.callers').run(G, idx, 'Store.Save')
+        local _, callers = require('codeoutline.query.callers').run(G, idx, 'Store.Save')
         local names = {}; for _, caller in ipairs(callers.callers) do names[caller.name] = true end
         spec.truthy(names['I.Save'] and names['Use.Run'])
         for _, rec in pairs(idx.files) do spec.nil_value(rec.implementation_evidence); spec.nil_value(rec.refs.binding) end
-        local implementations = require('codeoutline.implementations')
+        local implementations = require('codeoutline.analysis.implementations')
         local limit = implementations.MAX_TARGETS
         implementations.MAX_TARGETS = 1
         local ok, err = pcall(function()
@@ -2564,7 +2564,7 @@ class Use { void call(I value) { { Object value = unknown; value.run(1); } value
         write(root .. '/store.cs', 'class Store : I { public void Save(string value) {} }')
         idx, G = svc.get(root, options)
         spec.equal(links(G, 'I.Save'), 'Other.Save')
-        local _, changed = require('codeoutline.callers').run(G, idx, 'Store.Save')
+        local _, changed = require('codeoutline.query.callers').run(G, idx, 'Store.Save')
         spec.equal(#changed.callers, 0)
         svc.forget(root)
     end)
@@ -2602,7 +2602,7 @@ class Use { void call(I value) { { Object value = unknown; value.run(1); } value
 end)
 
 spec.describe('include-driven C/C++ source fragments', function()
-    local index = require('codeoutline.index')
+    local index = require('codeoutline.indexing.index')
     local serial = 0
     local function project(files, lister)
         serial = serial + 1
@@ -2694,7 +2694,7 @@ spec.describe('include-driven C/C++ source fragments', function()
         spec.equal(loaded:refresh_all().parsed, 0)
     end)
     spec.it('bounds additional files and reports a limited include closure', function()
-        local fragments = require('codeoutline.cpp_fragments')
+        local fragments = require('codeoutline.indexing.cpp_fragments')
         local idx = project({ ['main.c'] = '#include "a.part"', ['a.part'] = '#include "b.part"\nvoid FragmentA() {}',
             ['b.part'] = 'void FragmentB() {}' })
         local cap = fragments.MAX_FILES; fragments.MAX_FILES = 1
@@ -2758,7 +2758,7 @@ spec.describe('query-owned C/C++ include search paths', function()
         spec.equal(edges_from(G, 'IncludeEntry'), 'save@one/api.hpp')
         write(G.root .. '/.codeoutline.json', '{"includePaths":["one/../two/.","two"]}')
         spec.equal(edges_from(G, 'IncludeEntry'), 'save@two/api.hpp')
-        if require('codeoutline.path').windows then
+        if require('codeoutline.shared.path').windows then
             write(G.root .. '/.codeoutline.json', '{"includePaths":["TWO"]}')
             spec.equal(edges_from(G, 'IncludeEntry'), 'save@two/api.hpp')
         end
@@ -2816,7 +2816,7 @@ spec.describe('query-owned C/C++ include search paths', function()
         spec.equal(edges_from(G, 'UnindexedInclude'), 'save@two/api.hpp')
         write(G.root .. '/hidden/api.hpp', store)
         spec.equal(edges_from(G, 'UnindexedInclude'), '')
-        local files, selected, path = require('codeoutline.cpp_includes').resolve(G, G.file_index['app/main.cpp'],
+        local files, selected, path = require('codeoutline.analysis.cpp.cpp_includes').resolve(G, G.file_index['app/main.cpp'],
             G.files[G.file_index['app/main.cpp']].imports[1], {})
         spec.equal(#files, 0); spec.truthy(selected); spec.equal(path, G.root .. '/hidden/api.hpp')
     end)
@@ -2847,7 +2847,7 @@ spec.describe('query-owned C/C++ include search paths', function()
         spec.equal(count, graph.EDGE)
     end)
     spec.it('validates include configuration, limits, root boundaries and cancellation', function()
-        local includes = require('codeoutline.cpp_includes')
+        local includes = require('codeoutline.analysis.cpp.cpp_includes')
         local G = build({ ['main.cpp'] = '#include <api.hpp>\n', ['one/api.hpp'] = store })
         local invalid = { { includePaths = 'one' }, { includePaths = false }, { includePaths = { 1 } }, { includePaths = { ['x'] = 'one' } },
             { includePaths = { 'C:relative' } }, { includePathRules = 'one' }, { includePathRules = false }, { includePathRules = { false } },
@@ -2862,7 +2862,7 @@ spec.describe('query-owned C/C++ include search paths', function()
         write(G.root .. '/.codeoutline.json', '{"includePaths":["one"]}')
         local limit = includes.MAX_PATHS; includes.MAX_PATHS = 0
         local ok = pcall(includes.context, G); includes.MAX_PATHS = limit; spec.equal(ok, false)
-        local control = require('codeoutline.control'); local previous = control.callback
+        local control = require('codeoutline.shared.control'); local previous = control.callback
         control.callback = function() error(control.cancelled('cancel include search')) end
         local err; ok, err = pcall(graph.visible_dependencies, G, G.file_index['main.cpp'], {})
         control.callback = previous
@@ -2992,11 +2992,11 @@ template<class T> struct Outer { struct Nested : Base { void run() {} }; };
         local output, result = explore.run(G, idx, 'Run Store::Save', { explain = true })
         spec.contains(output, 'possible implementation')
         spec.equal(result.relationships_incomplete, false)
-        local _, callers = require('codeoutline.callers').run(G, idx, 'Store::Save')
+        local _, callers = require('codeoutline.query.callers').run(G, idx, 'Store::Save')
         local names = {}; for _, caller in ipairs(callers.callers) do names[caller.name] = true end
         spec.truthy(names['Base::Save'] and names.Run)
         for _, rec in pairs(idx.files) do spec.nil_value(rec.implementation_evidence); spec.nil_value(rec.cpp_aliases) end
-        local impl = require('codeoutline.implementations'); local limit = impl.MAX_CANDIDATES
+        local impl = require('codeoutline.analysis.implementations'); local limit = impl.MAX_CANDIDATES
         impl.MAX_CANDIDATES = 1
         local ok, err = pcall(function() local _, Q = targets(G, 'Base::Save'); spec.truthy(Q.incomplete) end)
         impl.MAX_CANDIDATES = limit; assert(ok, err)
@@ -3009,7 +3009,7 @@ template<class T> struct Outer { struct Nested : Base { void run() {} }; };
     spec.it('reports C++ hierarchy, target and alias budgets and preserves cancellation', function()
         local G = build({ ['api.hpp'] = 'struct Base { virtual void run() = 0; };',
             ['impl.cpp'] = '#include "api.hpp"\nstruct A : Base { void run() {} }; struct B : Base { void run() {} };' })
-        local impl, cpp = require('codeoutline.implementations'), require('codeoutline.cpp_implementations')
+        local impl, cpp = require('codeoutline.analysis.implementations'), require('codeoutline.analysis.cpp.cpp_implementations')
         local targets_limit, depth_limit, aliases_limit = impl.MAX_TARGETS, impl.MAX_DEPTH, cpp.MAX_ALIAS_FILES
         local ok, err = pcall(function()
             impl.MAX_TARGETS = 1
@@ -3021,7 +3021,7 @@ template<class T> struct Outer { struct Nested : Base { void run() {} }; };
         end)
         impl.MAX_TARGETS, impl.MAX_DEPTH, cpp.MAX_ALIAS_FILES = targets_limit, depth_limit, aliases_limit
         assert(ok, err)
-        local control = require('codeoutline.control'); local previous = control.callback
+        local control = require('codeoutline.shared.control'); local previous = control.callback
         control.callback = function() error(control.cancelled('cancel C++ implementation query')) end
         ok, err = pcall(function() targets(G, 'Base::run') end)
         control.callback = previous
@@ -3031,7 +3031,7 @@ template<class T> struct Outer { struct Nested : Base { void run() {} }; };
         local files = { ['base.cpp'] = 'struct Plain { void run() {} };' }
         for i = 1, 20 do files['other' .. i .. '.cpp'] = 'struct Unrelated' .. i .. ' { void run() {} };' end
         local G = build(files)
-        local impl = require('codeoutline.implementations'); local limit = impl.MAX_CANDIDATES
+        local impl = require('codeoutline.analysis.implementations'); local limit = impl.MAX_CANDIDATES
         impl.MAX_CANDIDATES = 1
         local ok, err = pcall(function()
             local found, Q = targets(G, 'Plain::run')
@@ -3042,7 +3042,7 @@ template<class T> struct Outer { struct Nested : Base { void run() {} }; };
 end)
 
 spec.describe('query-owned Cargo packages', function()
-    local cargo = require('codeoutline.rust_packages')
+    local cargo = require('codeoutline.analysis.rust.rust_packages')
     local function build(files, root)
         local records = {}
         for path, source in pairs(files) do records[path] = ci.parse(path, source, { ordinary_bindings = true }) end
@@ -3234,7 +3234,7 @@ spec.describe('query-owned Cargo packages', function()
             spec.equal(#Q.out[G.by_name.LimitedCargoRun[1]], 0); spec.truthy(Q.incomplete)
         end)
         cargo.MAX_CONFIGS = limit; assert(ok, err)
-        local control = require('codeoutline.control'); local cancelled = control.cancelled()
+        local control = require('codeoutline.shared.control'); local cancelled = control.cancelled()
         control.callback = function() error(cancelled, 0) end
         ok, err = pcall(edges_from, G, 'LimitedCargoRun')
         control.callback = nil; spec.equal(ok, false); spec.equal(err, cancelled)
@@ -3247,7 +3247,7 @@ spec.describe('query-owned Cargo packages', function()
         write(root .. '/library/Cargo.toml', '[package]\nname="api"\n')
         local G = build({ ['src/main.rs'] = 'use api::save as persist; fn AliasLimitRun() { persist(); }',
             ['library/src/lib.rs'] = 'pub fn save() {}' }, root)
-        local resolver = require('codeoutline.rust_resolution')
+        local resolver = require('codeoutline.analysis.rust.rust_resolution')
         local node_limit, alias_limit = resolver.MAX_NODES, resolver.MAX_ALIAS_FILES
         local ok, err = pcall(function()
             resolver.MAX_NODES = 0
@@ -3262,7 +3262,7 @@ spec.describe('query-owned Cargo packages', function()
 end)
 
 spec.describe('query-owned Go modules', function()
-    local go = require('codeoutline.go_modules')
+    local go = require('codeoutline.analysis.go.go_modules')
     local function build(files, root)
         local records = {}
         for path, source in pairs(files) do records[path] = ci.parse(path, source) end
@@ -3370,14 +3370,14 @@ spec.describe('query-owned Go modules', function()
         local ok, err = pcall(function()
             local Q = graph.query(G, { explain = true })
             spec.equal(#Q.out[G.by_name.GoRun[1]], 0); spec.truthy(Q.incomplete)
-            spec.contains(require('codeoutline.query_report').render(Q.report, G), 'Go configuration probe limit')
+            spec.contains(require('codeoutline.query.query_report').render(Q.report, G), 'Go configuration probe limit')
         end)
         go.MAX_CONFIGS = limit; assert(ok, err)
         write(root .. '/go.work', 'use ../outside\n')
         local ctx = {}; local found, reason = files(G, 'main.go', 'example.test/app/pkg', ctx)
         spec.equal(found, ''); spec.contains(reason, 'escapes'); spec.truthy(ctx.go_incomplete)
         os.remove(root .. '/go.work')
-        local control = require('codeoutline.control'); local cancelled = control.cancelled()
+        local control = require('codeoutline.shared.control'); local cancelled = control.cancelled()
         control.callback = function() error(cancelled, 0) end
         ok, err = pcall(files, G, 'main.go', 'example.test/app/pkg')
         control.callback = nil; spec.equal(ok, false); spec.equal(err, cancelled)
@@ -3396,7 +3396,7 @@ spec.describe('query-owned Go modules', function()
             go.MAX_FILES, go.MAX_NODES = file_limit, 1
             local Q = graph.query(G, { explain = true })
             spec.equal(#Q.out[G.by_name.LimitedRun[1]], 0); spec.truthy(Q.incomplete)
-            spec.contains(require('codeoutline.query_report').render(Q.report, G), 'node limit')
+            spec.contains(require('codeoutline.query.query_report').render(Q.report, G), 'node limit')
         end)
         go.MAX_FILES, go.MAX_NODES = file_limit, node_limit; assert(ok, err)
     end)
@@ -3409,7 +3409,7 @@ spec.describe('query-owned JS workspace packages', function()
         return graph.build({ files = records, root = root })
     end
     local function target(G, path, specifier, mode)
-        local id, reason = require('codeoutline.js_resolution').module(G, G.file_index[path], specifier, nil, mode)
+        local id, reason = require('codeoutline.analysis.js.js_resolution').module(G, G.file_index[path], specifier, nil, mode)
         return id and G.files[id].path or nil, reason
     end
     spec.it('resolves scoped workspace packages, cross-package re-exports and imported receiver methods', function()
@@ -3501,15 +3501,15 @@ spec.describe('query-owned JS workspace packages', function()
         write(root .. '/packages/core/package.json', '{"name":"core","main":"index.ts"}')
         local G = build({ ['app.ts'] = "import { save } from 'core'; function run() { save(); }",
             ['packages/core/index.ts'] = 'export function save() {}' }, root)
-        local workspace = require('codeoutline.js_workspace')
+        local workspace = require('codeoutline.analysis.js.js_workspace')
         local limit = workspace.MAX_CONFIGS; workspace.MAX_CONFIGS = 1
         local ok, err = pcall(function()
             local Q = graph.query(G, { explain = true })
             spec.equal(#Q.out[G.by_name.run[1]], 0); spec.truthy(Q.incomplete)
-            spec.contains(require('codeoutline.query_report').render(Q.report, G), 'configuration limit')
+            spec.contains(require('codeoutline.query.query_report').render(Q.report, G), 'configuration limit')
             Q = graph.query(G)
             spec.equal(#Q.inn[G.by_name.save[1]], 0); spec.truthy(Q.incomplete)
-            local js = require('codeoutline.js_resolution')
+            local js = require('codeoutline.analysis.js.js_resolution')
             local ctx = js.context(G)
             js.module(G, G.file_index['app.ts'], 'core', ctx)
             local probes = ctx.workspace.probes
@@ -3517,7 +3517,7 @@ spec.describe('query-owned JS workspace packages', function()
             spec.equal(ctx.workspace.probes, probes)
         end)
         workspace.MAX_CONFIGS = limit; assert(ok, err)
-        local control = require('codeoutline.control')
+        local control = require('codeoutline.shared.control')
         local interrupted = control.cancelled()
         control.callback = function() error(interrupted, 0) end
         ok, err = pcall(target, G, 'app.ts', 'core')
@@ -3718,7 +3718,7 @@ spec.describe('shared receiver bindings', function()
         end
     end)
     spec.it('reports receiver evidence limits instead of claiming complete results', function()
-        local receivers = require('codeoutline.receivers')
+        local receivers = require('codeoutline.analysis.receivers')
         local limit = receivers.MAX_BINDINGS
         receivers.MAX_BINDINGS = 2
         local ok, err = pcall(function()
@@ -4316,7 +4316,7 @@ return M
 end)
 
 spec.describe('unified project rules', function()
-    local config_rules = require('codeoutline.rules')
+    local config_rules = require('codeoutline.shared.rules')
     local event = { kind = 'event', language = 'lua', call = 'bus.emit', argument = 1,
         register = 'bus.on', keyArgument = 1, handlerArgument = 2 }
     spec.it('normalizes one contract for both consumers without mutating configuration', function()
@@ -4402,7 +4402,7 @@ function separate() { second.emit('ready'); }
 ]] })
         local found, Q = events(G, 'publish'); spec.equal(found, 'other,ready')
         spec.equal(events(G, 'separate'), 'wrong')
-        spec.contains(require('codeoutline.query_report').render(Q.report, G), 'same local Node EventEmitter')
+        spec.contains(require('codeoutline.query.query_report').render(Q.report, G), 'same local Node EventEmitter')
         local incoming = Q.inn[G.by_qualified.ready[1]]; local seen = false
         for i = 1, #incoming, graph.EDGE do if incoming[i + 2] == 'automatic:event' then spec.equal(G.nodes[incoming[i]].qualified, 'publish'); seen = true end end
         spec.truthy(seen)
@@ -4486,7 +4486,7 @@ function handler() {} bus.on('go', handler); function run() { bus.emit('go'); }
         spec.equal(events(G, 'eventPublish'), 'handled')
         local output, info = explore.run(G, idx, 'eventPublish handled', { explain = true })
         spec.truthy(#info.flows > 0); spec.contains(output, 'possible event delivery'); spec.equal(info.relationships_incomplete, false)
-        local _, incoming = require('codeoutline.callers').run(G, idx, 'handled')
+        local _, incoming = require('codeoutline.query.callers').run(G, idx, 'handled')
         local found = false; for _, caller in ipairs(incoming.callers) do if caller.name == 'eventPublish' then found = true end end
         spec.truthy(found)
         for _, rec in pairs(idx.files) do spec.nil_value(rec.automatic_events); spec.nil_value(rec.ordinary_bindings) end
@@ -4503,7 +4503,7 @@ function handler() {} bus.on('go', handler); function run() { bus.emit('go'); }
             ['publish.ts'] = "import sender from './bus'; const alias = sender;\nexport function publishShared() { alias.emit('saved'); }\n",
         })
         local found, Q = events(G, 'publishShared'); spec.equal(found, 'handled')
-        spec.contains(require('codeoutline.query_report').render(Q.report, G), 'shared imported Node EventEmitter')
+        spec.contains(require('codeoutline.query.query_report').render(Q.report, G), 'shared imported Node EventEmitter')
         spec.equal(#Q.inn[G.by_name.handled[1]], graph.EDGE)
         spec.equal(G.nodes[Q.inn[G.by_name.handled[1]][1]].name, 'publishShared')
         spec.truthy(Q.stats.events.shared.files <= 32); spec.equal(Q.incomplete, false)
@@ -4536,7 +4536,7 @@ function handler() {} bus.on('go', handler); function run() { bus.emit('go'); }
             ['sub.ts'] = "import { bus } from './bus'; function handled() {} bus.on('saved', handled);",
             ['pub.ts'] = "import { bus } from './bus'; function publishShared() { bus.emit('saved'); }",
         })
-        local shared = require('codeoutline.shared_events')
+        local shared = require('codeoutline.analysis.shared_events')
         for _, key in ipairs({ 'MAX_FILES', 'MAX_TARGETS', 'MAX_MS', 'MAX_DEPTH' }) do
             local before = shared[key]; shared[key] = -1
             local ok, found, Q = pcall(events, G, 'publishShared')
@@ -4572,7 +4572,7 @@ function handler() {} bus.on('go', handler); function run() { bus.emit('go'); }
         spec.equal(Q.stats.events.shared.files, 3)
         local output, info = explore.run(G, idx, 'publishShared handled')
         spec.contains(output, 'shared imported Node EventEmitter'); spec.truthy(#info.flows > 0)
-        local _, incoming = require('codeoutline.callers').run(G, idx, 'handled')
+        local _, incoming = require('codeoutline.query.callers').run(G, idx, 'handled')
         local caller = false
         for _, entry in ipairs(incoming.callers) do if entry.name == 'publishShared' then caller = true end end
         spec.truthy(caller, 'recursive callers reuse shared emitter identities')
@@ -4591,7 +4591,7 @@ function handler() {} bus.on('go', handler); function run() { bus.emit('go'); }
         local G = build({ ['events.js'] = [[import { EventEmitter } from 'events'; const bus = new EventEmitter();
 function one() {} function two() {} bus.on('go', one); bus.on('go', two); function run() { bus.emit('go'); }
 ]] })
-        local module = require('codeoutline.automatic_events'); local previous = module.MAX_TARGETS; module.MAX_TARGETS = 1
+        local module = require('codeoutline.analysis.automatic_events'); local previous = module.MAX_TARGETS; module.MAX_TARGETS = 1
         local ok, err = pcall(function() local _, Q = events(G, 'run'); spec.truthy(Q.incomplete) end)
         module.MAX_TARGETS = previous; assert(ok, err)
         previous = module.MAX_FILES; module.MAX_FILES = 0
@@ -4628,7 +4628,7 @@ spec.describe('configured indirect dispatch', function()
             return original(path, ...)
         end
         local ok, err = pcall(function()
-            local I = require('codeoutline.indirect').query(G, { { kind = 'target', language = 'lua', call = 'filter_rpc.post', argument = 2 } })
+            local I = require('codeoutline.analysis.indirect').query(G, { { kind = 'target', language = 'lua', call = 'filter_rpc.post', argument = 2 } })
             local first = I.incoming({ [G.by_name.filter_first[1]] = true })
             spec.equal(#first[G.by_name.run_first[1]], 1)
             spec.equal(parsed['negative.lua'], nil)
@@ -4751,7 +4751,7 @@ bus.on('other', finish)
         spec.equal(plain.report, nil)
         spec.equal(G.report, nil)
         spec.truthy(#explained.report.entries > 0)
-        local output = require('codeoutline.query_report').render(explained.report, G)
+        local output = require('codeoutline.query.query_report').render(explained.report, G)
         spec.contains(output, 'configured callback via schedule')
         spec.contains(output, 'no indexed target')
     end)
@@ -4759,7 +4759,7 @@ bus.on('other', finish)
         local G = graph.build({ files = { ['a.lua'] = dispatch_parse('a.lua', "function publish() bus.emit('missing') end") } })
         local Q = graph.query(G, { dispatch_rules = rules, explain = true })
         spec.equal(#Q.out[G.by_name.publish[1]], 0)
-        spec.contains(require('codeoutline.query_report').render(Q.report, G), 'no resolved registration for event key')
+        spec.contains(require('codeoutline.query.query_report').render(Q.report, G), 'no resolved registration for event key')
     end)
     spec.it('reports evidence and path limits independently of output size', function()
         local calls = {}
@@ -4863,7 +4863,7 @@ xutils.rmtree(tmp_root)
 os.remove(cache)
 
 spec.describe('query-time declared type hierarchy', function()
-    local hierarchy = require('codeoutline.type_hierarchy')
+    local hierarchy = require('codeoutline.query.type_hierarchy')
     local function build(sources)
         local files = {}
         for path, source in pairs(sources) do files[path] = ci.parse(path, source, { ordinary_bindings = true }) end
@@ -4991,7 +4991,7 @@ abstract class Base : ILeft, IRight {} class Store : Base {} class Other {}
         end)
         hierarchy.MAX_CANDIDATES, hierarchy.MAX_FILES, hierarchy.MAX_SCAN_NODES = saved[1], saved[2], saved[3]
         assert(ok, err)
-        local ctl = require('codeoutline.control'); local old = ctl.callback
+        local ctl = require('codeoutline.shared.control'); local old = ctl.callback
         ctl.callback = function() error(ctl.cancelled(), 0) end
         local success, failure = pcall(hierarchy.run, G, nil, 'Root'); ctl.callback = old
         spec.equal(success, false); spec.truthy(ctl.is_interrupted(failure))
@@ -5081,7 +5081,7 @@ abstract class Base : ILeft, IRight {} class Store : Base {} class Other {}
 end)
 
 spec.describe('recursive callers', function()
-    local callers = require('codeoutline.callers')
+    local callers = require('codeoutline.query.callers')
     spec.it('finds shortest reverse paths, handles cycles and reports depth and node limits', function()
         local sources = {
             ['a.lua'] = 'function leaf() loop() end\nfunction first() leaf() end\nfunction loop() first() end',
@@ -5287,7 +5287,7 @@ spec.describe('unconfirmed exploration candidates', function()
         spec.equal(group.candidates[1].status, 'unconfirmed'); spec.equal(group.candidates[1].kind, 'function')
         spec.contains(output, 'void AgentOrdinaryTag() {}'); spec.equal(#info.flows, 0)
         spec.equal(#graph.query(G).out[G.by_name.AgentOrdinaryStart[1]], 0)
-        local macros = require('codeoutline.cpp_macros')
+        local macros = require('codeoutline.analysis.cpp.cpp_macros')
         local before = macros.MAX_FILES; macros.MAX_FILES = 0
         local ok, limited_output, limited_info = pcall(explore.run, G, idx, 'AgentOrdinaryStart')
         macros.MAX_FILES = before; assert(ok, limited_output)
@@ -5327,7 +5327,7 @@ spec.describe('unconfirmed exploration candidates', function()
         local G, idx = project({ ['one/proxy.h'] = header, ['two/proxy.h'] = header,
             ['use/start.cpp'] = '#include <proxy.h>\nvoid AgentProxyBudgetStart() {\n'
                 .. string.rep('AgentProxyBudget();\n', 30) .. '}\n' })
-        local macros = require('codeoutline.cpp_macros')
+        local macros = require('codeoutline.analysis.cpp.cpp_macros')
         local before = macros.MAX_EVENTS; macros.MAX_EVENTS = 20
         local ok, output, info = pcall(explore.run, G, idx, 'AgentProxyBudgetStart')
         macros.MAX_EVENTS = before; assert(ok, output)
@@ -5663,7 +5663,7 @@ spec.describe('query-time Lua callback collection traversal', function()
                 .. 'function run() for _, cb in ' .. iterator .. '(callbacks) do cb() end end')
             local found, Q = callbacks(G, 'run'); spec.equal(found, 'load,save')
             spec.equal(G.nodes[Q.inn[G.by_name.save[1]][1]].name, 'run')
-            spec.contains(require('codeoutline.query_report').render(Q.report, G), 'possible callback traversal')
+            spec.contains(require('codeoutline.query.query_report').render(Q.report, G), 'possible callback traversal')
         end
     end)
     spec.it('shares collection aliases and known local callback aliases with table.insert registrations', function()
@@ -5764,7 +5764,7 @@ end
         spec.equal(callbacks(G, 'collection_run'), 'collected_handler')
         local output, info = explore.run(G, idx, 'collection_run collected_handler', { explain = true })
         spec.truthy(#info.flows > 0); spec.contains(output, 'possible callback traversal'); spec.equal(info.relationships_incomplete, false)
-        local _, incoming = require('codeoutline.callers').run(G, idx, 'collected_handler')
+        local _, incoming = require('codeoutline.query.callers').run(G, idx, 'collected_handler')
         spec.equal(#incoming.callers, 1); spec.equal(incoming.callers[1].name, 'collection_run')
         for _, rec in pairs(idx.files) do spec.nil_value(rec.lua_callback_loops); spec.nil_value(rec.ordinary_bindings) end
         write(root .. '/callbacks.lua', source:gsub('table.insert%(callbacks, collected_handler%)', 'unknown(callbacks)'))
@@ -5772,7 +5772,7 @@ end
         svc.forget(root)
     end)
     spec.it('reports collection and query limits explicitly', function()
-        local module = require('codeoutline.lua_callback_loops'); local previous = module.MAX_TARGETS
+        local module = require('codeoutline.analysis.lua.lua_callback_loops'); local previous = module.MAX_TARGETS
         module.MAX_TARGETS = 1
         local ok, err = pcall(function()
             local G = build('local function first() end\nlocal function second() end\nlocal callbacks = { first, second }\n'
@@ -6018,11 +6018,11 @@ void run(struct Ops *ops) { (*ops->call)(); }
             write(root .. '/' .. i .. '.lua', 'local function handler() end\nlocal t = { go = handler }\nfunction run' .. i .. '() t.go() end')
         end
         local _, G = svc.get(root, { cache_path = root .. '/cache.bin' })
-        local parser = require('codeoutline.parse')
+        local parser = require('codeoutline.parsing.parse')
         local original, count = parser.parse, 0
         parser.parse = function(...) count = count + 1; return original(...) end
         local ok, err = pcall(function()
-            local dispatch = require('codeoutline.static_dispatch').query(G)
+            local dispatch = require('codeoutline.analysis.static_dispatch').query(G)
             dispatch.incoming({ [G.by_name.run1[1]] = true })
             spec.equal(count, 0)
             local wanted = {}; for _, id in ipairs(G.by_name.handler) do wanted[id] = true end
@@ -6031,7 +6031,7 @@ void run(struct Ops *ops) { (*ops->call)(); }
             dispatch.incoming(wanted)
             for i = 1, 20 do dispatch.outgoing(G.by_name['run' .. i][1]) end
             spec.equal(count, 20)
-            local static = require('codeoutline.static_dispatch')
+            local static = require('codeoutline.analysis.static_dispatch')
             static.max_query_entries = 1
             local bounded, message = pcall(function() static.query(G).incoming(wanted) end)
             static.max_query_entries = nil
@@ -6219,7 +6219,7 @@ end)
 
 spec.describe('explicit query seed filters', function()
     spec.it('parses quoted values, aliases and unknown prefixes without treating them as filters', function()
-        local filters = require('codeoutline.query_filters')
+        local filters = require('codeoutline.query.query_filters')
         local parsed = filters.parse('lang:js language:py kind:function path:"Apps/My Code" name:SAVE strange:value run')
         spec.equal(parsed.text, 'strange:value run')
         spec.equal(parsed.languages[1], 'javascript'); spec.equal(parsed.languages[2], 'python')
@@ -6275,7 +6275,7 @@ end)
 
 spec.describe('query-time C and C++ macro visibility', function()
     spec.it('extracts the same directive summaries without a full syntax or binding parse', function()
-        local macros = require('codeoutline.cpp_macros')
+        local macros = require('codeoutline.analysis.cpp.cpp_macros')
         local cases = {
             { 'summary.c', '\239\187\191#ifndef HEADER\n#define HEADER\n/* #define FAKE(x) 0 */\n'
                 .. '#if FEATURE\n#define LIVE(x) helper(x)\n#else\n#undef LIVE\n#endif\n#include "dep.h"\n#endif\n' },
@@ -6395,7 +6395,7 @@ void run() { TRACE(1); }
         local root = tmp_root .. '/macros_limits'
         write(root .. '/a.c', '#define TRACE(x) real(x)\nvoid run(void) { TRACE(1); }\n')
         local _, G = svc.get(root, { cache_path = root .. '/cache.idx', lister = 'walk' })
-        local macros = require('codeoutline.cpp_macros'); local before = macros.MAX_EVENTS; macros.MAX_EVENTS = 0
+        local macros = require('codeoutline.analysis.cpp.cpp_macros'); local before = macros.MAX_EVENTS; macros.MAX_EVENTS = 0
         local ok, value, Q = pcall(kinds, G, 'run', 'TRACE'); macros.MAX_EVENTS = before
         spec.truthy(ok); spec.equal(value, ''); spec.truthy(Q.incomplete)
         svc.forget(root)
@@ -6440,7 +6440,7 @@ void run() { TRACE(1); }
 end)
 
 spec.describe('changed file impact', function()
-    local affected = require('codeoutline.affected')
+    local affected = require('codeoutline.query.affected')
     local function project(sources)
         local records = {}
         for path, source in pairs(sources) do records[path] = ci.parse(path, source, { foreign = true }) end
@@ -6487,7 +6487,7 @@ spec.describe('changed file impact', function()
     end)
     spec.it('returns explicit time limits and restores cancellation callbacks without swallowing cancellation', function()
         local G, idx = project({ ['a.lua'] = 'function a() end', ['b.lua'] = 'function b() a() end' })
-        local ctrl = require('codeoutline.control')
+        local ctrl = require('codeoutline.shared.control')
         local previous, limit = ctrl.callback, affected.TIME_LIMIT_MS
         local calls = 0
         local callback = function() calls = calls + 1 end
@@ -6522,7 +6522,7 @@ spec.describe('changed file impact', function()
             Q.load_incoming = function(_, ids, progress)
                 local incoming = { [ids[1]] = { G.by_name.b[1], 1, 'call' } }
                 progress(incoming)
-                clock = 1000; require('codeoutline.control').check()
+                clock = 1000; require('codeoutline.shared.control').check()
             end
             return Q
         end
@@ -6551,7 +6551,7 @@ spec.describe('changed file impact', function()
         idx.query_source = function() return 'decoded source', true end
         local output, info = affected.run(G, idx, { 'a.lua' })
         spec.nil_value(output); spec.truthy(info.encoding_retry)
-        output, info = require('codeoutline.callers').run(G, idx, 'a')
+        output, info = require('codeoutline.query.callers').run(G, idx, 'a')
         spec.nil_value(output); spec.truthy(info.encoding_retry)
     end)
     spec.it('refreshes service queries after reload, edits, renames and removal without serializing impact state', function()
@@ -6577,7 +6577,7 @@ spec.describe('changed file impact', function()
 end)
 
 spec.describe('project search ranking', function()
-    local ranking = require('codeoutline.search_ranking')
+    local ranking = require('codeoutline.query.search_ranking')
     local function config(root, value) write(root .. '/.codeoutline.json', value) end
     local function files(root)
         for i = 1, 3 do write(root .. '/generated/' .. i .. '.lua', 'function ranked_save() return ' .. i .. ' end') end
@@ -6708,12 +6708,12 @@ spec.describe('project search ranking', function()
 end)
 
 spec.describe('query-owned Go method sets and implicit implementations', function()
-    local methods = require('codeoutline.go_methods')
+    local methods = require('codeoutline.analysis.go.go_methods')
     local function build(files)
         local records = {}
         for path, source in pairs(files) do records[path] = ci.parse(path, source, { ordinary_bindings = true }) end
         local G = graph.build({ files = records })
-        local ctx = {}; ctx.ordinary = require('codeoutline.ordinary_bindings').context(G, ctx)
+        local ctx = {}; ctx.ordinary = require('codeoutline.analysis.ordinary_bindings').context(G, ctx)
         return G, methods.context(G, ctx)
     end
     local function type_id(G, name, file)
@@ -7121,7 +7121,7 @@ func Generic[r interface { Run() }](v r) { r.Run(v) }
             end)
             methods[field] = old; assert(ok, err)
         end
-        local control = require('codeoutline.control'); local stopped = control.cancelled()
+        local control = require('codeoutline.shared.control'); local stopped = control.cancelled()
         control.callback = function() error(stopped, 0) end
         local ok, err = pcall(edge_names, G, G.by_qualified['I.Run'][1])
         control.callback = nil; spec.equal(ok, false); spec.equal(err, stopped)
@@ -7196,7 +7196,7 @@ function qualifiedRemote(addr) skynet.call(addr, 'lua', 'library.start') end
         end
         spec.equal(#Q.inn[G.by_name.CMD_login[1]], 0)
         spec.equal(#Q.inn[G.by_name.start[1]], 0)
-        local report = require('codeoutline.query_report').render(Q.report, G)
+        local report = require('codeoutline.query.query_report').render(Q.report, G)
         spec.contains(report, 'receiving service/module binding unconfirmed')
         for _, rec in pairs(G.files) do spec.nil_value(rec.dispatch_sites) end
         write(root .. '/.codeoutline.json', '{"rules":[]}')
@@ -7270,7 +7270,7 @@ function qualifiedRemote(addr) skynet.call(addr, 'lua', 'library.start') end
 end)
 
 spec.describe('query-owned Go framework bridges', function()
-    local fw = require('codeoutline.go_frameworks')
+    local fw = require('codeoutline.analysis.go.go_frameworks')
     local function build(files)
         local records = {}
         for path, source in pairs(files) do records[path] = ci.parse(path, source, { ordinary_bindings = true }) end
@@ -7309,7 +7309,7 @@ func Setup() {
         spec.contains(text, 'Auth:possible:go-route GET /v1/users')
         spec.contains(text, 'List:possible:go-route GET /health')
         spec.equal(text:find('invalid', 1, true), nil)
-        local report = require('codeoutline.query_report').render(Q.report, G)
+        local report = require('codeoutline.query.query_report').render(Q.report, G)
         spec.contains(report, 'runtime execution unverified')
         spec.contains(report, 'registered at app.go:')
         spec.contains(edges(G, 'List', true), 'Setup:possible:go-route GET /v1/users')
@@ -7464,7 +7464,7 @@ func Setup() { http.HandleFunc("/", H) }
             end)
             fw[field] = old; assert(ok, err)
         end
-        local control = require('codeoutline.control'); local cancelled = control.cancelled()
+        local control = require('codeoutline.shared.control'); local cancelled = control.cancelled()
         control.callback = function() error(cancelled, 0) end
         local ok, err = pcall(edges, G, 'Setup')
         control.callback = nil; spec.equal(ok, false); spec.equal(err, cancelled)

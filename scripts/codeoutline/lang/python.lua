@@ -4,8 +4,8 @@
 -- xscan's indent mode turns blocks into indent..dedent pairs in the match
 -- table, so a block's extent is one lookup and nesting falls out of recursion.
 
-local xscan = require('codeoutline.xscan')
-local common = require('codeoutline.common')
+local xscan = require('codeoutline.parsing.xscan')
+local common = require('codeoutline.parsing.common')
 
 local M = {}
 

@@ -1,6 +1,6 @@
 -- Kotlin declarations and call sites over xscan; deliberately not a type checker.
-local xscan = require('codeoutline.xscan')
-local common = require('codeoutline.common')
+local xscan = require('codeoutline.parsing.xscan')
+local common = require('codeoutline.parsing.common')
 local M = {}
 
 M.config = {

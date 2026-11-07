@@ -4,10 +4,10 @@ local source = assert(xutils.realpath(debug.getinfo(1, 'S').source:sub(2))):gsub
 local scripts = assert(source:match('^(.*)/codeoutline/[^/]+$'))
 local install = assert(scripts:match('^(.*)/scripts$'))
 package.path = scripts .. '/?.lua;' .. package.path
-local paths = require('codeoutline.path')
-local mcp = require('codeoutline.mcp')
-local http = require('codeoutline.http')
-local daemon = require('codeoutline.daemon')
+local paths = require('codeoutline.shared.path')
+local mcp = require('codeoutline.protocol.mcp')
+local http = require('codeoutline.protocol.http')
+local daemon = require('codeoutline.install.daemon')
 local options = { ALLOW_ROOT = {}, ALLOW_HOST = {}, ALLOW_ORIGIN = {} }
 for _, argument in ipairs(arg or {}) do
     local key, value = argument:match('^([A-Z_]+)=(.*)$')
@@ -18,7 +18,7 @@ end
 assert((options.STDIO == '1') ~= (options.HTTP == '1'), 'Specify exactly one of STDIO=1 or HTTP=1')
 local lsp_mode = options.LSP == '1'
 assert(not lsp_mode or options.STDIO == '1', 'LSP=1 requires STDIO=1')
-local lsp = lsp_mode and require('codeoutline.lsp')
+local lsp = lsp_mode and require('codeoutline.protocol.lsp')
 local lsp_reader = lsp_mode and lsp.reader()
 local managed = options.DAEMON == '1'
 assert(not managed or options.HTTP == '1', 'DAEMON=1 requires HTTP=1')
@@ -129,13 +129,13 @@ return {
             end
             os.remove(daemon.stop_file(config.port))
         end
-        assert(xthread.create_thread(2, 'INDEX', scripts .. '/codeoutline/index_worker.lua'))
+        assert(xthread.create_thread(2, 'INDEX', scripts .. '/codeoutline/runtime/index_worker.lua'))
         indexing = true
         -- Launchers enable this for serve; the background service updates unless
         -- disabled. Updating never delays or blocks requests.
         local auto_update = os.getenv('CODEOUTLINE_AUTO_UPDATE')
         if auto_update == '1' or (managed and auto_update ~= '0') then
-            updating = xthread.create_thread(3, 'UPDATE', scripts .. '/codeoutline/update_worker.lua') and true
+            updating = xthread.create_thread(3, 'UPDATE', scripts .. '/codeoutline/runtime/update_worker.lua') and true
         end
         if options.STDIO == '1' then
             assert(xutils.read_stdin, 'Rebuild runtime for nonblocking stdin support')

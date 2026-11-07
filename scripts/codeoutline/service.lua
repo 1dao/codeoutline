@@ -1,8 +1,8 @@
 -- Requests within one Lua state are serialized by the owning transport.
-local index = require('codeoutline.index')
-local explore = require('codeoutline.explore')
-local paths = require('codeoutline.path')
-local control = require('codeoutline.control')
+local index = require('codeoutline.indexing.index')
+local explore = require('codeoutline.query.explore')
+local paths = require('codeoutline.shared.path')
+local control = require('codeoutline.shared.control')
 local M = {}
 -- Loading uses tighter GC thresholds; queries retain the caller's settings.
 local startup_gc = os.getenv('CODEOUTLINE_MEMORY_POLICY') ~= 'default'
@@ -187,7 +187,7 @@ local function execute_query(engine, root, query, opts)
         while true do
             -- A GBK repair commits the decoded file, which renumbers its nodes.
             local symbols, source_index, dynamic = idx:symbols(), idx, nil
-            if engine == explore then symbols, source_index, dynamic = require('codeoutline.on_demand').open(symbols, idx, query) end
+            if engine == explore then symbols, source_index, dynamic = require('codeoutline.query.on_demand').open(symbols, idx, query) end
             local output, details = engine.run(symbols, source_index, query, opts)
             if dynamic then
                 details.on_demand_files, details.on_demand_rejected, details.on_demand_truncated = dynamic.files, dynamic.rejected, dynamic.truncated
@@ -196,7 +196,7 @@ local function execute_query(engine, root, query, opts)
                     for _, file in ipairs(dynamic.files) do
                         notices[#notices + 1] = string.format('On-demand source: %s (%s, %s); not stored in the index.', file.path, file.language, file.basis)
                     end
-                    output, details.truncated = require('codeoutline.text').limit(table.concat(notices, '\n') .. '\n' .. output,
+                    output, details.truncated = require('codeoutline.shared.text').limit(table.concat(notices, '\n') .. '\n' .. output,
                         opts and opts.budget or explore.DEFAULT_BUDGET, details.truncated or dynamic.truncated)
                 end
             end
@@ -211,7 +211,7 @@ local function execute_query(engine, root, query, opts)
         stats.cache_saved, stats.cache_error = saved, err
     end
     result.info.refresh = stats
-    result.info.coverage = require('codeoutline.coverage').summarize(result.info)
+    result.info.coverage = require('codeoutline.query.coverage').summarize(result.info)
     result.info.resolution = result.info.query_stats and result.info.query_stats.resolution
     result.info.generation = idx.generation
     result.info.projectPath = idx.root
@@ -232,19 +232,19 @@ function M.explore(root, query, opts)
 end
 
 function M.callers(root, query, opts)
-    return run_query(require('codeoutline.callers'), root, query, opts)
+    return run_query(require('codeoutline.query.callers'), root, query, opts)
 end
 
 function M.affected(root, files, opts)
-    return run_query(require('codeoutline.affected'), root, files, opts)
+    return run_query(require('codeoutline.query.affected'), root, files, opts)
 end
 
 function M.type_hierarchy(root, query, opts)
-    return run_query(require('codeoutline.type_hierarchy'), root, query, opts)
+    return run_query(require('codeoutline.query.type_hierarchy'), root, query, opts)
 end
 
 function M.type_references(root, query, opts)
-    return run_query(require('codeoutline.type_references'), root, query, opts)
+    return run_query(require('codeoutline.query.type_references'), root, query, opts)
 end
 
 function M.status(root, opts)

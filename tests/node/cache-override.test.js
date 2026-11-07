@@ -15,7 +15,7 @@ test('cache override persists and reloads an isolated index before API and defau
     await mkdir(project); await mkdir(home);
     await writeFile(join(project, 'demo.lua'), 'function cache_example() end\n');
     await writeFile(runner, `package.path = os.getenv('CO_TEST_ROOT') .. '/scripts/?.lua;' .. package.path
-local idx = require('codeoutline.index').open(os.getenv('CO_TEST_PROJECT'), {
+local idx = require('codeoutline.indexing.index').open(os.getenv('CO_TEST_PROJECT'), {
     cache_path = os.getenv('CO_TEST_EXPLICIT'), lister = 'walk' })
 local loaded = idx.cache_loaded
 idx:refresh(); assert(idx:save())

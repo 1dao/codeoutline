@@ -1,0 +1,953 @@
+-- graph.lua — cross-file resolution over an index: global symbol tables,
+-- file dependencies (#include / import), and call edges resolved per query.
+--
+--   local G = graph.build(idx)       -- symbol and path tables, kept per file
+--   G.nodes[id]        -> <node table> (shared with the file record)
+--   G.node_file[id]    -> file index
+--   G.files[f]         -> file record (path, language, nodes, refs, imports)
+--   G.file_order       -> { f, ... } in path order
+--   G.by_name[name]    -> { id, ... } in path, then node order
+--   G.by_owner[q]      -> members of qualifier q (`Box` for `Box::area`)
+--   local Q = graph.query(G)
+--   Q.out[id], Q.inn[id] -> { other, line, kind, other, line, kind, ... }
+--
+-- Tables change one file at a time (add_file / remove_file). File and node
+-- ids are never reused while the tables live, so removed files leave holes:
+-- iterate file_order, and compare nodes with graph.before rather than by id.
+-- Every ordered list matches what a fresh build of the same records gives.
+--
+-- Edge lists are flat, EDGE values per edge, and nodes carry no wrapper
+-- table: on large trees per-edge and per-node tables cost more than the
+-- data they hold. Walk an edge list with `for i = 1, #list, graph.EDGE`.
+--
+-- Resolution is name-based with locality scoring, the same model CodeGraph
+-- uses for dynamic languages: a call binds to the best-placed definition of
+-- that name (same file > included/imported file > paired source of an
+-- included header > same directory), never across languages. Ties keep up
+-- to MAX_TIES targets instead of guessing.
+
+local control = require('codeoutline.shared.control')
+local js_resolution = require('codeoutline.analysis.js.js_resolution')
+local lua_bindings = require('codeoutline.analysis.lua.lua_bindings')
+local M = {}
+
+M.EDGE = 3
+M.MAX_TIES = 3
+M.MAX_CANDIDATES = 200
+M.MAX_INCLUDES = 2000
+
+-- Node kinds a call / `new` / bare reference may bind to.
+local CALLABLE = {
+    ['function'] = true, method = true, macro = true, constructor = true, prototype = true,
+    class = true, record = true,
+}
+local NEWABLE = { class = true, record = true, constructor = true, enum = true }
+local VALUE = { ['function'] = true, method = true }
+local NO_MACRO = {}
+for kind in pairs(CALLABLE) do if kind ~= 'macro' then NO_MACRO[kind] = true end end
+
+-- C and C++ call each other (extern "C", shared headers); others don't mix.
+local C_FAMILY = { c = true, cpp = true }
+local HEADER_EXT = { h = true, hpp = true, hh = true, hxx = true }
+local SOURCE_EXT = { c = true, cc = true, cpp = true, cxx = true }
+local FAMILY = { c = 'c', cpp = 'c', javascript = 'js', typescript = 'js', arkts = 'js' }
+local function family(lang) return FAMILY[lang] or lang end
+
+local function dirname(p) return p:match('^(.*)/[^/]*$') or '' end
+local function basename(p) return p:match('([^/]*)$') end
+local function stem(p) return basename(p):match('^(.*)%.[^.]*$') or basename(p) end
+
+local function push(t, k, v)
+    local list = t[k]
+    if not list then list = {}; t[k] = list end
+    list[#list + 1] = v
+end
+
+local function push3(t, k, a, b, c)
+    local list = t[k]
+    if not list then list = {}; t[k] = list end
+    local n = #list
+    list[n + 1], list[n + 2], list[n + 3] = a, b, c
+end
+
+-- Files a file depends on, resolved from its #include / import records.
+local function resolve_deps(G, f, js_context, imports_only)
+    local rec = G.files[f]
+    if C_FAMILY[rec.language] then js_context = js_context or {} end
+    local deps = {}
+    local function add(g) if g and g ~= f then deps[g] = true end end
+    local here = dirname(rec.path)
+    for _, imp in ipairs(rec.imports) do
+        local path = imp.path
+        if C_FAMILY[rec.language] then
+            for _, g in ipairs(require('codeoutline.analysis.cpp.cpp_includes').resolve(G, f, imp, js_context)) do add(g) end
+        elseif rec.language == 'python' then
+            local rel = path
+            local base = here
+            local dots = rel:match('^(%.+)')
+            if dots then
+                for _ = 2, #dots do base = dirname(base) end
+                rel = rel:sub(#dots + 1)
+            end
+            local sub = rel:gsub('%.', '/')
+            local cands = {}
+            if dots then
+                local b = base ~= '' and (base .. '/') or ''
+                cands = { b .. sub .. '.py', b .. sub .. '/__init__.py' }
+                -- `from . import x` / `from .pkg import x`: the names may be modules
+                for _, name in ipairs(imp.names or {}) do
+                    local s2 = (sub ~= '' and (sub .. '/') or '') .. name
+                    cands[#cands + 1] = b .. s2 .. '.py'
+                end
+            end
+            for _, c in ipairs(cands) do add(G.file_index[c]) end
+            if not dots and sub ~= '' then
+                -- absolute import: match by path suffix anywhere in the tree
+                for _, g in ipairs(G.by_base[basename(sub) .. '.py'] or {}) do
+                    local p = G.files[g].path
+                    if p == sub .. '.py' or p:sub(-(#sub + 4)) == '/' .. sub .. '.py' then add(g) end
+                end
+                for _, g in ipairs(G.by_base['__init__.py'] or {}) do
+                    local p = G.files[g].path
+                    local want = sub .. '/__init__.py'
+                    if p == want or p:sub(-(#want + 1)) == '/' .. want then add(g) end
+                end
+            end
+        elseif rec.language == 'lua' then
+            -- require 'a.b' -> a/b.lua or a/b/init.lua anywhere under the root
+            -- (package.path prefixes like scripts/?.lua vary per project);
+            -- dofile/loadfile take a path.
+            for _, g in ipairs(lua_bindings.modules(G, imp, js_context and js_context.lua)) do add(g) end
+        elseif rec.language == 'go' then
+            for _, g in ipairs(require('codeoutline.analysis.go.go_modules').files(G, f, path, js_context)) do add(g) end
+        elseif rec.language == 'javascript' or rec.language == 'typescript' or rec.language == 'arkts' then
+            add(js_resolution.module(G, f, path, js_context, imp.kind))
+        elseif rec.language == 'csharp' then
+            for _, g in ipairs(G.ns_files[path] or {}) do add(g) end
+        elseif rec.language == 'rust' then
+            if js_context then
+                local files = require('codeoutline.analysis.rust.rust_resolution').imports(G, f, imp, js_context)
+                if files then for _, g in ipairs(files) do add(g) end; goto next_import end
+            end
+            if imp.kind == 'mod' then
+                -- mod x;  ->  x.rs / x/mod.rs next to this file (or under its stem dir)
+                local st = stem(rec.path)
+                local bases = { here }
+                if st ~= 'mod' and st ~= 'lib' and st ~= 'main' then bases[2] = (here ~= '' and here .. '/' or '') .. st end
+                for _, b in ipairs(bases) do
+                    local pre = b ~= '' and (b .. '/') or ''
+                    add(G.file_index[pre .. path .. '.rs'])
+                    add(G.file_index[pre .. path .. '/mod.rs'])
+                end
+            else
+                -- use crate::a::b::{C, D}: the module file for the longest path prefix
+                local segs = {}
+                for s in path:gsub('{.*$', ''):gmatch('[%w_]+') do
+                    if s ~= 'crate' and s ~= 'self' and s ~= 'super' and s ~= 'pub' then segs[#segs + 1] = s end
+                end
+                for k = #segs, 1, -1 do
+                    local sub = table.concat(segs, '/', 1, k)
+                    local found = false
+                    for _, want in ipairs({ sub .. '.rs', sub .. '/mod.rs' }) do
+                        for _, g in ipairs(G.by_base[basename(want)] or {}) do
+                            local p = G.files[g].path
+                            if p == want or p:sub(-(#want + 1)) == '/' .. want then add(g); found = true end
+                        end
+                    end
+                    if found then break end
+                end
+            end
+        elseif rec.language == 'java' or rec.language == 'kotlin' then
+            if path:sub(-2) == '.*' then
+                for _, g in ipairs(G.pkg_files[path:sub(1, -3)] or {}) do add(g) end
+                if rec.language == 'kotlin' then
+                    for _, id in ipairs(G.by_owner[path:sub(1, -3)] or {}) do add(G.node_file[id]) end
+                end
+            else
+                for _, id in ipairs(G.by_qualified[path] or {}) do add(G.node_file[id]) end
+            end
+        end
+        ::next_import::
+    end
+    -- Java: the whole package is visible without imports; Go: the whole
+    -- directory is one package; C#: the file's own namespaces.
+    if (rec.language == 'java' or rec.language == 'kotlin') and rec.package then
+        for _, g in ipairs(G.pkg_files[rec.package] or {}) do add(g) end
+    elseif rec.language == 'go' then
+        if not imports_only then
+            for _, g in ipairs(require('codeoutline.analysis.go.go_modules').peers(G, f, js_context)) do add(g) end
+        end
+    elseif rec.language == 'csharp' then
+        for _, node in ipairs(rec.nodes) do
+            if node.kind == 'namespace' then
+                for _, g in ipairs(G.ns_files[node.qualified] or {}) do add(g) end
+            end
+        end
+    end
+    -- C: x.c usually implements what x.h declares, so a file that includes
+    -- x.h also "depends on" x.c for resolution purposes.
+    local paired = {}
+    if C_FAMILY[rec.language] and not imports_only then
+        local strict = require('codeoutline.analysis.cpp.cpp_includes').policy(G, f, js_context).configured
+        local function can_pair(source, header)
+            if not strict then return true end
+            return M.directly_includes(G, source, header, js_context)
+        end
+        for g in pairs(deps) do
+            local p = G.files[g].path
+            if HEADER_EXT[p:match('%.(%w+)$') or ''] or G.files[g].on_demand or G.files[g].cpp_fragment then
+                local local_sources, has_local = {}, false
+                for _, h in ipairs(G.by_stem[stem(p)] or {}) do
+                    if SOURCE_EXT[G.files[h].path:match('%.(%w+)$') or ''] and dirname(G.files[h].path) == dirname(p) then
+                        has_local = true
+                        if h ~= f and can_pair(h, g) then local_sources[#local_sources + 1] = h end
+                    end
+                end
+                if has_local then for _, h in ipairs(local_sources) do paired[h] = true end
+                else
+                    for _, h in ipairs(G.by_stem[stem(p)] or {}) do
+                        if h ~= f and SOURCE_EXT[G.files[h].path:match('%.(%w+)$') or ''] and can_pair(h, g) then paired[h] = true end
+                    end
+                end
+            end
+        end
+    end
+    return deps, paired
+end
+
+function M.directly_includes(G, source, header, ctx)
+    ctx = ctx or {}
+    local cache = ctx.cpp_source_dependencies
+    if not cache then cache = {}; ctx.cpp_source_dependencies = cache end
+    if not cache[source] then cache[source] = resolve_deps(G, source, ctx, true) end
+    return cache[source][header] or false
+end
+
+-- One bounded include closure for graph queries, navigation and type lookup.
+-- Paired implementations may supply definitions, never declarations/imports.
+function M.visible_dependencies(G, f, ctx)
+    if C_FAMILY[G.files[f].language] then ctx = ctx or {} end
+    local cache = ctx and ctx.include_dependencies
+    if not cache and ctx then cache = {}; ctx.include_dependencies = cache end
+    local old = cache and cache[f]
+    if old then return old[1], old[2], old[3] end
+    local direct, paired = resolve_deps(G, f, ctx)
+    local incomplete = false
+    if C_FAMILY[G.files[f].language] then
+        local visible, queue = {}, {}
+        local function add(files)
+            local ordered = {}
+            for g in pairs(files) do ordered[#ordered + 1] = g end
+            table.sort(ordered, function(a, b) return G.files[a].path < G.files[b].path end)
+            for _, g in ipairs(ordered) do
+                if g ~= f and not visible[g] then
+                    if #queue >= M.MAX_INCLUDES then incomplete = true
+                    else visible[g] = true; queue[#queue + 1] = g end
+                end
+            end
+        end
+        add(direct)
+        local i = 1
+        while i <= #queue do
+            control.check()
+            local more, sources = resolve_deps(G, queue[i], ctx)
+            for g in pairs(sources) do if g ~= f then paired[g] = true end end
+            add(more); i = i + 1
+        end
+        direct = visible
+    end
+    if cache then cache[f] = { direct, paired, incomplete } end
+    if incomplete and ctx then ctx.include_incomplete = true end
+    return direct, paired, incomplete
+end
+
+-- Innermost class-like container of a node (for self./this. calls).
+local function owner_class(G, id)
+    local f = G.node_file[id]
+    local rec = G.files[f]
+    local p = G.nodes[id].parent
+    while p do
+        local pn = rec.nodes[p]
+        if pn.kind == 'class' or pn.kind == 'record' or pn.kind == 'interface' or pn.kind == 'enum'
+            or pn.kind == 'struct' or pn.kind == 'union' then
+            return G.id_of[f][p]
+        end
+        p = pn.parent
+    end
+    return nil
+end
+
+-- Placement of a candidate in file cf relative to the ref's file f: 0 when
+-- unrelated, nil when invisible (a C static of another file).
+local function locality(G, f, cf, c, deps, paired)
+    if cf == f then return 100 end
+    if c.static then
+        -- `static inline` helpers in an included header serve every includer.
+        if deps[cf] and (HEADER_EXT[G.files[cf].path:match('%.(%w+)$') or ''] or G.files[cf].on_demand or G.files[cf].cpp_fragment) then return 50 end
+        return nil
+    end
+    if deps[cf] then return 50 end
+    if paired[cf] then return 40 end
+    if G.file_dir[cf] == G.file_dir[f] then return 20 end
+    return 0
+end
+
+-- owner: the innermost class of src_id, passed in by resolve_ref when the
+-- ref kind needs it (computed once per ref, not per candidate).
+local function score(G, f, src_id, ref_kind, recv, cid, deps, paired, owner)
+    local c = G.nodes[cid]
+    local cf = G.node_file[cid]
+    if family(G.files[cf].language) ~= family(G.files[f].language) then return nil end
+    local s = locality(G, f, cf, c, deps, paired)
+    if not s then return nil end
+    local kind = c.kind
+    if kind == 'prototype' then s = s - 3 end
+    if ref_kind == 'member_call' and s <= 0 then
+        -- obj.name() on an unknown receiver: binding it to any same-named
+        -- method project-wide (str.format -> some format()) is mostly wrong,
+        -- so only local candidates qualify.
+        return nil
+    elseif ref_kind == 'call' and (G.files[f].language == 'java' or G.files[f].language == 'kotlin') and src_id then
+        -- unqualified call inside a class: implicit this
+        if owner and c.parent and G.id_of[cf][c.parent] == owner then s = s + 30 end
+    end
+    return s
+end
+
+local function is_decl(node) return node.kind == 'prototype' or node.decl end
+
+-- Scored candidates of the current resolve_ref call, reused across calls to
+-- keep the hot loop allocation-free; only the first n entries are live.
+local scored_ids, scored_vals = {}, {}
+
+-- accept overrides the node kinds the ref kind may bind to (navigation only).
+local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired, accept, evidence, js_context, line, offset)
+    if kind == 'annotation' or kind == 'type' then return nil end
+    local macro_state
+    if kind == 'call' and C_FAMILY[G.files[f].language] and (not src_id or G.nodes[src_id].kind ~= 'macro') then
+        local macro, _, state = require('codeoutline.analysis.cpp.cpp_macros').resolve(G, f, name, line, js_context)
+        macro_state = state
+        if macro then return macro, #macro > 0 and 'visible macro' or 'unknown or unsupported macro visibility', macro_state end
+        if macro == false then accept = accept or NO_MACRO end
+    end
+    if evidence and evidence:sub(1, 7) == 'cs:new:' then kind = 'new' end
+    accept = accept or (kind == 'new' and NEWABLE) or (kind == 'ref' and VALUE) or CALLABLE
+    -- A method value needs the same receiver checks as a method call; its
+    -- stored edge remains a reference and its target remains callable-only.
+    local function_value = kind == 'ref' and (G.files[f].language == 'javascript'
+        or G.files[f].language == 'typescript' or G.files[f].language == 'arkts'
+        or G.files[f].language == 'python' or G.files[f].language == 'java' or G.files[f].language == 'kotlin')
+    if function_value and recv then kind = 'member_call' end
+    if evidence == '' then evidence = nil end
+    local receiver_ids, receiver_reason = require('codeoutline.analysis.receivers').resolve(G, f, src_id, name, kind, recv,
+        evidence, js_context, accept, offset)
+    if receiver_ids ~= nil then
+        local filtered = {}
+        for _, id in ipairs(receiver_ids) do if accept[G.nodes[id].kind] then filtered[#filtered + 1] = id end end
+        return filtered, receiver_reason, macro_state
+    end
+    local strategy = 'js/ts binding'
+    local exact, binding_reason = js_resolution.resolve(G, f, name, kind, recv, evidence, js_context)
+    if G.files[f].language == 'rust' and js_context then
+        strategy = 'cargo crate/module binding'
+        exact, binding_reason = require('codeoutline.analysis.rust.rust_resolution').resolve(G, f, src_id, name, recv, evidence, js_context)
+    end
+    if exact == nil and G.files[f].language == 'python' then
+        strategy = 'python binding'
+        exact = require('codeoutline.analysis.python.python_bindings').resolve(G, f, evidence, js_context)
+    end
+    if exact == nil and C_FAMILY[G.files[f].language] and evidence and evidence:match('^cxx:expr:') then
+        strategy = 'c/c++ call-result receiver'
+        exact, binding_reason = require('codeoutline.analysis.cpp.cpp_receivers').context(G, js_context).resolve(f, src_id, name, evidence)
+    end
+    if exact == nil and G.files[f].language == 'cpp' then
+        strategy = evidence and evidence:match('^cpp:name:') and 'c++ namespace/import' or 'c++ declared receiver'
+        exact, binding_reason = require('codeoutline.analysis.cpp.cpp_bindings').resolve(G, f, src_id, name, evidence, deps, js_context, accept)
+    end
+    if exact == nil and G.files[f].language == 'csharp' then
+        strategy = 'c# binding'
+        exact = require('codeoutline.analysis.csharp.csharp_bindings').resolve(G, f, src_id, name, kind, recv, evidence, js_context)
+    end
+    if exact == nil and (G.files[f].language == 'java' or G.files[f].language == 'kotlin') then
+        strategy = 'declared JVM receiver'
+        exact = require('codeoutline.analysis.implementations').resolve(G, f, src_id, name, evidence, js_context)
+        if function_value and recv and exact == nil then
+            exact = require('codeoutline.analysis.implementations').resolve(G, f, src_id, name,
+                'jvm:type:' .. recv .. '\0' .. '0', js_context)
+        end
+    end
+    if exact == nil then
+        strategy = 'lua binding'
+        exact = lua_bindings.resolve(G, f, name, evidence, js_context and js_context.lua, recv)
+    end
+    if exact ~= nil then
+        local result = {}
+        for _, id in ipairs(exact) do if accept[G.nodes[id].kind] then result[#result + 1] = id end end
+        return result, #result == 0 and (binding_reason or 'binding target unresolved') or strategy, macro_state
+    end
+    if function_value and recv then
+        return {}, 'unresolved function-value receiver'
+    end
+    local cands = G.by_name[name]
+    if G.files[f].language == 'kotlin' and not recv then
+        for _, imp in ipairs(G.files[f].imports) do
+            if (imp.alias or imp.path:match('([^.]+)$')) == name then
+                cands = {}
+                -- by_name also includes unsaved LSP overlays; by_qualified is
+                -- a resident index and may still name the masked disk nodes.
+                for _, id in ipairs(G.by_name[imp.path:match('([^.]+)$')] or {}) do
+                    if G.nodes[id].qualified == imp.path then cands[#cands + 1] = id end
+                end
+                break
+            end
+        end
+    end
+    if not cands then return nil, 'no indexed target', macro_state end
+    -- Score first: score() rejects other languages and statics of other
+    -- files, so "is there a real definition?" is only asked among the
+    -- candidates this call could actually reach. (Asking it over all
+    -- same-named nodes let a Python `def work` hide the C prototype of
+    -- `work`, after which the Python def was filtered out too.)
+    local owner = (kind == 'call' and src_id and (G.files[f].language == 'java' or G.files[f].language == 'kotlin'))
+        and owner_class(G, src_id) or nil
+    -- score() rejects an unknown-receiver member call to an unrelated file;
+    -- checking placement first skips most candidates of common method names.
+    local local_only = kind == 'member_call'
+    local n, has_def, has_name = 0, false, false
+    for i = 1, math.min(#cands, M.MAX_CANDIDATES) do
+        local cid = cands[i]
+        local node = G.nodes[cid]
+        if cid ~= src_id and accept[node.kind]
+            and (G.files[f].language ~= 'lua' or not node['local'] or G.node_file[cid] == f
+                or lua_bindings.exported(node, name, G.lua_global_export_tables))
+            and (not local_only or (locality(G, f, G.node_file[cid], node, deps, paired) or 0) > 0) then
+            local s = score(G, f, src_id, kind, recv, cid, deps, paired, owner)
+            if s then
+                n = n + 1
+                scored_ids[n], scored_vals[n] = cid, s
+                if not is_decl(node) then has_def = true end
+                if node.name == name then has_name = true end
+            end
+        end
+    end
+    -- Prefer real names over export aliases (which may be platform stubs),
+    -- then definitions over prototypes / in-class declarations.
+    local best, ties, tie_count = nil, {}, 0
+    for i = 1, n do
+        local cid, s = scored_ids[i], scored_vals[i]
+        if not (has_def and is_decl(G.nodes[cid])) and (not has_name or G.nodes[cid].name == name) then
+            if not best or s > best then
+                best, ties, tie_count = s, { cid }, 1
+            elseif s == best then
+                tie_count = tie_count + 1
+                if #ties < M.MAX_TIES then ties[#ties + 1] = cid end
+            end
+        end
+    end
+    -- A lone candidate far away (score 0) is still a match for a unique
+    -- name; many far candidates with nothing to separate them is a guess.
+    if best and best <= 0 and #ties > 1 then
+        return nil, 'ambiguous name candidates' .. (#cands > M.MAX_CANDIDATES and '; candidate scan limit reached' or ''), macro_state
+    end
+    local reason = #ties == 0 and 'no eligible target' or #ties > 1 and 'multiple name/locality candidates' or 'name/locality match'
+    if #cands > M.MAX_CANDIDATES then reason = reason .. '; candidate scan limit reached' end
+    if tie_count > M.MAX_TIES then reason = reason .. '; tied candidate limit reached' end
+    return ties, reason, macro_state
+end
+
+-- Files compare by path; nodes by file path, then node order (ids ascend
+-- within a file). Both are strict total orders over live entries.
+local function file_before(G, a, b) return G.files[a].path < G.files[b].path end
+local function node_before(G, a, b)
+    local fa, fb = G.node_file[a], G.node_file[b]
+    if fa == fb then return a < b end
+    return G.files[fa].path < G.files[fb].path
+end
+local function string_before(_, a, b) return a < b end
+M.before = node_before
+
+-- Position of v (or where it belongs) in an ordered list.
+local function search(G, list, v, before)
+    local lo, hi = 1, #list + 1
+    while lo < hi do
+        local mid = math.floor((lo + hi) / 2)
+        if before(G, list[mid], v) then lo = mid + 1 else hi = mid end
+    end
+    return lo
+end
+
+-- Ordered insert; a build in path order appends after one comparison.
+local function insert(G, t, key, v, before)
+    local list = t[key]
+    if not list then t[key] = { v }; return end
+    local n = #list
+    if before(G, list[n], v) then list[n + 1] = v; return end
+    table.insert(list, search(G, list, v, before), v)
+end
+
+local function remove(G, t, key, v, before)
+    local list = t[key]
+    if not list then return end
+    local i = search(G, list, v, before)
+    if list[i] ~= v then return end
+    table.remove(list, i)
+    if #list == 0 then t[key] = nil end
+end
+
+function M.new()
+    return { files = {}, file_index = {}, file_order = {}, file_dir = {}, dir_ids = {}, nodes = {}, node_file = {},
+        id_of = {}, by_name = {}, by_lname = {}, by_qualified = {}, by_owner = {}, by_base = {}, by_stem = {}, pkg_files = {},
+        lua_global_export_tables = { 'g_exports' },
+        children = {}, dir_files = {}, dir_by_base = {}, ns_files = {},
+        next_file = 0, next_node = 0, next_dir = 0, file_count = 0, node_count = 0 }
+end
+
+local function namespaces(rec)
+    local seen = {}
+    if rec.language == 'csharp' then
+        for _, node in ipairs(rec.nodes) do
+            if node.kind == 'namespace' then seen[node.qualified] = true end
+        end
+    end
+    return seen
+end
+
+-- Qualifier of a qualified name: `Box` for `Box::area`, `M` for `M:split` or `M.trim`.
+-- by_owner lists members wherever they are defined (out-of-line, other files).
+function M.owner(qualified)
+    return qualified:match('^(.+)::[^:]+$') or qualified:match('^(.+)[%.:][^%.:]+$')
+end
+
+-- Add a record under rel. No cancellation checkpoints: index commits call
+-- this and must not stop halfway.
+function M.add_file(G, rel, rec)
+    assert(not G.file_index[rel], 'file already in symbol tables: ' .. rel)
+    local f = G.next_file + 1
+    G.next_file = f
+    G.files[f], G.file_index[rel] = rec, f
+    G.file_order[#G.file_order + 1] = f
+    local order = G.file_order
+    if #order > 1 and not file_before(G, order[#order - 1], f) then
+        table.remove(order)
+        table.insert(order, search(G, order, f, file_before), f)
+    end
+    local dir = dirname(rel)
+    local did = G.dir_ids[dir]
+    if not did then G.next_dir = G.next_dir + 1; did = G.next_dir; G.dir_ids[dir] = did end
+    G.file_dir[f] = did
+    insert(G, G.by_base, basename(rel), f, file_before)
+    insert(G, G.by_stem, stem(rel), f, file_before)
+    if not G.dir_files[dir] then insert(G, G.dir_by_base, basename(dir), dir, string_before) end
+    insert(G, G.dir_files, dir, f, file_before)
+    if rec.package then insert(G, G.pkg_files, rec.package, f, file_before) end
+    for qualified in pairs(namespaces(rec)) do insert(G, G.ns_files, qualified, f, file_before) end
+    local ids = {}
+    G.id_of[f] = ids
+    for n, node in ipairs(rec.nodes) do
+        local id = G.next_node + 1
+        G.next_node = id
+        G.nodes[id], G.node_file[id] = node, f
+        ids[n] = id
+        insert(G, G.by_name, node.name, id, node_before)
+        for _, alias in ipairs(lua_bindings.aliases(node, G.lua_global_export_tables)) do insert(G, G.by_name, alias, id, node_before) end
+        insert(G, G.by_lname, node.name:lower(), id, node_before)
+        insert(G, G.by_qualified, node.qualified, id, node_before)
+        local owner = M.owner(node.qualified)
+        if owner then insert(G, G.by_owner, owner, id, node_before) end
+        if node.parent then push(G.children, ids[node.parent], id) end
+    end
+    G.file_count, G.node_count = G.file_count + 1, G.node_count + #rec.nodes
+    return f
+end
+
+function M.remove_file(G, rel)
+    local f = G.file_index[rel]
+    if not f then return end
+    local rec, ids = G.files[f], G.id_of[f]
+    for _, id in ipairs(ids) do
+        local node = G.nodes[id]
+        remove(G, G.by_name, node.name, id, node_before)
+        for _, alias in ipairs(lua_bindings.aliases(node, G.lua_global_export_tables)) do remove(G, G.by_name, alias, id, node_before) end
+        remove(G, G.by_lname, node.name:lower(), id, node_before)
+        remove(G, G.by_qualified, node.qualified, id, node_before)
+        local owner = M.owner(node.qualified)
+        if owner then remove(G, G.by_owner, owner, id, node_before) end
+        G.children[id] = nil
+    end
+    for _, id in ipairs(ids) do G.nodes[id], G.node_file[id] = nil, nil end
+    local dir = dirname(rel)
+    remove(G, G.by_base, basename(rel), f, file_before)
+    remove(G, G.by_stem, stem(rel), f, file_before)
+    remove(G, G.dir_files, dir, f, file_before)
+    if not G.dir_files[dir] then remove(G, G.dir_by_base, basename(dir), dir, string_before) end
+    if rec.package then remove(G, G.pkg_files, rec.package, f, file_before) end
+    for qualified in pairs(namespaces(rec)) do remove(G, G.ns_files, qualified, f, file_before) end
+    local order = G.file_order
+    table.remove(order, search(G, order, f, file_before))
+    G.files[f], G.file_index[rel], G.id_of[f], G.file_dir[f] = nil, nil, nil, nil
+    G.file_count, G.node_count = G.file_count - 1, G.node_count - #ids
+end
+
+-- Symbol tables for every record of idx. Checkpoints per file: a cancelled
+-- build is simply discarded.
+function M.build(idx, lua_context)
+    local G = M.new()
+    G.root = idx.root
+    G.lua_global_export_tables = (lua_context or lua_bindings.context(G)).global_export_tables
+    local paths = {}
+    for rel in pairs(idx.files) do paths[#paths + 1] = rel end
+    table.sort(paths)
+    for _, rel in ipairs(paths) do
+        control.check()
+        M.add_file(G, rel, idx.files[rel])
+    end
+    G.generation = idx.generation
+    return G
+end
+
+-- Query-owned edges: never attach these caches to the resident symbol tables.
+M.MAX_EXPANDED = 20000
+function M.query(symbols, opts)
+    opts = opts or {}
+    local limit = opts.max_expanded or M.MAX_EXPANDED
+    assert(type(limit) == 'number' and limit >= 1 and limit % 1 == 0 and limit < math.huge,
+        'max_expanded must be a positive integer')
+    local Q = setmetatable({ out = {}, inn = {},
+        stats = { expanded = 0, incoming_scans = 0, resolved_refs = 0 }, incomplete = false }, { __index = symbols })
+    local reasons = {}; Q.stats.incomplete_reasons = reasons
+    local function incomplete(reason) Q.incomplete = true; reasons[reason] = true end
+    local resolution, observe = require('codeoutline.analysis.resolution').new()
+    Q.stats.resolution = resolution
+    local dependencies, references = {}, {}
+    local js_context = js_resolution.context(symbols)
+    js_context.include_paths = opts.include_paths
+    js_context.lua = lua_bindings.context(symbols)
+    js_context.ordinary = require('codeoutline.analysis.ordinary_bindings').context(symbols, js_context)
+    js_context.lua.ordinary = js_context.ordinary
+    Q.stats.ordinary = js_context.ordinary.stats
+    local macros = require('codeoutline.analysis.cpp.cpp_macros').context(symbols, js_context)
+    Q.stats.macros = macros.stats
+    Q.stats.workspace = js_context.workspace_stats
+    Q.stats.go = js_context.go_stats
+    Q.stats.rust = js_context.rust_stats
+    local report = opts.explain and require('codeoutline.query.query_report').new() or nil
+    Q.report = report
+    if report then
+        local add = report.add
+        function report:add(entry)
+            -- Ordinary sites carry a reference index and are counted below.
+            -- Dispatch collectors can instead report an unresolved synthetic site.
+            if entry.reason and not entry.target and not entry.reference then
+                observe('dispatch:' .. entry.source, (entry.line or 0) .. ':' .. (entry.call or ''), 'call', nil, entry.reason)
+            end
+            return add(self, entry)
+        end
+    end
+    local indirect = require('codeoutline.analysis.indirect').query(symbols, opts.dispatch_rules, report)
+    local static_dispatch = require('codeoutline.analysis.static_dispatch').query(symbols, report, js_context)
+    local implementations = require('codeoutline.analysis.implementations').context(symbols, js_context, report)
+    Q.stats.implementations = implementations.stats
+    local events = require('codeoutline.analysis.automatic_events').context(symbols, js_context, report)
+    Q.stats.events = events.stats
+    local callback_loops = require('codeoutline.analysis.lua.lua_callback_loops').context(symbols, js_context, report)
+    Q.stats.callback_loops = callback_loops.stats
+    local go_frameworks = require('codeoutline.analysis.go.go_frameworks').context(symbols, js_context, report)
+    Q.stats.go_frameworks = go_frameworks.stats
+    local function context_limits()
+        if js_context.include_incomplete then incomplete('include_closure_limit') end
+        if js_context.workspace_incomplete then incomplete('js_workspace_analysis_incomplete') end
+        if js_context.go_incomplete then incomplete('go_module_analysis_incomplete') end
+        if js_context.go_methods_incomplete then incomplete('go_method_set_analysis_incomplete') end
+        if go_frameworks.incomplete then incomplete('go_framework_analysis_incomplete') end
+        if js_context.cpp_receivers_incomplete then incomplete('cpp_receiver_analysis_incomplete') end
+        if js_context.rust_incomplete then incomplete('rust_resolution_incomplete') end
+        if js_context.receiver_incomplete then incomplete('receiver_resolution_incomplete') end
+    end
+    local function deps(f)
+        local entry = dependencies[f]
+        if not entry then
+            local direct, paired, incomplete = M.visible_dependencies(symbols, f, js_context)
+            if incomplete then Q.incomplete = true; reasons.include_closure_limit = true end
+            entry = { direct, paired }; dependencies[f] = entry
+        end
+        return entry[1], entry[2]
+    end
+    local function targets(f, i, explain)
+        if symbols.files[f].refs.kind[i] == 'type' then return {} end
+        if static_dispatch.handles(f, i) or symbols.files[f].language == 'lua'
+            and symbols.files[f].refs.kind[i] == 'call' and callback_loops.handles(f, i) then
+            if callback_loops.incomplete then incomplete('lua_callback_analysis_incomplete') end
+            return {}
+        end
+        local rec, ids = symbols.files[f], symbols.id_of[f]
+        local refs = rec.refs
+        local direct, paired = deps(f)
+        Q.stats.resolved_refs = Q.stats.resolved_refs + 1
+        local evidence = js_context.ordinary.evidence(f, i)
+        local found, reason, macro_state = resolve_ref(symbols, f, ids[refs.from[i]], refs.name[i], refs.kind[i],
+            refs.recv[i] or nil, direct, paired, nil, evidence, js_context, refs.line[i])
+        if refs.kind[i] == 'call' and found then
+            local nominal = false
+            for _, id in ipairs(found) do
+                local kind = symbols.nodes[id].kind
+                if kind == 'class' or kind == 'struct' or kind == 'interface' then nominal = true; break end
+            end
+            if nominal then
+                if (js_context.ordinary.data(f).type_exclusions or {})[i] then return {} end
+            end
+        end
+        observe(f, i, refs.kind[i], found, reason)
+        if reason and reason:find('candidate scan limit reached', 1, true) then incomplete('candidate_scan_limit') end
+        if reason and reason:find('tied candidate limit reached', 1, true) then incomplete('tied_candidate_limit') end
+        if macros.incomplete then incomplete('cpp_macro_analysis_incomplete') end
+        context_limits()
+        if report and explain and (refs.kind[i] == 'call' or refs.kind[i] == 'member_call') then
+            if (not found or #found == 0) and explain == true then
+                report:add({ source = ids[refs.from[i]], line = refs.line[i], call = refs.name[i], reason = reason or 'unresolved reference',
+                    reference = i, binding = evidence, macro_state = macro_state })
+            else
+                for _, dst in ipairs(found or {}) do
+                    if explain == true or explain[dst] then
+                        report:add({ source = ids[refs.from[i]], target = dst, line = refs.line[i], kind = reason })
+                    end
+                end
+            end
+        end
+        return found
+    end
+    -- Opt-in inspection of already reported failures. Suggestions never load
+    -- outgoing/incoming edges or change the execution resolver's results.
+    function Q:definition_candidates()
+        return require('codeoutline.query.definition_candidates').suggest(self, report, js_context)
+    end
+    setmetatable(Q.out, { __index = function(cache, id)
+        control.check()
+        if Q.stats.expanded >= limit then incomplete('graph_expansion_limit'); return nil end
+        Q.stats.expanded = Q.stats.expanded + 1
+        local f = assert(symbols.node_file[id], 'unknown symbol')
+        local rec, ids = symbols.files[f], symbols.id_of[f]
+        local grouped = references[f]
+        if not grouped then
+            grouped = {}
+            for i, from in ipairs(rec.refs.from) do
+                if i % 128 == 0 then control.check() end
+                if from > 0 then push(grouped, ids[from], i) end
+            end
+            references[f] = grouped
+        end
+        local edges = {}
+        for _, dst in ipairs(implementations.outgoing(id)) do
+            edges[#edges + 1] = dst
+            edges[#edges + 1] = symbols.nodes[id].line
+            edges[#edges + 1] = 'implementation'
+        end
+        if implementations.incomplete then incomplete('implementation_analysis_incomplete') end
+        for _, edge in ipairs(indirect.outgoing(id)) do
+            edges[#edges + 1] = edge.target
+            edges[#edges + 1] = edge.line
+            edges[#edges + 1] = edge.kind
+        end
+        for _, edge in ipairs(static_dispatch.outgoing(id)) do
+            edges[#edges + 1] = edge.target
+            edges[#edges + 1] = edge.line
+            edges[#edges + 1] = edge.kind
+        end
+        for _, edge in ipairs(events.outgoing(id)) do
+            edges[#edges + 1] = edge.target
+            edges[#edges + 1] = edge.line
+            edges[#edges + 1] = edge.kind
+        end
+        if events.incomplete then incomplete('automatic_event_analysis_incomplete') end
+        for _, edge in ipairs(callback_loops.outgoing(id)) do
+            edges[#edges + 1] = edge.target
+            edges[#edges + 1] = edge.line
+            edges[#edges + 1] = edge.kind
+        end
+        if callback_loops.incomplete then incomplete('lua_callback_analysis_incomplete') end
+        for _, edge in ipairs(go_frameworks.outgoing(id)) do
+            edges[#edges + 1] = edge.target
+            edges[#edges + 1] = edge.line
+            edges[#edges + 1] = edge.kind
+        end
+        if go_frameworks.incomplete then incomplete('go_framework_analysis_incomplete') end
+        for _, i in ipairs(grouped[id] or {}) do
+            control.check()
+            for _, dst in ipairs(targets(f, i, true) or {}) do
+                edges[#edges + 1] = dst
+                edges[#edges + 1] = rec.refs.line[i]
+                edges[#edges + 1] = rec.refs.kind[i]
+            end
+        end
+        rawset(cache, id, edges)
+        return edges
+    end })
+    -- Resolve all requested callers with a single ordered multi-name scan.
+    function Q:load_incoming(ids, progress)
+        local wanted, names, family_names, local_names, found = {}, {}, {}, {}, false
+        for _, id in ipairs(ids) do
+            if rawget(self.inn, id) == nil then
+                wanted[id], names[symbols.nodes[id].name], found = true, true, true
+                local f = symbols.node_file[id]
+                local rec, node = symbols.files[f], symbols.nodes[id]
+                local lang = family(rec.language)
+                -- The generic resolver cannot reach a translation-unit static
+                -- from another source file. Header statics remain visible.
+                local private = C_FAMILY[rec.language] and node.static
+                    and not HEADER_EXT[rec.path:match('%.(%w+)$') or '']
+                local bucket = private and local_names or family_names
+                local key = private and f or lang
+                bucket[key] = bucket[key] or {}
+                bucket[key][node.name] = true
+                for _, alias in ipairs(lua_bindings.aliases(symbols.nodes[id], symbols.lua_global_export_tables)) do
+                    names[alias], bucket[key][alias] = true, true
+                end
+            end
+        end
+        if not found then return end
+        local incoming = {}
+        for id in pairs(wanted) do
+            incoming[id] = {}
+            for _, source in ipairs(implementations.incoming(id)) do
+                push3(incoming, id, source, symbols.nodes[source].line, 'implementation')
+            end
+        end
+        -- A bounded impact query may retain verified edges from a completed
+        -- prefix of the scan. They never enter the normal incoming cache.
+        if progress then progress(incoming) end
+        if implementations.incomplete then incomplete('implementation_analysis_incomplete') end
+        local indirect_incoming = indirect.incoming(wanted)
+        for src, edges in pairs(go_frameworks.incoming(wanted)) do
+            for _, edge in ipairs(edges) do push3(incoming, edge.target, src, edge.line, edge.kind) end
+        end
+        if go_frameworks.incomplete then incomplete('go_framework_analysis_incomplete') end
+        for src, edges in pairs(callback_loops.incoming(wanted)) do
+            for _, edge in ipairs(edges) do push3(incoming, edge.target, src, edge.line, edge.kind) end
+        end
+        if callback_loops.incomplete then incomplete('lua_callback_analysis_incomplete') end
+        for src, edges in pairs(events.incoming(wanted)) do
+            for _, edge in ipairs(edges) do push3(incoming, edge.target, src, edge.line, edge.kind) end
+        end
+        if events.incomplete then incomplete('automatic_event_analysis_incomplete') end
+        for src, edges in pairs(static_dispatch.incoming(wanted)) do
+            for _, edge in ipairs(edges) do push3(incoming, edge.target, src, edge.line, edge.kind) end
+        end
+        local indirect_sources = {}
+        for src in pairs(indirect_incoming) do
+            if #indirect_sources % 128 == 0 then control.check() end
+            indirect_sources[#indirect_sources + 1] = src
+        end
+        table.sort(indirect_sources, function(a, b) return M.before(symbols, a, b) end)
+        for _, src in ipairs(indirect_sources) do
+            control.check()
+            for _, edge in ipairs(indirect_incoming[src]) do
+                if wanted[edge.target] then push3(incoming, edge.target, src, edge.line, edge.kind) end
+            end
+        end
+        self.stats.incoming_scans = self.stats.incoming_scans + 1
+        -- Lua modules can target Lua files or native files identified by
+        -- luaopen_* (the same resident evidence used by foreign.modules).
+        -- Other targets cannot be reached through Lua import/local bindings.
+        local native_targets, checked_native = false, {}
+        local lua_names = {}
+        for id in pairs(wanted) do
+            local f = symbols.node_file[id]
+            local rec = symbols.files[f]
+            if rec.language == 'lua' then
+                local local_index = id - symbols.id_of[f][1] + 1
+                for name, n in pairs(rec.lua_exports or {}) do if n == local_index then lua_names[name] = true end end
+                local locals = rec.lua_locals or rec.lua_binding_names and js_context.ordinary.data(f).lua_locals or {}
+                for _, members in ipairs(locals) do
+                    for name, n in pairs(members) do if n == local_index then lua_names[name] = true end end
+                end
+            end
+            if C_FAMILY[rec.language] and not checked_native[f] then
+                checked_native[f] = true
+                for _, node in ipairs(rec.nodes) do
+                    if node.name:match('^luaopen_(.+)$') then native_targets = true; break end
+                end
+            end
+        end
+        -- Hot loop over every reference: numeric loops, hoisted fields, and the
+        -- selective name test first. Checkpoints run per file and per chunk.
+        local files = symbols.files
+        local candidates = js_context.ordinary.candidates(wanted)
+        context_limits()
+        for _, f in ipairs(symbols.file_order) do
+            control.check()
+            local language = files[f].language
+            local file_names = family_names[family(language)]
+            local private_names = local_names[f]
+            if language == 'lua' and native_targets then file_names = names end
+            if not file_names and not private_names then goto next_incoming_file end
+            file_names = file_names or {}
+            local alias_refs = js_context.ordinary.aliases(f, wanted, candidates)
+            if files[f].language == 'rust' then
+                for i in pairs(require('codeoutline.analysis.rust.rust_resolution').alias_refs(symbols, f, wanted, js_context)) do alias_refs[i] = true end
+            end
+            local aliases = {}
+            if files[f].language == 'kotlin' then
+                for _, imp in ipairs(files[f].imports) do
+                    if imp.alias and file_names[imp.path:match('([^.]+)$')] then aliases[imp.alias] = true end
+                end
+            end
+            local refs = files[f].refs
+            local lua_values = {}
+            for index, imp in ipairs(files[f].lua_imports or {}) do
+                if imp.member and (native_targets or lua_names[imp.member]) then lua_values['lua-value:' .. index] = true end
+            end
+            local lua_evidence = refs.lua_binding
+            local imported_native = false
+            if native_targets and not lua_evidence then
+                for _, imp in ipairs(files[f].lua_imports or {}) do
+                    for _, target in ipairs(lua_bindings.modules(symbols, imp, js_context.lua)) do
+                        if checked_native[target] then imported_native = true; break end
+                    end
+                    if imported_native then break end
+                end
+            end
+            if (next(lua_values) or imported_native) and not lua_evidence then lua_evidence = js_context.ordinary.data(f).refs.lua_binding end
+            local ref_names, froms = refs.name, refs.from
+            local count = #ref_names
+            for first = 1, count, 4096 do
+                if first > 1 then control.check() end
+                for i = first, math.min(count, first + 4095) do
+                    if (file_names[ref_names[i]] or private_names and private_names[ref_names[i]]
+                        or aliases[ref_names[i]] or aliases[refs.recv[i]]
+                        or alias_refs[i]
+                        or (lua_evidence and lua_evidence[i] ~= '' and
+                            (native_targets or lua_names[ref_names[i]] or lua_values[lua_evidence[i]]))) and froms[i] > 0 then
+                        for _, dst in ipairs(targets(f, i, wanted) or {}) do
+                            if wanted[dst] then
+                                push3(incoming, dst, symbols.id_of[f][froms[i]], refs.line[i], refs.kind[i])
+                            end
+                        end
+                    end
+                end
+            end
+            ::next_incoming_file::
+        end
+        -- Interrupted scans never publish partial caller lists.
+        context_limits()
+        for id, edges in pairs(incoming) do rawset(self.inn, id, edges) end
+    end
+    setmetatable(Q.inn, { __index = function(cache, id)
+        Q:load_incoming({ id })
+        return rawget(cache, id)
+    end })
+    return Q
+end
+
+-- Navigation reuses the resolver over symbol tables or overlays of them.
+M.CALLABLE = CALLABLE
+M.dependencies = resolve_deps
+M.resolve = resolve_ref
+M.placement = locality
+M.is_decl = is_decl
+M.family = family
+
+-- Location string for a node: "path:line".
+function M.where(G, id)
+    return G.files[G.node_file[id]].path .. ':' .. G.nodes[id].line
+end
+
+return M

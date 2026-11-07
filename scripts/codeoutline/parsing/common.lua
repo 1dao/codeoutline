@@ -1,0 +1,244 @@
+-- common.lua — the per-file result model every language parser fills, plus
+-- helpers shared by the parsers.
+--
+-- Result: {
+--   path, language,
+--   nodes   = { {kind, name, qualified, line, end_line, sig?, parent?, static?, bases?} },
+--   refs    = { name = {...}, from = {...}, kind = {...}, line = {...}, recv = {...} },
+--   imports = { {path, line, names?} },
+-- }
+-- Unless ranges=false, nodes store start_byte/end_byte and name_start/name_end as zero-based,
+-- half-open byte ranges in the parser input (after BOM removal), and refs gain
+-- start/stop columns for each name token (false when the token is not the name).
+-- Refs are attributed after parsing: a parser only records where each call
+-- sits (token index) and assign_refs() hands it to the innermost node whose
+-- token range contains it. That keeps nested functions/classes correct
+-- without each parser tracking scope for every call site.
+-- finish() then packs refs into parallel columns -- ref i is name[i],
+-- from[i] (node index | 0 for file scope), kind[i], line[i], recv[i]
+-- (false when absent) -- because a large tree holds hundreds of thousands of
+-- refs and a table per ref costs several times the data it carries.
+
+local M = {}
+local text = require('codeoutline.shared.text')
+
+function M.new(path, language, opts)
+    return { path = path, language = language, nodes = {}, refs = {}, imports = {},
+        ranges = not opts or opts.ranges ~= false, collect_dispatch = opts and opts.dispatch,
+        dispatch_only = opts and opts.dispatch_only, collect_static_dispatch = opts and opts.static_dispatch,
+        cpp_aliases_only = opts and opts.cpp_aliases_only,
+        collect_type_uses = opts and opts.type_uses,
+        defer_analysis = opts and opts.analysis == false or nil,
+        ordinary_bindings = opts and opts.ordinary_bindings,
+        collect_foreign = opts and opts.foreign, omit_signatures = opts and opts.omit_signatures }
+end
+
+-- Collapse a token span into a one-line signature.
+function M.sig(T, a, b, max)
+    local src = T.src:sub(T.s[a], T.e[b])
+    src = src:gsub('%s+', ' ')
+    max = max or 200
+    if #src > max then src = text.prefix(text.valid(src), max) .. '...' end
+    return src
+end
+
+-- ti/tj: token range the node covers (used for ref attribution, then dropped).
+-- ni/nj: declaration name tokens; range_end overrides a synthetic block end.
+function M.add_node(r, T, f)
+    if not r.defer_analysis and r.collect_type_uses ~= false and (r.ranges or r.ordinary_bindings)
+        and r.language ~= 'lua' and r.language ~= 'python' and r.language ~= 'javascript' then f.type_token = f.ni or f.ti end
+    if r.ordinary_bindings and (r.language == 'c' or r.language == 'cpp') then
+        r.cpp_declaration_tokens = r.cpp_declaration_tokens or {}
+        r.cpp_declaration_tokens[#r.nodes + 1] = f.ni or f.ti
+    end
+    local parent = f.parent and r.nodes[f.parent]
+    local sep = f.sep or '.'
+    f.qualified = parent and (parent.qualified .. sep .. f.name) or ((r.prefix and (r.prefix .. sep) or '') .. f.name)
+    f.line = f.line or T:line(f.ti)
+    f.end_line = f.end_line or T:eline(f.tj)
+    if r.ranges then
+        local ni, nj = f.ni or f.ti, f.nj or f.ni or f.ti
+        f.name_start = f.name_start or T.s[ni] - 1
+        f.name_end = f.name_end or T.e[nj]
+        f.start_byte = math.min(T.s[f.ti] - 1, f.name_start)
+        f.end_byte = math.max(T.e[f.range_end or f.tj], f.name_end)
+    end
+    f.ni, f.nj, f.range_end = nil, nil, nil
+    f.sep = nil
+    r.nodes[#r.nodes + 1] = f
+    return #r.nodes
+end
+
+-- Record every call site in token range [a, b].
+local MEMBER = { ['.'] = true, ['->'] = true, ['::'] = true, ['?.'] = true }
+function M.add_calls(r, T, a, b)
+    if r.cpp_aliases_only then return end
+    local skip = r.skip_calls
+    local member = r.member_ops or MEMBER    -- Lua adds ':' (obj:method())
+    for _, x in ipairs(T:calls(a, b)) do
+        if skip and skip[T:text(x)] then goto next end
+        local kind, recv = 'call', nil
+        local p = x - 1
+        if p >= 1 and T.k[p] == 'op' and member[T:text(p)] then
+            kind = 'member_call'
+            if T.k[p - 1] == 'id' or T.k[p - 1] == 'kw' then recv = T:text(p - 1) end
+        elseif p >= 1 and T.k[p] == 'kw' and T:text(p) == 'new' then
+            kind = 'new'
+        elseif p >= 1 and T.k[p] == 'op' and T:text(p) == '@' then
+            kind = 'annotation'
+        end
+        r.refs[#r.refs + 1] = { tok = x, name = T:text(x), kind = kind, line = T:line(x), recv = recv }
+        ::next::
+    end
+end
+
+-- Identifiers used as bare values — `lua_pushcfunction(L, fn)`, `{"name", fn}`,
+-- `cb = fn;` — the usual way C code registers callbacks. Only single-token
+-- operands between separators qualify, which keeps locals-in-expressions out.
+local BEFORE = { [','] = true, ['('] = true, ['='] = true, ['{'] = true, ['&'] = true }
+local AFTER = { [','] = true, [')'] = true, ['}'] = true, [';'] = true }
+function M.add_value_refs(r, T, a, b)
+    if r.cpp_aliases_only then return end
+    local seen = {}
+    for _, x in ipairs(T:idents(a, b)) do
+        local p, q = x - 1, x + 1
+        if T.k[p] == 'op' and T.k[q] == 'op' and BEFORE[T:text(p)] and AFTER[T:text(q)] then
+            local name = T:text(x)
+            if not seen[name] then
+                seen[name] = true
+                r.refs[#r.refs + 1] = { tok = x, name = name, kind = 'ref', line = T:line(x) }
+            end
+        end
+    end
+end
+
+-- Hand each ref to the innermost node whose token range contains it. Node
+-- ranges nest or are disjoint, so one sweep with a stack does it.
+function M.assign_refs(r)
+    local order = {}
+    for i, n in ipairs(r.nodes) do if n.ti then order[#order + 1] = i end end
+    table.sort(order, function(a, b)
+        local na, nb = r.nodes[a], r.nodes[b]
+        if na.ti ~= nb.ti then return na.ti < nb.ti end
+        if na.tj ~= nb.tj then return na.tj > nb.tj end
+        return a < b
+    end)
+    -- table.sort is unstable (and randomizes pivots on large arrays), so
+    -- break ties by insertion order to keep output deterministic.
+    for i, ref in ipairs(r.refs) do ref.seq = i end
+    table.sort(r.refs, function(a, b)
+        if a.tok ~= b.tok then return a.tok < b.tok end
+        return a.seq < b.seq
+    end)
+    local stack, oi = {}, 1
+    for _, ref in ipairs(r.refs) do
+        while oi <= #order and r.nodes[order[oi]].ti <= ref.tok do
+            local n = r.nodes[order[oi]]
+            while #stack > 0 and r.nodes[stack[#stack]].tj < n.ti do stack[#stack] = nil end
+            stack[#stack + 1] = order[oi]
+            oi = oi + 1
+        end
+        while #stack > 0 and r.nodes[stack[#stack]].tj < ref.tok do stack[#stack] = nil end
+        ref.from = stack[#stack] or 0
+    end
+end
+
+-- Drop parser-internal fields so the result is plain data.
+function M.finish(r, T)
+    if r.cpp_aliases_only then
+        require('codeoutline.analysis.cpp.cpp_types').collect(r, T)
+        r.cpp_aliases_only = nil
+        return r
+    end
+    if T then require('codeoutline.analysis.function_values').collect(r, T) end
+    if T and not r.defer_analysis and r.collect_type_uses ~= false and (r.ranges or r.ordinary_bindings) then require('codeoutline.analysis.type_uses').collect(r, T) end
+    if T and r.collect_foreign and (r.language == 'c' or r.language == 'cpp') then
+        require('codeoutline.analysis.foreign').collect(r, T)
+    end
+    r.collect_foreign = nil
+    M.assign_refs(r)
+    if r.type_use_refs then M.assign_refs({ nodes = r.nodes, refs = r.type_use_refs }) end
+    if T then require('codeoutline.analysis.static_dispatch').collect(r, T) end
+    r.collect_static_dispatch = nil
+    -- Query-only parse: preserve normal declaration/call attribution, but do
+    -- not build binding evidence or compact records that will be discarded.
+    if r.dispatch_only then
+        require('codeoutline.analysis.indirect').collect(r, T)
+        r.dispatch_only, r.collect_dispatch = nil, nil
+        return r
+    end
+    if T then require('codeoutline.analysis.js.js_evidence').collect(r, T) end
+    if T and r.ordinary_bindings then
+        require('codeoutline.analysis.cpp.cpp_macros').collect(r, T)
+        require('codeoutline.analysis.python.python_bindings').collect(r, T)
+        require('codeoutline.analysis.cpp.cpp_bindings').collect(r, T, r.type_use_refs)
+        require('codeoutline.analysis.cpp.cpp_receivers').collect(r, T)
+        if r.language == 'csharp' then require('codeoutline.analysis.csharp.csharp_bindings').collect(r, T) end
+        require('codeoutline.analysis.implementations').collect(r, T)
+        if r.language == 'go' then require('codeoutline.analysis.go.go_frameworks').collect(r, T) end
+        require('codeoutline.analysis.automatic_events').collect(r, T)
+        require('codeoutline.analysis.shared_events').collect(r, T)
+    end
+    if T and not r.defer_analysis and (r.ranges or r.ordinary_bindings) then require('codeoutline.analysis.receivers').collect(r, T) end
+    if T then require('codeoutline.analysis.indirect').collect(r, T) end
+    r.collect_dispatch = nil
+    local original_refs = r.refs
+    local name, from, kind, line, recv = {}, {}, {}, {}, {}
+    local js_receiver = not r.defer_analysis and r.js_imports and (r.ranges or r.ordinary_bindings) and {}
+    local lua_binding = not r.defer_analysis and r.lua_imports and (r.ranges or r.ordinary_bindings) and {}
+    local binding = (r.python_imports or r.has_bindings) and {}
+    local receiver = r.receivers and {}
+    r.has_bindings = nil
+    local start, stop = r.ranges and T and {}, r.ranges and T and {}
+    for i, ref in ipairs(r.refs) do
+        name[i], from[i], kind[i], line[i], recv[i] = ref.name, ref.from, ref.kind, ref.line, ref.recv or false
+        if js_receiver then js_receiver[i] = ref.js_receiver or '' end
+        if lua_binding then lua_binding[i] = ref.lua_binding or '' end
+        if binding then binding[i] = ref.binding or '' end
+        if receiver then receiver[i] = ref.receiver or '' end
+        if start then
+            local named = T:text(ref.tok) == ref.name
+            start[i], stop[i] = named and T.s[ref.tok] - 1 or false, named and T.e[ref.tok] or false
+        end
+    end
+    r.refs = { name = name, from = from, kind = kind, line = line, recv = recv, start = start or nil, stop = stop or nil }
+    r.refs.js_receiver = js_receiver or nil
+    r.refs.lua_binding = lua_binding or nil
+    r.refs.binding = binding
+    r.refs.receiver = receiver
+    if r.type_use_refs and #r.type_use_refs > 0 then
+        r.type_sites = {}
+        local positions = {}
+        for i, ref in ipairs(r.type_use_refs) do
+            local site = ref.type_use
+            site.name, site.from, site.recv = ref.name, ref.from, ref.recv
+            r.type_sites[i] = site
+            if site.role ~= 'construction' then positions[ref.tok] = ref.name end
+        end
+        for i, ref in ipairs(original_refs) do
+            if positions[ref.tok] == ref.name then
+                r.type_exclusions = r.type_exclusions or {}; r.type_exclusions[i] = true
+            end
+        end
+    end
+    r.type_use_refs, r.collect_type_uses = nil, nil
+    for i, n in ipairs(r.nodes) do
+        n.ti, n.tj, n.type_token = nil, nil, nil
+        if not r.ranges then
+            -- Rebuild: deleting keys does not shrink Lua table allocations.
+            local compact = {}
+            for key, value in pairs(n) do
+                if key ~= 'start_byte' and key ~= 'end_byte' and key ~= 'name_start' and key ~= 'name_end'
+                    and not (r.omit_signatures and key == 'sig') then
+                    compact[key] = value
+                end
+            end
+            r.nodes[i] = compact
+        end
+    end
+    r.ranges, r.omit_signatures, r.defer_analysis = nil, nil, nil
+    r.prefix, r.skip_calls = nil, nil
+    return r
+end
+
+return M

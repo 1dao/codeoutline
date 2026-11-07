@@ -1,7 +1,7 @@
 package.path = 'scripts/?.lua;' .. package.path
 local spec = dofile('tests/lua/spec_helper.lua')
-local parse, graph = require('codeoutline.parse'), require('codeoutline.graph')
-local headers, paths = require('codeoutline.external_headers'), require('codeoutline.path')
+local parse, graph = require('codeoutline.parsing.parse'), require('codeoutline.analysis.graph')
+local headers, paths = require('codeoutline.query.external_headers'), require('codeoutline.shared.path')
 local root = assert(xutils.temp_file(os.getenv('TEMP') or '/tmp')):gsub('\\', '/')
 os.remove(root); assert(xutils.mkdir_p(root)); root = assert(paths.canonical(root))
 local sdk = root .. '-sdk'; assert(xutils.mkdir_p(sdk))
@@ -101,7 +101,7 @@ spec.describe('on-demand external header declarations', function()
         spec.equal(#headers.find(G, f, site('outside_api'), { include_paths = { sdk } }), 0)
     end)
     spec.it('preserves cancellation identity', function()
-        local control = require('codeoutline.control')
+        local control = require('codeoutline.shared.control')
         local G, f = project('#include <entry.h>\nvoid run() { bounded_api(); }\n')
         control.callback = function() error(control.cancelled(), 0) end
         local ok, err = pcall(headers.find, G, f, site('bounded_api'), { include_paths = { sdk } })

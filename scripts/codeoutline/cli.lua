@@ -5,7 +5,7 @@ local source = debug.getinfo(1, 'S').source:sub(2):gsub('\\', '/')
 local scripts = assert(source:match('^(.*)/codeoutline/[^/]+$'), 'cannot locate installed scripts')
 package.path = scripts .. '/?.lua;' .. package.path
 local svc = require('codeoutline.service')
-local explore = require('codeoutline.explore')
+local explore = require('codeoutline.query.explore')
 
 local argv = {}
 if type(arg) == 'table' then

@@ -2,9 +2,9 @@
 -- pass does, and a cancelled one must leave stale results unused.
 package.path = 'scripts/?.lua;' .. package.path
 local spec = dofile('tests/lua/spec_helper.lua')
-local index = require('codeoutline.index')
-local pool = require('codeoutline.parse_pool')
-local control = require('codeoutline.control')
+local index = require('codeoutline.indexing.index')
+local pool = require('codeoutline.indexing.parse_pool')
+local control = require('codeoutline.shared.control')
 local root = assert(xutils.temp_file(os.getenv('TEMP') or os.getenv('TMPDIR') or '/tmp')):gsub('\\', '/')
 os.remove(root)
 local project = root .. '/project'
@@ -204,7 +204,7 @@ steps[#steps + 1] = { 'drains cancelled work before reclaiming workers without a
 end }
 
 steps[#steps + 1] = { 'preserves serial mode when parse threads are disabled', function()
-    pool.configure('scripts/codeoutline/parse_worker.lua', 0)
+    pool.configure('scripts/codeoutline/runtime/parse_worker.lua', 0)
     spec.equal(pool.ready(), false)
     local idx = index.open(project, { cache_path = root .. '/disabled.idx', lister = 'walk', rebuild = true,
         max_file_bytes = MAX_BYTES })
@@ -224,7 +224,7 @@ return {
             if ok then created = created + 1 end
             return ok, err
         end
-        pool.configure('scripts/codeoutline/parse_worker.lua', 4)
+        pool.configure('scripts/codeoutline/runtime/parse_worker.lua', 4)
         step()
     end,
     __thread_handle = function(_, op, token, results, failure)

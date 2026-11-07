@@ -6,8 +6,8 @@
 -- Lua blocks close with keywords, not brackets, so the parser pairs
 -- function/if/do/repeat with end/until itself; brackets come from xscan.
 
-local xscan = require('codeoutline.xscan')
-local common = require('codeoutline.common')
+local xscan = require('codeoutline.parsing.xscan')
+local common = require('codeoutline.parsing.common')
 
 local M = {}
 
@@ -229,7 +229,7 @@ function M.parse(path, src, language, opts)
     r.refs = kept
     if not r.dispatch_only then
         common.assign_refs(r)
-        require('codeoutline.lua_bindings').collect(r, T, bm)
+        require('codeoutline.analysis.lua.lua_bindings').collect(r, T, bm)
     end
     r.member_ops = nil
     return common.finish(r, T), T

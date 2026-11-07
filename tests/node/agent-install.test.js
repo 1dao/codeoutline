@@ -225,7 +225,7 @@ test('config edits preserve JSONC strings/comments and TOML/YAML section boundar
     ];
     await writeFile(input, JSON.stringify(cases));
     await writeFile(runner, `package.path = os.getenv('CO_TEST_ROOT') .. '/scripts/?.lua;' .. package.path
-local config = require('codeoutline.agent_config')
+local config = require('codeoutline.install.agent_config')
 local f = assert(io.open(os.getenv('CO_TEST_INPUT'), 'rb'))
 local cases = xutils.json_unpack(f:read('a')); f:close()
 local out = {}

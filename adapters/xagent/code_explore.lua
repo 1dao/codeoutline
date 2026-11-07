@@ -36,7 +36,7 @@ return {
         local ok, text, info = pcall(svc.explore, root, query, { budget = tonumber(input.budget) })
         if not ok then
             return { content = 'Error: ' .. tostring(text), is_error = true,
-                metadata = { state = 'error', error = require('codeoutline.coverage').error(text) } }
+                metadata = { state = 'error', error = require('codeoutline.query.coverage').error(text) } }
         end
         return { content = text, metadata = { state = info.coverage.partial and 'partial' or 'ok',
             coverage = info.coverage, resolution = info.resolution, projectPath = info.projectPath, generation = info.generation } }

@@ -81,7 +81,7 @@ test('optional editor installation: detection, selection, offline assets and npm
         assert.equal(bestEffort.status, 0, bestEffort.stderr);
         // Full cleanup runs with service/registry operations isolated from the host.
         const runner = join(temp, 'cleanup.lua');
-        await writeFile(runner, `package.preload['codeoutline.daemon'] = function()
+        await writeFile(runner, `package.preload['codeoutline.install.daemon'] = function()
     return { PORT = 19876, unregister = function() io.write('TEST_UNREGISTER\\n'); return {} end,
         state_dir = function() return os.getenv('USERPROFILE') .. '/.codeoutline' end,
         stop = function(_, _, done) done(true) end }

@@ -26,7 +26,7 @@ test('npm setup confirms each AI tool and editor, defaults to install, and start
     await writeFile(join(bin, win ? 'zed.exe' : 'zed'), '');
     // Exercise the real CLI lifecycle while replacing login/service operations
     // so the test never registers a task or starts a background service.
-    await writeFile(runner, `package.preload['codeoutline.daemon'] = function()
+    await writeFile(runner, `package.preload['codeoutline.install.daemon'] = function()
     return { PORT = 19876, register = function() return 'test-login-entry' end,
         stop = function(_, _, done) done(true) end,
         spawn = function() io.write('TEST_SERVICE_STARTED\\n'); return true end,

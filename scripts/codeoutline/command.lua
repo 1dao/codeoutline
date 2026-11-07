@@ -379,7 +379,7 @@ local function doctor(root)
     end)
     local idx
     check('project', function()
-        idx = require('codeoutline.index').open(root)
+        idx = require('codeoutline.indexing.index').open(root)
         return idx.root
     end)
     check('enumerator', function()
@@ -414,10 +414,10 @@ local function run()
         return require('codeoutline.updater').run(options.check and 'check' or 'update', options)
     end
     if command == 'editors' then
-        return require('codeoutline.editor_install').run(os.getenv('CODEOUTLINE_INITIAL') or install, options)
+        return require('codeoutline.install.editor_install').run(os.getenv('CODEOUTLINE_INITIAL') or install, options)
     end
     if command == 'agents' or command == 'install' and (options.list or options.print or options['print-config']) then
-        return require('codeoutline.agent_install').run(options)
+        return require('codeoutline.install.agent_install').run(options)
     end
     if command == 'remove' then
         assert(os.getenv('CODEOUTLINE_REMOVE_READY'), 'remove requires the npm launcher; use uninstall --purge for a native installation')
@@ -425,7 +425,7 @@ local function run()
         options.purge = true
     end
     if command == 'daemon' or command == 'install' or command == 'uninstall' or command == 'remove' then
-        local daemon = require('codeoutline.daemon')
+        local daemon = require('codeoutline.install.daemon')
         local port = tonumber(options.port or daemon.PORT)
         assert(port and port % 1 == 0 and port >= 1 and port <= 65535, 'invalid --port')
         if command == 'daemon' then
@@ -466,7 +466,7 @@ local function run()
             if automatic then say('Global npm setup: installing detected integrations by default. Use --foreground-scripts for per-application choices.') end
             options.installing = true
             say('Step 1/2: AI agents - codeoutline_explore over MCP')
-            local agent_ok, agent_result = pcall(require('codeoutline.agent_install').run, options)
+            local agent_ok, agent_result = pcall(require('codeoutline.install.agent_install').run, options)
             if not agent_ok then io.stderr:write('codeoutline: ', tostring(agent_result), '\n') end
             if not agent_ok or agent_result ~= 0 then integrations_ok = false end
             if not npm and not agent_ok then return 1 end
@@ -474,7 +474,7 @@ local function run()
             local editor_selection = options.editors or os.getenv('CODEOUTLINE_EDITORS')
             if editor_selection == '' then editor_selection = nil end
             local editor_options = { editors = editor_selection or (automatic and 'all' or options.yes and 'none' or nil) }
-            local ok, result = pcall(require('codeoutline.editor_install').run, os.getenv('CODEOUTLINE_INITIAL') or install, editor_options)
+            local ok, result = pcall(require('codeoutline.install.editor_install').run, os.getenv('CODEOUTLINE_INITIAL') or install, editor_options)
             if not ok then io.stderr:write('codeoutline: ', tostring(result), '\n') end
             if not ok or result ~= 0 then integrations_ok = false end
             if not npm then status = ok and result or 1 end
@@ -504,8 +504,8 @@ local function run()
                         say(stopped and 'service on port ' .. port .. ' stopped' or 'service on port ' .. port .. ' is still running')
                         if not stopped then status = 1 end
                         if not options['service-only'] then
-                            if attempt(function() return require('codeoutline.agent_install').remove(options) end) ~= 0 then status = 1 end
-                            if attempt(function() return require('codeoutline.editor_install').remove() end) ~= 0 then status = 1 end
+                            if attempt(function() return require('codeoutline.install.agent_install').remove(options) end) ~= 0 then status = 1 end
+                            if attempt(function() return require('codeoutline.install.editor_install').remove() end) ~= 0 then status = 1 end
                         end
                         if options.purge and status == 0 then
                             attempt(function()

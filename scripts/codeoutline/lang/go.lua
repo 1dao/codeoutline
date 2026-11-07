@@ -7,8 +7,8 @@
 -- stmt_end(): a statement runs to the end of its line, extended across any
 -- bracket group that spans lines.
 
-local xscan = require('codeoutline.xscan')
-local common = require('codeoutline.common')
+local xscan = require('codeoutline.parsing.xscan')
+local common = require('codeoutline.parsing.common')
 
 local M = {}
 

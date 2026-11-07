@@ -4,8 +4,8 @@
 -- operators, properties (accessor and expression-bodied), fields, events,
 -- delegates, enum members, attributes, and calls.
 
-local xscan = require('codeoutline.xscan')
-local common = require('codeoutline.common')
+local xscan = require('codeoutline.parsing.xscan')
+local common = require('codeoutline.parsing.common')
 
 local M = {}
 

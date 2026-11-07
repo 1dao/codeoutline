@@ -1,0 +1,848 @@
+-- index.lua — per-project symbol index: which files exist, what each one
+-- defines and calls, kept fresh incrementally and cached on disk.
+--
+--   local index = require('codeoutline.indexing.index')
+--   local idx = index.open('C:/src/proj')        -- loads the cache if present
+--   local stats = idx:refresh()                   -- reparses only changed files
+--   idx:save()
+--   idx:watch()                                   -- long-lived hosts: later
+--                                                 -- refreshes visit only changes
+--
+-- Change detection trusts an unchanged size + mtime once the file was last
+-- read strictly after that mtime second, skipping the read entirely; otherwise
+-- it reads the file and compares size + CRC-32, which still skips the parse.
+-- Tools that restore an older mtime at the same size are not detected by a
+-- full refresh; a watcher reports them.
+
+local ci = require('codeoutline.parsing.parse')
+local paths = require('codeoutline.shared.path')
+local control = require('codeoutline.shared.control')
+local graph = require('codeoutline.analysis.graph')
+local pool = require('codeoutline.indexing.parse_pool')
+local fragments = require('codeoutline.indexing.cpp_fragments')
+
+local M = {}
+local INDEX_PARSE = { ranges = false, omit_signatures = true }
+local LARGE_PARSE = { ranges = false }
+-- Keep signatures for files beyond the shared query parser's 1 MiB limit.
+local function parse_options(source, language)
+    local options = #source <= 1048576 and INDEX_PARSE or LARGE_PARSE
+    if not language then return options end
+    return { ranges = false, omit_signatures = options.omit_signatures, language = language, cpp_fragment = language }
+end
+
+-- Cache version: a checksum of the parser sources, so any parser change
+-- rebuilds stale caches instead of silently reusing old parse results.
+M.VERSION = (function()
+    local parts = {}
+    for _, m in ipairs({ 'parsing.xscan', 'shared.text', 'parsing.common', 'analysis.receivers', 'analysis.type_uses', 'analysis.indirect', 'analysis.dispatch_aliases', 'analysis.static_dispatch', 'analysis.js.js_evidence', 'analysis.python.python_bindings', 'analysis.cpp.cpp_bindings', 'analysis.cpp.cpp_types', 'analysis.csharp.csharp_bindings', 'analysis.lua.lua_bindings', 'analysis.foreign', 'analysis.lua.foreign_lua', 'parsing.parse', 'lang.c', 'lang.cpp', 'lang.lua', 'lang.python',
+        'analysis.cpp.cpp_receivers', 'analysis.cpp.cpp_macros', 'analysis.cpp.cpp_includes', 'indexing.cpp_fragments', 'parsing.language_detect', 'analysis.go.go_methods', 'analysis.go.go_frameworks', 'analysis.function_values', 'analysis.implementations', 'analysis.cpp.cpp_implementations', 'analysis.js.ts_implementations', 'analysis.type_bases', 'analysis.automatic_events', 'analysis.shared_events', 'analysis.lua.lua_callback_loops', 'lang.java', 'lang.kotlin', 'lang.go', 'lang.js', 'lang.csharp', 'lang.rust' }) do
+        local file = package.searchpath and package.searchpath('codeoutline.' .. m, package.path)
+        local h = file and io.open(file, 'rb')
+        if h then parts[#parts + 1] = h:read('a'); h:close() end
+    end
+    return 'p5-compact-nodes-' .. xutils.sha256_hex(table.concat(parts))
+end)()
+-- Generated amalgamations (sqlite3.c, minified bundles) cost more to index
+-- than they give back; skip files above this size unless configured.
+M.MAX_FILE_BYTES = 1500000
+-- Caches are deflated: msgpack records shrink to ~1/6. Level 1 is within a
+-- few percent of level 6 at under half the time; inflating is cheap next to
+-- unpacking, and the checksum then covers the smaller compressed bytes.
+M.CACHE_COMPRESSION_LEVEL = 1
+-- Below this many files to read, a full pass parses in place: posting and
+-- unpacking results would cost more than it saves.
+M.PARALLEL_MIN_FILES = 32
+-- Bytes a file costs beyond its size (open, stat, record) when the parse pool
+-- balances threads by size.
+M.FILE_WEIGHT = 4096
+
+local Index = {}
+Index.__index = Index
+
+local norm = paths.normalize
+
+local function home()
+    return os.getenv('USERPROFILE') or os.getenv('HOME') or '.'
+end
+
+-- Cache file name derived from the root so projects don't collide.
+local function cache_path_for(root)
+    assert(xutils and xutils.sha256_hex, 'runtime requires SHA-256')
+    return norm(home()) .. '/.codeoutline/cache/' .. xutils.sha256_hex(paths.key(root)) .. '.idx'
+end
+
+local function slurp(path)
+    local f = io.open(path, 'rb')
+    if not f then return nil end
+    local s = f:read('a')
+    f:close()
+    return s
+end
+
+local function checksum(s)
+    if xcompress and xcompress.crc32 then return xcompress.crc32(s) end
+    return xutils.sha256_hex(s)
+end
+
+-- Characters a shell interprets even inside double quotes (cmd: %VAR%,
+-- !VAR!, the quote itself; sh: $, backtick, backslash) plus newlines. The
+-- file listing runs `rg` through io.popen -- the runtime has no argv spawn on
+-- Windows -- so a root is only accepted when quoting it is inert.
+-- (backslashes are normalized to / first, so any left came from elsewhere)
+local UNSAFE = '["%%!$`\\\r\n]'
+
+-- Validate a project root: an existing directory whose path is safe to quote.
+-- Returns the normalized root, or nil and a reason.
+function M.check_root(root)
+    local r, err = paths.canonical(root)
+    if not r then return nil, err end
+    if r:find(UNSAFE) then
+        return nil, 'root contains characters that are unsafe in a shell command: ' .. root
+    end
+    return r
+end
+
+function M.open(root, opts)
+    opts = opts or {}
+    local checked, why = M.check_root(root)
+    if not checked then error(why, 2) end
+    root = checked
+    if opts.lister ~= nil and opts.lister ~= 'rg' and opts.lister ~= 'walk' then error('invalid lister', 2) end
+    local max_bytes = opts.max_file_bytes or M.MAX_FILE_BYTES
+    assert(type(max_bytes) == 'number' and max_bytes >= 1 and max_bytes < math.huge and max_bytes % 1 == 0,
+        'max_file_bytes must be a positive integer')
+    local cache_override = os.getenv('CODEOUTLINE_MEMORY_CACHE')
+    if cache_override == '' then cache_override = nil end
+    local self = setmetatable({
+        root = norm(root),
+        cache_path = cache_override and norm(cache_override) or (opts.cache_path and norm(opts.cache_path) or cache_path_for(root)),
+        max_bytes = max_bytes,
+        lister = opts.lister,       -- 'rg' | 'walk' | nil (rg when it runs here)
+        files = {},          -- rel path -> record
+        generation = 0,      -- bumped on every committed change
+    }, Index)
+    self.cache_loaded = not opts.rebuild and self:load() or false
+    return self
+end
+
+function Index:load()
+    local data = slurp(self.cache_path)
+    if not data or not cmsgpack or not (xcompress and xcompress.inflate) then return false end
+    local ok, files = pcall(function()
+        local envelope = cmsgpack.unpack(data)
+        assert(type(envelope) == 'table' and type(envelope.payload) == 'string')
+        assert(envelope.sha256 == xutils.sha256_hex(envelope.payload))
+        -- Older uncompressed caches have no codec and are rebuilt.
+        assert(envelope.codec == 'deflate')
+        local size = envelope.size
+        assert(type(size) == 'number' and size >= 1 and size % 1 == 0)
+        local payload = assert(xcompress.inflate(envelope.payload, size))
+        assert(#payload == size)
+        local t = cmsgpack.unpack(payload)
+        assert(t.version == M.VERSION and t.root == paths.key(self.root) and type(t.files) == 'table')
+        local records = {}
+        local function validate(rec, destination)
+            control.check()
+            assert(type(rec) == 'table' and type(rec.path) == 'string')
+            assert(not rec.path:find('[\\:%z]') and rec.path:sub(1, 1) ~= '/')
+            for part in rec.path:gmatch('[^/]+') do assert(part ~= '..' and part ~= '.') end
+            assert(type(rec.nodes) == 'table' and type(rec.refs) == 'table' and type(rec.imports) == 'table')
+            assert(type(rec.size) == 'number' and type(rec.language) == 'string')
+            assert(rec.cpp_fragment == nil or rec.cpp_fragment == 'c' or rec.cpp_fragment == 'cpp')
+            assert(rec.cpp_fragment_cpp == nil or rec.cpp_fragment_cpp == true)
+            assert(rec.encoding == nil or rec.encoding == 'utf-8' or rec.encoding == 'utf-8-bom' or rec.encoding == 'gbk')
+            for i, n in ipairs(rec.nodes) do
+                if i % 128 == 0 then control.check() end
+                assert(type(n.name) == 'string' and type(n.qualified) == 'string' and type(n.kind) == 'string')
+                assert(type(n.line) == 'number' and type(n.end_line) == 'number' and n.line >= 1 and n.end_line >= n.line)
+            end
+            local refs = rec.refs
+            assert(type(refs.name) == 'table' and type(refs.from) == 'table' and type(refs.kind) == 'table'
+                and type(refs.line) == 'table' and type(refs.recv) == 'table')
+            local nrefs = #refs.name
+            assert(#refs.from == nrefs and #refs.kind == nrefs and #refs.line == nrefs and #refs.recv == nrefs)
+            for i = 1, nrefs do
+                if i % 128 == 0 then control.check() end
+                assert(type(refs.name[i]) == 'string' and type(refs.from[i]) == 'number'
+                    and type(refs.kind[i]) == 'string' and type(refs.line[i]) == 'number')
+                local recv = refs.recv[i]
+                assert(recv == false or type(recv) == 'string')
+            end
+            for _, imp in ipairs(rec.imports) do assert(type(imp.path) == 'string') end
+            destination[rec.path] = rec
+        end
+        for _, rec in ipairs(t.files) do validate(rec, records) end
+        local patches = require('codeoutline.indexing.cache_repairs').load(self.cache_path, envelope.sha256, M.VERSION, paths.key(self.root))
+        local valid, applied = pcall(function()
+            local result = {}
+            for path, rec in pairs(patches) do
+                local base = assert(records[path])
+                assert(rec.crc == base.crc and rec.size == base.size and rec.language == base.language and rec.encoding == 'gbk')
+                validate(rec, result)
+            end
+            return result
+        end)
+        if not valid and control.is_interrupted(applied) then error(applied, 0) end
+        self.repair_records = valid and applied or {}
+        for path, rec in pairs(self.repair_records) do records[path] = rec end
+        self.cache_hash = envelope.sha256
+        return records
+    end)
+    if not ok then
+        if control.is_interrupted(files) then error(files, 0) end
+        self.cache_error = 'invalid or stale cache; rebuilding'; return false
+    end
+    self.files = files
+    self.generation = self.generation + 1
+    self.saved_generation = self.generation
+    return true
+end
+
+-- Whether the cache file lags the records. Refresh metadata (mtime, checked)
+-- alone does not count: unchanged files are re-verified by checksum anyway.
+function Index:needs_save()
+    return self.saved_generation ~= self.generation or self.encoding_dirty == true
+end
+
+function Index:save()
+    if not (cmsgpack and xcompress and xcompress.deflate and xutils.temp_file and xutils.replace_file) then
+        return false, 'runtime requires cmsgpack, xcompress, temp_file and replace_file'
+    end
+    if self.repair_only and self.cache_hash then
+        local ok, err = require('codeoutline.indexing.cache_repairs').save(self.cache_path, self.cache_hash,
+            M.VERSION, paths.key(self.root), self.repair_records)
+        if ok then
+            self.saved_generation, self.encoding_dirty, self.repair_only = self.generation, false, false
+        end
+        return ok, err
+    end
+    local list = {}
+    for _, rec in pairs(self.files) do list[#list + 1] = rec end
+    table.sort(list, function(a, b) return a.path < b.path end)
+    local payload = cmsgpack.pack({ version = M.VERSION, root = paths.key(self.root), files = list })
+    local packed = xcompress.deflate(payload, M.CACHE_COMPRESSION_LEVEL)
+    local hash = xutils.sha256_hex(packed)
+    local blob = cmsgpack.pack({ codec = 'deflate', size = #payload, sha256 = hash, payload = packed })
+    local d = self.cache_path:match('^(.*)/[^/]*$') or '.'
+    local made, err = xutils.mkdir_p(d)
+    if not made then return false, err end
+    local tmp
+    tmp, err = xutils.temp_file(d)
+    if not tmp then return false, err end
+    local f
+    f, err = io.open(tmp, 'wb')
+    if not f then os.remove(tmp); return false, err end
+    local wrote, write_err = f:write(blob)
+    local closed, close_err = f:close()
+    if not wrote or not closed then os.remove(tmp); return false, write_err or close_err end
+    local published
+    published, err = xutils.replace_file(tmp, self.cache_path)
+    if not published then os.remove(tmp); return false, err end
+    self.saved_generation = self.generation
+    self.encoding_dirty = false
+    self.cache_hash, self.repair_records, self.repair_only = hash, {}, false
+    os.remove(self.cache_path .. '.repairs') -- a stale sidecar cannot match the new hash
+    return true
+end
+
+-- One file's change as a unit: the record, the symbol tables derived from
+-- the records, and the generation. Nothing inside checks for cancellation,
+-- so an interrupted refresh leaves every file either old or new. A failed
+-- table update drops the tables; the next symbols() call rebuilds them.
+function Index:commit(rel, rec)
+    self.repair_only = false
+    local old = self.files[rel]
+    self.files[rel] = rec
+    self.generation = self.generation + 1
+    local G = self.symbol_tables
+    if G then
+        local ok = pcall(function()
+            if old then graph.remove_file(G, rel) end
+            if rec then graph.add_file(G, rel, rec) end
+        end)
+        if ok then G.generation = self.generation else self.symbol_tables = nil end
+    end
+end
+
+-- Symbol tables over the records, built on first use and then kept current
+-- by commit(). Hosts that never resolve names do not pay for them.
+function Index:symbols()
+    local ctx = require('codeoutline.analysis.lua.lua_bindings').context(self)
+    if not self.symbol_tables or table.concat(self.symbol_tables.lua_global_export_tables, '\0')
+        ~= table.concat(ctx.global_export_tables, '\0') then
+        self.symbol_tables = graph.build(self, ctx)
+    end
+    return self.symbol_tables
+end
+
+-- Encoding confirmation need not replace a semantically identical parse.
+local function same_value(a, b)
+    if type(a) ~= type(b) then return false end
+    if type(a) ~= 'table' then return a == b end
+    local count = 0
+    for key, value in pairs(a) do
+        count = count + 1
+        if count % 128 == 0 then control.check() end
+        if not same_value(value, b[key]) then return false end
+    end
+    for key in pairs(b) do
+        count = count + 1
+        if count % 128 == 0 then control.check() end
+        if a[key] == nil then return false end
+    end
+    return true
+end
+
+-- Only query-selected files are decoded. This cache lasts for one query and
+-- holds the exact snapshot used for both reparsing and source rendering.
+function Index:query_source(rel)
+    control.check()
+    self.query_sources = self.query_sources or {}
+    if self.query_sources[rel] then return self.query_sources[rel], false end
+    local rec = assert(self.files[rel], 'source is not indexed: ' .. rel)
+    local raw = assert(slurp(self:abs(rel)), 'cannot read source: ' .. rel)
+    assert(#raw == rec.size and checksum(raw) == rec.crc,
+        'source changed during query; retry: ' .. rel)
+    assert(xutils.to_utf8, 'rebuild xnet2lua: missing xutils.to_utf8')
+    local src, encoding
+    if rec.encoding == 'utf-8' then
+        src, encoding = raw, rec.encoding
+    elseif rec.encoding == 'utf-8-bom' then
+        src, encoding = raw:sub(4), rec.encoding
+    else
+        src, encoding = xutils.to_utf8(raw, rec.encoding == 'gbk' and 'gbk' or 'auto')
+        if not src then
+            local reason = tostring(encoding)
+            -- Minimal EL8/EL9 installs and containers omit the GBK module.
+            local hint = reason:find('does not provide GBK', 1, true)
+                and ' (install the system GBK converter, e.g. glibc-gconv-extra on EL8/EL9)' or ''
+            error(rel .. ': ' .. reason .. hint, 0)
+        end
+    end
+    local changed = false
+    if not rec.encoding then
+        if encoding == 'gbk' then
+            local parsed = assert(ci.parse(rel, src, parse_options(src, rec.cpp_fragment)), 'cannot parse decoded source: ' .. rel)
+            parsed.size, parsed.crc, parsed.mtime, parsed.checked = rec.size, rec.crc, rec.mtime, rec.checked
+            local repair_only = not self:needs_save() or self.repair_only
+            if same_value(parsed, rec) then
+                -- GBK comments often leave every compact parse field intact.
+                -- Keep IDs and query evidence valid instead of restarting work.
+                rec.encoding = encoding
+                parsed = rec
+            else
+                parsed.encoding = encoding
+                self:commit(rel, parsed)
+                changed = true
+            end
+            self.repair_only = repair_only
+            self.repair_records = self.repair_records or {}
+            self.repair_records[rel] = parsed
+            self.encoding_dirty = true
+        else
+            -- Metadata only: names and positions are unchanged. Keep this hint
+            -- resident and include it in the next normal save; confirming UTF-8
+            -- must not rewrite a large project cache on the query's hot path.
+            rec.encoding = encoding
+        end
+    end
+    self.query_sources[rel] = src
+    return src, changed
+end
+
+-- Supported source files under the root, honoring .gitignore via ripgrep.
+-- ripgrep lists files honoring every .gitignore; probe once whether it runs
+-- here (Android has no rg, and there a Lua walk takes over).
+local has_rg
+local function rg_available()
+    if has_rg == nil then
+        has_rg = false
+        if io.popen then
+            local ok, p = pcall(io.popen, 'rg --version' .. (package.config:sub(1, 1) == '\\' and ' 2>nul' or ' 2>/dev/null'))
+            if not ok and control.is_interrupted(p) then error(p, 0) end
+            if ok and p then
+                has_rg = (p:read('a') or ''):find('ripgrep', 1, true) ~= nil
+                p:close()
+            end
+        end
+    end
+    return has_rg
+end
+M.rg_available = rg_available
+
+-- Directories the walk never enters, besides hidden ones (like rg's default).
+M.WALK_SKIP = { node_modules = true, __pycache__ = true }
+M.MAX_WALK_FILES = 100000
+
+-- Root .gitignore, the common subset: `name`, `*.ext`, `dir/`, `/anchored`,
+-- `a/b` (anchored), `**`. Negations are ignored (keep the file listed).
+local function load_ignore(root)
+    local rules = {}
+    local f = io.open(root .. '/.gitignore', 'rb')
+    if not f then return rules end
+    for raw in f:lines() do
+        local line = raw:gsub('\r$', ''):gsub('%s+$', '')
+        if line ~= '' and not line:match('^#') and not line:match('^!') then
+            local dir_only = line:sub(-1) == '/'
+            if dir_only then line = line:sub(1, -2) end
+            local anchored = line:sub(1, 1) == '/' or line:find('/', 1, true) ~= nil
+            line = line:gsub('^/', '')
+            local pat = line:gsub('[%^%$%(%)%%%.%[%]%+%-]', '%%%0')
+                :gsub('%*%*/', '\1'):gsub('%*%*', '\2'):gsub('%*', '[^/]*'):gsub('%?', '[^/]')
+                :gsub('\1', '.-'):gsub('\2', '.*')
+            rules[#rules + 1] = { pat = '^' .. pat .. '$', dir_only = dir_only, anchored = anchored }
+        end
+    end
+    f:close()
+    return rules
+end
+
+local function ignored(rules, rel, name, is_dir)
+    for _, r in ipairs(rules) do
+        if (is_dir or not r.dir_only) and (r.anchored and rel or name):find(r.pat) then return true end
+    end
+    return false
+end
+
+-- Supported files under the root without a subprocess (xutils.list_dir).
+-- Also returns each file's stat fields when the runtime lists them.
+function Index:walk_files()
+    local out, meta = {}, {}
+    self.fragment_inventory = fragments.inventory(self.root)
+    assert(xutils and xutils.list_dir, 'file enumeration unavailable: install rg or use a runtime with list_dir')
+    local rules = load_ignore(self.root)
+    local dirs = { '' }
+    local visited = 0
+    while #dirs > 0 do
+        control.check()
+        local rel_dir = table.remove(dirs)
+        local entries, truncated = xutils.list_dir(rel_dir == '' and self.root or (self.root .. '/' .. rel_dir),
+            M.MAX_WALK_FILES + 1, true)
+        assert(entries, 'cannot enumerate directory: ' .. rel_dir .. ': ' .. tostring(truncated))
+        assert(not truncated, 'directory enumeration limit exceeded')
+        for _, e in ipairs(entries) do
+            visited = visited + 1
+            assert(visited <= M.MAX_WALK_FILES, 'directory enumeration limit exceeded')
+            local name = e.name
+            local rel = rel_dir == '' and name or (rel_dir .. '/' .. name)
+            local st = e.type and e or xutils.stat(self.root .. '/' .. rel)
+            if st and st.type ~= 'link' and name:sub(1, 1) ~= '.' and not ignored(rules, rel, name, e.dir) then
+                if e.dir then
+                    if not M.WALK_SKIP[name] then dirs[#dirs + 1] = rel end
+                else
+                    if ci.language(name) then
+                        out[#out + 1] = rel
+                        meta[rel] = st
+                    else fragments.add(self.fragment_inventory, rel) end
+                end
+            end
+        end
+    end
+    table.sort(out)
+    return out, meta
+end
+
+function Index:list_files()
+    if self.lister == 'walk' or (self.lister ~= 'rg' and not rg_available()) then
+        self.enumerator = 'walk'
+        return self:walk_files()
+    end
+    assert(rg_available(), 'rg file enumeration requested but ripgrep is unavailable')
+    self.enumerator = 'rg'
+    -- self.root passed check_root() in open(); `--` stops rg from reading a
+    -- root that starts with '-' as an option (`--pre=<cmd>` runs a command).
+    assert(M.check_root(self.root), 'unsafe root')
+    -- Filter extensions afterward: positive -g globs override .gitignore.
+    local cmd = 'rg --files --null --no-require-git --no-messages -- "' .. self.root .. '"'
+    local p = io.popen(cmd .. (package.config:sub(1, 1) == '\\' and ' 2>nul' or ' 2>/dev/null'))
+    assert(p, 'cannot start rg file enumeration')
+    local out = {}
+    self.fragment_inventory = fragments.inventory(self.root)
+    local prefix = self.root:sub(-1) == '/' and self.root or self.root .. '/'
+    local listing = p:read('a')
+    local ok, _, code = p:close()
+    assert(ok or code == 1, 'rg file enumeration failed: ' .. tostring(code))
+    for line in listing:gmatch('([^%z]+)%z') do
+        local path = norm(line)
+        if path:sub(1, #prefix) == prefix then path = path:sub(#prefix + 1) end
+        if ci.language(path) then
+            out[#out + 1] = path
+            assert(#out <= M.MAX_WALK_FILES, 'file enumeration limit exceeded')
+        else
+            fragments.add(self.fragment_inventory, path)
+            assert(self.fragment_inventory.count <= M.MAX_WALK_FILES, 'file enumeration limit exceeded')
+        end
+    end
+    table.sort(out)
+    return out
+end
+
+-- Stat fields for every listed file, read one directory at a time:
+-- list_dir reports them per entry, so a tree costs a call per directory
+-- rather than a stat per file. Older runtimes fall back to stat.
+function Index:stat_listing(list)
+    local by_dir = {}
+    for _, rel in ipairs(list) do
+        local dir, name = rel:match('^(.*)/([^/]*)$')
+        if not dir then dir, name = '', rel end
+        local names = by_dir[dir]
+        if not names then names = {}; by_dir[dir] = names end
+        names[#names + 1] = name
+    end
+    local meta = {}
+    for dir, names in pairs(by_dir) do
+        control.check()
+        local entries = xutils.list_dir(dir == '' and self.root or (self.root .. '/' .. dir), nil, true)
+        local by_name
+        if entries and (entries[1] == nil or entries[1].size ~= nil) then
+            by_name = {}
+            for _, e in ipairs(entries) do by_name[e.name] = e end
+        end
+        for _, name in ipairs(names) do
+            local rel = dir == '' and name or (dir .. '/' .. name)
+            -- rg and a native directory listing can disagree on filename
+            -- encoding. Check a listed path before treating it as deleted.
+            meta[rel] = by_name and by_name[name] or xutils.stat(self:abs(rel))
+        end
+    end
+    return meta
+end
+
+local function new_stats(mode)
+    return { parsed = 0, unchanged = 0, removed = 0, skipped = 0, failed = 0, mode = mode }
+end
+
+-- Read one file and parse it unless its size and checksum match the known
+-- record. Touches no index state, so a parse thread can run it too. `checked`
+-- is taken before the read: content read after that second is current.
+function M.load_file(abs, rel, max_bytes, old_size, old_crc, language)
+    local checked = os.time()
+    local src = slurp(abs)
+    if not src or #src > max_bytes then return { status = 'skipped' } end
+    local crc = checksum(src)
+    if old_size == #src and old_crc == crc then
+        return { status = 'unchanged', checked = checked }
+    end
+    local ok, r = pcall(ci.parse, rel, src, parse_options(src, language))
+    if not ok and control.is_interrupted(r) then error(r, 0) end
+    -- A parser exception must not permanently hide a GBK file.
+    -- Successful speculative parsing does not scan encoding here.
+    if not ok or not r then
+        if xutils.to_utf8 then
+            local decoded, encoding = xutils.to_utf8(src)
+            if decoded then
+                ok, r = pcall(ci.parse, rel, decoded, parse_options(src, language))
+                if not ok and control.is_interrupted(r) then error(r, 0) end
+                if ok and r then r.encoding = encoding end
+            end
+        end
+    end
+    if not (ok and r) then return { status = language and ok and 'skipped' or 'failed' } end
+    r.size, r.crc, r.checked = #src, crc, checked
+    return { status = 'parsed', rec = r }
+end
+
+-- Settle one listed file from its stat fields alone (nil when the runtime
+-- has no stat): true or false as sync_file returns, nil when it must be read.
+function Index:check_stat(rel, st, stats)
+    local rec = self.files[rel]
+    if st and (st.exists == false or st.type ~= 'file') then
+        return false
+    elseif st and st.size and st.size > self.max_bytes then
+        stats.skipped = stats.skipped + 1
+        return false
+    elseif st and rec and st.mtime and rec.size == st.size and rec.mtime == st.mtime
+        and (rec.checked or 0) > st.mtime + 1 then
+        -- (size, mtime) proves "unchanged" only once the content was read
+        -- strictly after that mtime second: an edit within the same second
+        -- keeps both equal forever (the "racy git" problem).
+        stats.unchanged = stats.unchanged + 1
+        return true
+    end
+    return nil
+end
+
+-- Commit what load_file found. Returns sync_file's answer.
+function Index:apply_load(rel, st, res, stats)
+    if res.status == 'skipped' then
+        stats.skipped = stats.skipped + 1
+        return false
+    elseif res.status == 'failed' then
+        stats.failed = stats.failed + 1
+        return false
+    elseif res.status == 'unchanged' then
+        local rec = self.files[rel]
+        rec.mtime = st and st.mtime or rec.mtime
+        rec.checked = res.checked
+        stats.unchanged = stats.unchanged + 1
+        return true
+    end
+    local r = res.rec
+    r.mtime = st and st.mtime or nil
+    self:commit(rel, r)
+    stats.parsed = stats.parsed + 1
+    return true
+end
+
+function Index:read_file(rel, st, stats, language)
+    local rec = self.files[rel]
+    language = language or rec and rec.cpp_fragment
+    local same = rec and rec.cpp_fragment == language
+    local res = M.load_file(self:abs(rel), rel, self.max_bytes, same and rec.size, same and rec.crc, language)
+    control.check()
+    return self:apply_load(rel, st, res, stats)
+end
+
+function Index:refresh_fragments(stats, seen, changed)
+    fragments.refresh(self, stats, seen, function(batch)
+        local frontier, reads, meta = {}, {}, {}
+        for _, candidate in ipairs(batch) do
+            local rel, language, st = candidate.rel, candidate.language, candidate.stat
+            local rec = self.files[rel]
+            local settled
+            if not (changed and changed[rel]) and rec and rec.cpp_fragment == language then
+                settled = self:check_stat(rel, st, stats)
+            end
+            if settled then seen[rel] = true; frontier[#frontier + 1] = rel
+            elseif settled == nil then
+                local same = rec and rec.cpp_fragment == language
+                reads[#reads + 1] = { rel = rel, abs = self:abs(rel), language = language,
+                    size = same and rec.size, crc = same and rec.crc, weight = st.size + M.FILE_WEIGHT }
+                meta[rel] = st
+            end
+        end
+        local function apply(rel, response)
+            control.check()
+            if self:apply_load(rel, meta[rel], response, stats) then seen[rel] = true; frontier[#frontier + 1] = rel end
+        end
+        if #reads >= M.PARALLEL_MIN_FILES and pool.ready() then pool.run(reads, self.max_bytes, apply)
+        else
+            for _, job in ipairs(reads) do
+                control.check()
+                apply(job.rel, M.load_file(job.abs, job.rel, self.max_bytes, job.size, job.crc, job.language))
+            end
+        end
+        return frontier
+    end, changed)
+end
+
+-- Bring one listed file in line with the tree, given its stat fields (nil
+-- when the runtime has no stat). Returns false when it no longer belongs in
+-- the index: gone, too large, unreadable or unparsable.
+function Index:sync_file(rel, st, stats)
+    local settled = self:check_stat(rel, st, stats)
+    if settled ~= nil then return settled end
+    return self:read_file(rel, st, stats)
+end
+
+-- Start change notification so later refreshes visit only what changed.
+-- Call it before the next refresh: that one stays a full pass, and anything
+-- changing while it runs is reported to the pass after. Returns false when
+-- the runtime or the filesystem cannot watch the root.
+function Index:watch()
+    if not (xwatch and xwatch.open) then return false end
+    self.watching = true
+    return self.watcher ~= nil or self:open_watcher()
+end
+
+-- A root that cannot be watched (inotify limit, network share) stays on full
+-- refreshes; retry now and then rather than paying a failed open per query.
+M.WATCH_RETRY_SECONDS = 300
+
+function Index:open_watcher()
+    local w, err = xwatch.open(self.root, { skip_hidden = true })
+    self.watcher, self.watch_error, self.watch_ready = w, err, false
+    if not w then self.watch_retry = os.time() + M.WATCH_RETRY_SECONDS end
+    return w ~= nil
+end
+
+function Index:close()
+    if self.watcher then self.watcher:close() end
+    self.watcher, self.watch_ready, self.watching = nil, false, false
+end
+
+-- rg reads these anywhere in the tree; a change can admit or hide files.
+local IGNORE_FILES = { ['.gitignore'] = true, ['.ignore'] = true, ['.rgignore'] = true }
+
+-- Changed paths that can matter, or nil when only a full refresh is safe.
+-- Hidden paths are never listed (rg and the walk both skip them).
+local function relevant(paths)
+    local changed = {}
+    for _, rel in ipairs(paths) do
+        if IGNORE_FILES[rel:match('[^/]*$')] or rel == '.codeoutline.json' then return nil end
+        if rel:sub(1, 1) ~= '.' and not rel:find('/.', 1, true) then changed[rel] = true end
+    end
+    return changed
+end
+
+-- Apply watcher-reported changes. Creations, removals and renames re-run the
+-- listing (only rg decides what .gitignore admits) but still visit only the
+-- files that differ from the index.
+function Index:refresh_changed(changed, structural)
+    local stats = new_stats('changes')
+    local refresh_fragments = structural or false
+    for rel in pairs(changed) do
+        local rec, language = self.files[rel], ci.language(rel)
+        if (rec and (rec.cpp_fragment or rec.language == 'c' or rec.language == 'cpp'))
+            or language == 'c' or language == 'cpp' or not language then refresh_fragments = true end
+    end
+    if refresh_fragments and not self.fragment_inventory then structural = true end
+    if not structural then
+        -- A supported file the index lacks may have shrunk under the size
+        -- limit or been fixed after a failed parse: let the listing decide.
+        for rel in pairs(changed) do
+            if not self.files[rel] and ci.language(rel) then structural = true; break end
+        end
+    end
+    local listed
+    if structural then
+        refresh_fragments = true
+        stats.mode = 'relisted'
+        listed = {}
+        for _, rel in ipairs(self:list_files()) do
+            listed[rel] = true
+            if not self.files[rel] then changed[rel] = true end
+        end
+        for rel in pairs(self.files) do
+            if not listed[rel] and not self.files[rel].cpp_fragment then changed[rel] = true end
+        end
+    end
+    local has_stat = xutils and xutils.stat
+    for rel in pairs(changed) do
+        control.check()
+        local known = self.files[rel] ~= nil
+        if known and self.files[rel].cpp_fragment then
+            -- Recheck through the reachable include closure below.
+        elseif listed and listed[rel] or (not listed and known) then
+            if not self:sync_file(rel, has_stat and xutils.stat(self:abs(rel)) or nil, stats) and known then
+                self:commit(rel, nil)
+                stats.removed = stats.removed + 1
+            end
+        elseif known then
+            self:commit(rel, nil)           -- no longer listed
+            stats.removed = stats.removed + 1
+        end
+    end
+    if refresh_fragments then
+        local seen = {}
+        for rel, rec in pairs(self.files) do if not rec.cpp_fragment then seen[rel] = true end end
+        self:refresh_fragments(stats, seen, changed)
+        local gone = {}
+        for rel, rec in pairs(self.files) do if rec.cpp_fragment and not seen[rel] then gone[#gone + 1] = rel end end
+        for _, rel in ipairs(gone) do self:commit(rel, nil); stats.removed = stats.removed + 1 end
+    end
+    local total = 0
+    for _ in pairs(self.files) do total = total + 1 end
+    stats.unchanged = total - stats.parsed
+    return stats
+end
+
+-- Bring the index in line with the tree. Returns counts of what changed.
+-- With a watcher (see Index:watch) only reported paths are visited; an
+-- overflow or an ignore-file change falls back to a full pass, and a failed
+-- watcher is reopened before one.
+function Index:refresh(opts)
+    opts = opts or {}
+    local policy = fragments.policy_key(self.root)
+    if self.fragment_policy and self.fragment_policy ~= policy then
+        self.watch_ready = false
+        local stats = self:refresh_all()
+        if self.watcher then self.watch_ready = true end
+        return stats
+    end
+    if opts.paths then
+        local changed = {}
+        for _, path in ipairs(opts.paths) do
+            if paths.contains(self.root, path) then
+                local prefix = self.root:sub(-1) == '/' and self.root or self.root .. '/'
+                local rel = path:sub(#prefix + 1)
+                if rel == '.codeoutline.json' then return self:refresh_all() end
+                -- Unindexed/ignored files are admitted by watcher enumeration.
+                if self.files[rel] then changed[rel] = true end
+            end
+        end
+        return self:refresh_changed(changed, false)
+    end
+    if self.watcher and self.watch_ready then
+        local paths, structural, overflow = self.watcher:read()
+        local changed = paths and not overflow and relevant(paths)
+        if changed then
+            -- Not ready again until this pass completes: the events are
+            -- drained, so a pass that fails midway leaves a full one next.
+            self.watch_ready = false
+            local stats = self:refresh_changed(changed, structural)
+            self.watch_ready = true
+            return stats
+        end
+        if not paths then
+            -- A watcher that worked and then failed (root moved, queue
+            -- error) is reopened right away.
+            self.watcher:close()
+            self.watcher, self.watch_error, self.watch_retry = nil, structural, 0
+        end
+    end
+    if self.watching and not self.watcher and os.time() >= (self.watch_retry or 0) then self:open_watcher() end
+    if self.watcher then self.watch_ready = false end
+    if not self.watcher and opts.full_interval and self.next_full and os.time() < self.next_full then
+        return new_stats('idle')
+    end
+    local stats = self:refresh_all()
+    self.next_full = os.time() + (opts.full_interval or 0)
+    if self.watcher then self.watch_ready = true end
+    return stats
+end
+
+-- Files commit one at a time. An interrupted pass leaves next_full unset
+-- (and a watcher not ready), so the next refresh is a full pass again.
+-- Files a stat cannot settle are read and parsed by the parse pool when the
+-- host started one and this pass may wait for it; otherwise serially.
+function Index:refresh_all()
+    local stats = new_stats('full')
+    self.next_full = nil
+    self.fragment_policy = fragments.policy_key(self.root)
+    local seen = {}
+    local list, meta = self:list_files()
+    if not meta and xutils and xutils.stat then meta = self:stat_listing(list) end
+    local reads = {}
+    for _, rel in ipairs(list) do
+        control.check()
+        local settled = self:check_stat(rel, meta and meta[rel], stats)
+        if settled == nil then reads[#reads + 1] = rel
+        elseif settled then seen[rel] = true end
+    end
+    if #reads >= M.PARALLEL_MIN_FILES and pool.ready() then
+        local jobs = {}
+        for i, rel in ipairs(reads) do
+            local rec, st = self.files[rel], meta and meta[rel]
+            jobs[i] = { rel = rel, abs = self:abs(rel), size = rec and rec.size, crc = rec and rec.crc,
+                weight = (st and st.size or rec and rec.size or 0) + M.FILE_WEIGHT }
+        end
+        pool.run(jobs, self.max_bytes, function(rel, res)
+            control.check()
+            if self:apply_load(rel, meta and meta[rel], res, stats) then seen[rel] = true end
+        end)
+    else
+        for _, rel in ipairs(reads) do
+            control.check()
+            if self:read_file(rel, meta and meta[rel], stats) then seen[rel] = true end
+        end
+    end
+    self:refresh_fragments(stats, seen)
+    local gone = {}
+    for rel in pairs(self.files) do
+        if not seen[rel] then gone[#gone + 1] = rel end
+    end
+    for _, rel in ipairs(gone) do
+        self:commit(rel, nil)
+        stats.removed = stats.removed + 1
+    end
+    return stats
+end
+
+-- Absolute path for a record's relative path.
+function Index:abs(rel)
+    return self.root .. '/' .. rel
+end
+
+return M

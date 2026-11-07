@@ -7,8 +7,8 @@
 -- Built on the C parser's helpers rather than its main loop, so C results
 -- stay exactly as validated. Qualified names use '::'.
 
-local xscan = require('codeoutline.xscan')
-local common = require('codeoutline.common')
+local xscan = require('codeoutline.parsing.xscan')
+local common = require('codeoutline.parsing.common')
 local c = require('codeoutline.lang.c')
 
 local M = {}

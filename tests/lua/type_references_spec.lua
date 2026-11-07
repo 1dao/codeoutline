@@ -1,7 +1,7 @@
 package.path = 'scripts/?.lua;' .. package.path
 local spec = dofile('tests/lua/spec_helper.lua')
-local parse, graph = require('codeoutline.parse'), require('codeoutline.graph')
-local types, service = require('codeoutline.type_references'), require('codeoutline.service')
+local parse, graph = require('codeoutline.parsing.parse'), require('codeoutline.analysis.graph')
+local types, service = require('codeoutline.query.type_references'), require('codeoutline.service')
 local root = (os.getenv('TEMP') or '/tmp'):gsub('\\', '/') .. '/codeoutline_types_' .. os.time() .. '_' .. math.random(1000000)
 assert(xutils.mkdir_p(root))
 local function write(path, source)
@@ -20,7 +20,7 @@ spec.describe('explicit type references', function()
             { 'a.ts', 'export class User {}\nexport function run(arg: User): User { return arg; }' },
             { 'a.lua', 'local M = {}\nfunction M.run() end\nM.run()\nreturn M\n' },
         }
-        local collector = require('codeoutline.type_uses')
+        local collector = require('codeoutline.analysis.type_uses')
         local original, count = collector.collect, 0
         collector.collect = function(...) count = count + 1; return original(...) end
         local ok, err = pcall(function()
@@ -133,7 +133,7 @@ one::User run(two::User wrong) { one::User local; const char* text = "one::User"
         local G, idx = project({ ['a.cpp'] = 'struct User {}; User run(User arg) { User local; return arg; }' })
         local _, info = types.run(G, idx, 'User', { max_nodes = 1 })
         spec.equal(#info.references, 1); spec.equal(info.node_limit_reached, true)
-        local control = require('codeoutline.control')
+        local control = require('codeoutline.shared.control')
         control.callback = function() error(control.cancelled(), 0) end
         local ok, err = pcall(types.run, G, idx, 'User'); control.callback = nil
         spec.equal(ok, false); spec.truthy(control.is_interrupted(err))
@@ -205,7 +205,7 @@ one::User run(two::User wrong) { one::User local; const char* text = "one::User"
         local record = parse.parse('a.cpp', source, { ranges = false })
         local G = graph.build({ files = { ['a.cpp'] = record } })
         local f = G.file_index['a.cpp']
-        local context = require('codeoutline.ordinary_bindings').context(G, {}, function() return source end)
+        local context = require('codeoutline.analysis.ordinary_bindings').context(G, {}, function() return source end)
         local summary = context.hierarchy(f)
         spec.equal(summary.cpp_aliases_only, true); spec.equal(summary.type_sites, nil)
         local work = G.by_name.Work[1] - G.id_of[f][1] + 1

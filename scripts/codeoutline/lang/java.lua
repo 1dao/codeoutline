@@ -6,8 +6,8 @@
 -- declarations track angle depth themselves; bodies need no generics
 -- handling because they are only scanned for call sites.
 
-local xscan = require('codeoutline.xscan')
-local common = require('codeoutline.common')
+local xscan = require('codeoutline.parsing.xscan')
+local common = require('codeoutline.parsing.common')
 
 local M = {}
 

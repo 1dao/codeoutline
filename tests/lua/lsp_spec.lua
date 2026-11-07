@@ -1,11 +1,11 @@
 package.path = 'scripts/?.lua;' .. package.path
 local spec = dofile('tests/lua/spec_helper.lua')
-local parse = require('codeoutline.parse')
-local docs = require('codeoutline.documents')
-local lsp = require('codeoutline.lsp')
+local parse = require('codeoutline.parsing.parse')
+local docs = require('codeoutline.query.documents')
+local lsp = require('codeoutline.protocol.lsp')
 local service = require('codeoutline.service')
-local control = require('codeoutline.control')
-local graph = require('codeoutline.graph')
+local control = require('codeoutline.shared.control')
+local graph = require('codeoutline.analysis.graph')
 local root = assert(xutils.temp_file(os.getenv('TEMP') or os.getenv('TMPDIR') or '/tmp')):gsub('\\', '/')
 -- TMPDIR may end in a slash; temp_file can then return a doubled separator.
 root = assert(docs.path(docs.uri(root)))
@@ -194,7 +194,7 @@ end)
 
 spec.describe('resident state and cancellation', function()
     spec.it('persists compact nodes and recovers exact positions by reparsing', function()
-        local index = require('codeoutline.index')
+        local index = require('codeoutline.indexing.index')
         local idx = index.open(root, opts)
         idx:refresh(); idx:save()
         local loaded = index.open(root, opts)
@@ -227,7 +227,7 @@ spec.describe('resident state and cancellation', function()
         spec.equal(still, idx); spec.equal(same, G)
     end)
     spec.it('does not swallow cancellation while validating a cached index', function()
-        local index = require('codeoutline.index')
+        local index = require('codeoutline.indexing.index')
         service.get(root, opts)
         control.callback = function() control.callback = nil; error(control.cancelled(), 0) end
         local ok, err = pcall(index.open, root, opts)
@@ -250,7 +250,7 @@ spec.describe('resident state and cancellation', function()
     end)
     spec.it('preserves the resident index when a read-only query is cancelled', function()
         local idx, G = service.get(root, opts)
-        local explore = require('codeoutline.explore')
+        local explore = require('codeoutline.query.explore')
         local run = explore.run
         explore.run = function() error(control.cancelled(), 0) end
         local ok, err = pcall(service.explore, root, 'renamed', opts)
@@ -350,7 +350,7 @@ spec.describe('LSP sessions', function()
         send('textDocument/didOpen', { textDocument = { uri = docs.uri(root .. '/draft.lua'),
             languageId = 'lua', version = 1, text = 'function immediate_draft() end' } })
         -- A ready root must not cause a query to queue behind another unready root.
-        local real, second = session.roots[1], assert(require('codeoutline.path').canonical(other))
+        local real, second = session.roots[1], assert(require('codeoutline.shared.path').canonical(other))
         session.roots = { real, second }; session.ready[real] = true
         local before = #jobs
         send('workspace/symbol', { query = 'immediate' }, 2)
@@ -364,7 +364,7 @@ spec.describe('LSP sessions', function()
         spec.equal(output[#output].result[1].name, 'immediate_draft')
     end)
     spec.it('maps a workspace named through a directory link to canonical paths and back', function()
-        local paths = require('codeoutline.path')
+        local paths = require('codeoutline.shared.path')
         local real, link = assert(paths.canonical(root)), root .. '-link'
         if paths.windows then os.execute('mklink /J "' .. link:gsub('/', '\\') .. '" "' .. real:gsub('/', '\\') .. '" >NUL')
         else os.execute("ln -s '" .. real .. "' '" .. link .. "'") end
@@ -528,9 +528,9 @@ spec.describe('shared entry and worker lifecycle', function()
             end }
             service.forget(root)
             graph.build = function() error('LSP must not build a call graph') end
-            local worker = dofile('scripts/codeoutline/index_worker.lua')
+            local worker = dofile('scripts/codeoutline/runtime/index_worker.lua')
             -- Sessions send the worker canonical roots and paths.
-            local real = assert(require('codeoutline.path').canonical(root))
+            local real = assert(require('codeoutline.shared.path').canonical(root))
             local function run(id, req)
                 req.projectPath, req.allowedRoots, req.deadline = real, { real }, xtimer.now_ms() + 10000
                 worker.__thread_handle(1, 'run', id, req)
@@ -569,10 +569,10 @@ spec.describe('shared entry and worker lifecycle', function()
 
 end)
 
-local navigation = require('codeoutline.navigation')
+local navigation = require('codeoutline.query.navigation')
 local nav_root = root .. '-nav'
 assert(xutils.mkdir_p(nav_root))
-nav_root = assert(require('codeoutline.path').canonical(nav_root))
+nav_root = assert(require('codeoutline.shared.path').canonical(nav_root))
 local function nav_write(rel, source) write(nav_root .. '/' .. rel, source) end
 nav_write('util.h', 'int helper(int x);\n')
 nav_write('util.c', '#include "util.h"\nint helper(int x) { return x + 1; }\n')
@@ -641,7 +641,7 @@ func (GoOther) Read(int) string { return "" }
         spec.equal(#result, 1); spec.equal(result[1].uri, nav_uri(prefix .. 'methods.go'))
         result = request('GoReader', 'lsp_implementation')
         spec.equal(#result, 2)
-        local completion = require('codeoutline.completion').complete({ root = nav_root, uri = doc.uri,
+        local completion = require('codeoutline.query.completion').complete({ root = nav_root, uri = doc.uri,
             position = doc:position(assert(source:find('w.Read', 1, true)) + 1) })
         local labels = {}; for _, item in ipairs(completion.items) do labels[item.label] = true end
         spec.truthy(labels.Read); spec.truthy(labels.GoBase)
@@ -687,7 +687,7 @@ func Handle(newChan gossh.NewChannel) {
         local result = definition()
         spec.equal(#result, 1); spec.equal(result[1].uri, nav_uri(prefix .. 'ssh/channel.go'))
         spec.equal(result[1].range.start.line, 4)
-        local completion = require('codeoutline.completion').complete({ root = nav_root, uri = doc.uri,
+        local completion = require('codeoutline.query.completion').complete({ root = nav_root, uri = doc.uri,
             position = doc:position(assert(source:find('req.Reply', 1, true)) + 3) })
         local found = false; for _, item in ipairs(completion.items) do if item.label == 'Reply' then found = true end end
         spec.truthy(found)
@@ -721,7 +721,7 @@ func (*Other) IsChild() bool { return true }
         local result = definition()
         spec.equal(#result, 1); spec.equal(result[1].uri, nav_uri(prefix .. 'manager.go'))
         spec.equal(result[1].range.start.line, 3)
-        local completion = require('codeoutline.completion').complete({ root = nav_root, uri = doc.uri, position = position })
+        local completion = require('codeoutline.query.completion').complete({ root = nav_root, uri = doc.uri, position = position })
         local found = false; for _, item in ipairs(completion.items) do if item.label == 'IsChild' then found = true end end
         spec.truthy(found)
         local target = nav_uri(prefix .. 'manager.go')
@@ -752,7 +752,7 @@ Manager* Factory();
         end
         local result = definition()
         spec.equal(#result, 1); spec.equal(result[1].uri, nav_uri(prefix .. 'api.hpp')); spec.equal(result[1].range.start.line, 1)
-        local completion = require('codeoutline.completion').complete({ root = nav_root, uri = doc.uri, position = position })
+        local completion = require('codeoutline.query.completion').complete({ root = nav_root, uri = doc.uri, position = position })
         local labels = {}; for _, item in ipairs(completion.items) do labels[item.label] = true end
         spec.truthy(labels.Run); spec.nil_value(labels.state, 'typed R filters unrelated members')
         local target = nav_uri(prefix .. 'api.hpp')
@@ -852,7 +852,7 @@ Manager* Factory();
         spec.equal(nav({ method = 'lsp_warm', uri = nav_uri('WarmLimited.lua') }).files, 4)
     end)
     spec.it('shares binding evidence across overlays while validating source and evicting old entries', function()
-        local ordinary = require('codeoutline.ordinary_bindings')
+        local ordinary = require('codeoutline.analysis.ordinary_bindings')
         local storage = { entries = {}, order = {}, bytes = 0 }
         local source = 'namespace A {} namespace B {} namespace Alias = A;\n'
         nav_write('SharedBinding.cpp', source)
@@ -1246,7 +1246,7 @@ Manager* Factory();
                 if name ~= 'flush();' then spec.equal(found[1].range.start.line, line) end
             end
             for _, case in ipairs({ { 'chosen::cargo_save', 7, 'cargo_save' }, { 'nested::flush', 7, 'flush' } }) do
-                local result = require('codeoutline.completion').complete({ root = nav_root, uri = doc.uri, session = session,
+                local result = require('codeoutline.query.completion').complete({ root = nav_root, uri = doc.uri, session = session,
                     position = doc:position(assert(source:find(case[1], 1, true)) + case[2]) })
                 local labels = {}; for _, item in ipairs(result.items) do labels[item.label] = true end
                 spec.truthy(labels[case[3]]); spec.nil_value(labels.hidden); spec.equal(result.incomplete or false, false)
@@ -1263,7 +1263,7 @@ Manager* Factory();
         navigation.sync({ session = 'cargo-draft', open = { [target] = 1 }, changed = {
             [target] = { version = 1, language = 'rust', source = '\n\npub fn cargo_save() {}\npub mod nested;' } } })
         check('second', 2, 'cargo-draft'); navigation.close('cargo-draft')
-        local cargo = require('codeoutline.rust_packages')
+        local cargo = require('codeoutline.analysis.rust.rust_packages')
         local limit = cargo.MAX_CONFIGS; cargo.MAX_CONFIGS = 1
         local ok, err = pcall(function()
             local found, response = nav({ method = 'lsp_definition', uri = doc.uri,
@@ -1275,7 +1275,7 @@ Manager* Factory();
         nav_write(prefix .. 'app/src/lib.rs', own)
         service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
         local own_doc = docs.read(nav_root .. '/' .. prefix .. 'app/src/lib.rs')
-        local completion = require('codeoutline.completion').complete({ root = nav_root, uri = own_doc.uri,
+        local completion = require('codeoutline.query.completion').complete({ root = nav_root, uri = own_doc.uri,
             position = own_doc:position(assert(own:find('self.width', 1, true)) + 4) })
         local names = {}; for _, item in ipairs(completion.items) do names[item.label] = true end
         spec.truthy(names.width); spec.nil_value(names.nested)
@@ -1304,7 +1304,7 @@ Manager* Factory();
                 position = doc:position(assert(source:find('GoWorkspaceSave()', 1, true))) })
             spec.equal(#found, 1); spec.equal(found[1].uri, nav_uri(prefix .. folder .. '/api.go'))
             spec.equal(found[1].range.start.line, line); spec.equal(response.incomplete, false)
-            local completion = require('codeoutline.completion').complete({ root = nav_root, session = session, uri = doc.uri,
+            local completion = require('codeoutline.query.completion').complete({ root = nav_root, session = session, uri = doc.uri,
                 position = doc:position(assert(source:find('actual.GoWorkspaceSave', 1, true)) + 6) })
             local labels = {}; for _, item in ipairs(completion.items) do labels[item.label] = true end
             spec.truthy(labels.GoWorkspaceSave and labels[label]); spec.nil_value(labels.PeerOnly)
@@ -1324,12 +1324,12 @@ Manager* Factory();
             [target] = { version = 1, language = 'go', source = 'package actual\n\n\nfunc GoWorkspaceSave() {}\nfunc DraftOnly() {}' } } })
         check('second', 3, 'DraftOnly', 'go-workspace-draft')
         navigation.close('go-workspace-draft')
-        local go = require('codeoutline.go_modules')
+        local go = require('codeoutline.analysis.go.go_modules')
         local limit = go.MAX_CONFIGS; go.MAX_CONFIGS = 1
         local ok, err = pcall(function()
             local found, response = nav({ method = 'lsp_definition', uri = doc.uri, position = { line = 1, character = 12 } })
             spec.equal(#found, 0); spec.truthy(response.incomplete)
-            local completion = require('codeoutline.completion').complete({ root = nav_root, uri = doc.uri,
+            local completion = require('codeoutline.query.completion').complete({ root = nav_root, uri = doc.uri,
                 position = doc:position(assert(source:find('actual.GoWorkspaceSave', 1, true)) + 6) })
             spec.equal(#completion.items, 0); spec.truthy(completion.incomplete)
         end)
@@ -1361,7 +1361,7 @@ Manager* Factory();
             end
             spec.equal(definitions['persist();'].range.start.line, line)
             for _, text in ipairs({ 's.workspaceFlush', 'api.workspaceSave' }) do
-                local result = require('codeoutline.completion').complete({ root = nav_root, uri = doc.uri, session = session,
+                local result = require('codeoutline.query.completion').complete({ root = nav_root, uri = doc.uri, session = session,
                     position = doc:position(assert(source:find(text, 1, true)) + #text:match('^(.-)%.')) })
                 local labels = {}; for _, item in ipairs(result.items) do labels[item.label] = true end
                 spec.truthy(labels[text:match('%.(.+)$')]); spec.equal(result.incomplete or false, false)
@@ -1398,13 +1398,13 @@ Manager* Factory();
         nav_write(prefix .. 'client.ts', source)
         service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
         local doc = docs.read(nav_root .. '/' .. prefix .. 'client.ts')
-        local workspace = require('codeoutline.js_workspace')
+        local workspace = require('codeoutline.analysis.js.js_workspace')
         local limit = workspace.MAX_CONFIGS; workspace.MAX_CONFIGS = 1
         local ok, err = pcall(function()
             local found, response = nav({ method = 'lsp_definition', uri = doc.uri,
                 position = doc:position(assert(source:find('@limits/core', 1, true))) })
             spec.equal(#found, 0); spec.truthy(response.incomplete)
-            local completion = require('codeoutline.completion').complete({ root = nav_root, uri = doc.uri,
+            local completion = require('codeoutline.query.completion').complete({ root = nav_root, uri = doc.uri,
                 position = doc:position(assert(source:find('api.budgetSave', 1, true)) + 3) })
             spec.equal(#completion.items, 0); spec.truthy(completion.incomplete)
             found, response = nav({ method = 'lsp_references', uri = nav_uri(prefix .. 'packages/core/index.ts'),
@@ -1556,7 +1556,7 @@ int luaopen_example_empty(lua_State *L) { return 0; }
         local position = doc:position(assert(source:find('p->save', 1, true)) + 2)
         local function check(session, line, included, excluded)
             local req = { uri = doc.uri, root = nav_root, session = session, position = position }
-            local result = require('codeoutline.completion').complete(req)
+            local result = require('codeoutline.query.completion').complete(req)
             local labels = {}
             for _, item in ipairs(result.items) do labels[item.label] = true end
             spec.truthy(labels[included]); spec.nil_value(labels[excluded])
@@ -1596,7 +1596,7 @@ int luaopen_example_empty(lua_State *L) { return 0; }
             local req = { uri = doc.uri, root = nav_root, session = 'local-alias',
                 position = doc:position(assert(source:find(case[1], 1, true)) + 1) }
             local labels = {}
-            for _, item in ipairs(require('codeoutline.completion').complete(req).items) do labels[item.label] = true end
+            for _, item in ipairs(require('codeoutline.query.completion').complete(req).items) do labels[item.label] = true end
             req.method = 'lsp_definition'
             local found = nav(req)
             if case[2] then
@@ -1624,7 +1624,7 @@ int luaopen_example_empty(lua_State *L) { return 0; }
             local req = { uri = doc.uri, root = nav_root, session = 'cpp-namespace',
                 position = doc:position(assert(source:find('p->save', 1, true)) + 2) }
             local labels = {}
-            for _, item in ipairs(require('codeoutline.completion').complete(req).items) do labels[item.label] = true end
+            for _, item in ipairs(require('codeoutline.query.completion').complete(req).items) do labels[item.label] = true end
             spec.truthy(labels[included]); spec.nil_value(labels[excluded]); spec.nil_value(labels.unrelated)
             req.method = 'lsp_definition'
             for _, name in ipairs({ 'save', 'run', 'api::run', 'Store' }) do
@@ -1663,7 +1663,7 @@ int luaopen_example_empty(lua_State *L) { return 0; }
             local req = { uri = doc.uri, root = nav_root, session = 'cpp-namespace-completion',
                 position = doc:position(assert(source:find(case[1], 1, true)) + case[2]) }
             local labels = {}
-            for _, item in ipairs(require('codeoutline.completion').complete(req).items) do labels[item.label] = true end
+            for _, item in ipairs(require('codeoutline.query.completion').complete(req).items) do labels[item.label] = true end
             spec.truthy(labels[case[3]], case[1]); if case[4] then spec.truthy(labels[case[4]], case[1]) end
             spec.nil_value(labels.hidden)
         end
@@ -1683,10 +1683,10 @@ int luaopen_example_empty(lua_State *L) { return 0; }
             spec.equal(#found, 0)
         end
         local labels = {}
-        for _, item in ipairs(require('codeoutline.completion').complete({ uri = doc.uri, root = nav_root,
+        for _, item in ipairs(require('codeoutline.query.completion').complete({ uri = doc.uri, root = nav_root,
             session = 'cpp-ambiguity', position = doc:position(assert(source:find('p.save', 1, true)) + 1) }).items) do labels[item.label] = true end
         spec.nil_value(labels.save)
-        local outside = require('codeoutline.completion').complete({ uri = doc.uri, root = nav_root,
+        local outside = require('codeoutline.query.completion').complete({ uri = doc.uri, root = nav_root,
             session = 'cpp-ambiguity', position = doc:position(assert(source:find('q.save', 1, true)) + 1) })
         spec.equal(#outside.items, 0)
     end)
@@ -1806,7 +1806,7 @@ int luaopen_example_empty(lua_State *L) { return 0; }
                 position = doc:position(assert(source:find(fragment, 1, true)) - 1 + skip) })
         end
         local function labels(fragment, skip, session)
-            local result = require('codeoutline.completion').complete({ root = nav_root, uri = doc.uri,
+            local result = require('codeoutline.query.completion').complete({ root = nav_root, uri = doc.uri,
                 session = session or 'cs-alias', position = doc:position(assert(source:find(fragment, 1, true)) - 1 + skip) })
             local names = {}
             for _, item in ipairs(result.items) do names[item.label] = true end
@@ -1857,7 +1857,7 @@ int luaopen_example_empty(lua_State *L) { return 0; }
         local doc = docs.read(nav_root .. '/CSharpInvalidAliases.cs')
         local req = { root = nav_root, uri = doc.uri, session = 'cs-invalid',
             position = doc:position(assert(source:find('item.Save', 1, true)) + 4) }
-        local result = require('codeoutline.completion').complete(req)
+        local result = require('codeoutline.query.completion').complete(req)
         spec.equal(#result.items, 0)
         req.method = 'lsp_definition'
         spec.equal(#nav(req), 0)
@@ -2090,7 +2090,7 @@ int luaopen_example_empty(lua_State *L) { return 0; }
             { "local xr = require('xrecord')\nlocal xr = {}\nlocal items = xr.create({})\nitems:has(1)", false },
             { prefix .. 'local items = schema:new(4) or {}\nitems:has(1)', false },
         }
-        local completion = require('codeoutline.completion')
+        local completion = require('codeoutline.query.completion')
         for i, case in ipairs(cases) do
             nav_write('native_case.lua', case[1])
             service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
@@ -2137,9 +2137,9 @@ int luaopen_example_empty(lua_State *L) { return 0; }
         check_records(idx.files)
         local doc = docs.read(nav_root .. '/lazy_user.lua')
         local req = { method = 'lsp_signature', uri = doc.uri, position = { line = 1, character = 9 } }
-        local foreign = require('codeoutline.foreign')
+        local foreign = require('codeoutline.analysis.foreign')
         local G = idx:symbols()
-        local ctx = require('codeoutline.lua_bindings').context(G)
+        local ctx = require('codeoutline.analysis.lua.lua_bindings').context(G)
         spec.truthy(foreign.has_candidates(G, ctx))
         local rec = idx.files['lazy_contract.c']
         spec.nil_value(foreign.exports(rec, 'lua', 'lazy_contract'))
@@ -2154,9 +2154,9 @@ int luaopen_example_empty(lua_State *L) { return 0; }
         local envelope = cmsgpack.unpack(file:read('a')); file:close()
         local saved = cmsgpack.unpack(xcompress.inflate(envelope.payload, envelope.size))
         check_records(saved.files)
-        local loaded = require('codeoutline.index').open(nav_root, { cache_path = idx.cache_path })
+        local loaded = require('codeoutline.indexing.index').open(nav_root, { cache_path = idx.cache_path })
         local reloaded = loaded:symbols()
-        local files = foreign.modules(reloaded, 'lua', 'lazy_contract', require('codeoutline.lua_bindings').context(reloaded))
+        local files = foreign.modules(reloaded, 'lua', 'lazy_contract', require('codeoutline.analysis.lua.lua_bindings').context(reloaded))
         spec.equal(#files, 1)
         spec.truthy(foreign.exports(reloaded.files[files[1]], 'lua', 'lazy_contract').read)
         check_records(loaded.files)
@@ -2239,8 +2239,8 @@ int luaopen_example_empty(lua_State *L) { return 0; }
         service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
         local idx = service.resident(nav_root)
         local G = idx:symbols()
-        local foreign = require('codeoutline.foreign')
-        local ctx = require('codeoutline.lua_bindings').context(G)
+        local foreign = require('codeoutline.analysis.foreign')
+        local ctx = require('codeoutline.analysis.lua.lua_bindings').context(G)
         local read, reads = docs.read, 0
         docs.read = function(path, ...)
             if path:sub(-#rel) == rel then
@@ -2253,7 +2253,7 @@ int luaopen_example_empty(lua_State *L) { return 0; }
             spec.equal(#foreign.modules(G, 'lua', 'retry_contract', ctx), 0)
             spec.equal(#foreign.modules(G, 'lua', 'retry_contract', ctx), 0)
             spec.equal(reads, 1) -- do not repeat failed I/O inside one query
-            ctx = require('codeoutline.lua_bindings').context(G)
+            ctx = require('codeoutline.analysis.lua.lua_bindings').context(G)
             local files = foreign.modules(G, 'lua', 'retry_contract', ctx)
             spec.equal(#files, 1)
             local exports = foreign.exports(G.files[files[1]], 'lua', 'retry_contract')
@@ -2284,8 +2284,8 @@ int luaopen_example_empty(lua_State *L) { return 0; }
             local idx = service.resident(nav_root)
             local G = idx:symbols()
             local f = G.file_index[case.rel]
-            local foreign = require('codeoutline.foreign')
-            local ctx = require('codeoutline.lua_bindings').context(G)
+            local foreign = require('codeoutline.analysis.foreign')
+            local ctx = require('codeoutline.analysis.lua.lua_bindings').context(G)
             if case.native then navigation.full(G, f) end -- native upgrade of a cached ordinary parse
             nav_write(case.rel, case.after)
             local ok, err
@@ -2305,7 +2305,7 @@ int luaopen_example_empty(lua_State *L) { return 0; }
         service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
         local idx = service.resident(nav_root)
         local G = idx:symbols()
-        local foreign = require('codeoutline.foreign')
+        local foreign = require('codeoutline.analysis.foreign')
         local read, reads = docs.read, 0
         docs.read = function(path, ...)
             if path:sub(-#rel) == rel then reads = reads + 1 end
@@ -2313,7 +2313,7 @@ int luaopen_example_empty(lua_State *L) { return 0; }
         end
         local ok, err = pcall(function()
             for _ = 1, 2 do
-                local ctx = require('codeoutline.lua_bindings').context(G)
+                local ctx = require('codeoutline.analysis.lua.lua_bindings').context(G)
                 spec.equal(#foreign.modules(G, 'lua', 'empty_lazy_contract', ctx), 0)
             end
             spec.equal(reads, 1)
@@ -3049,7 +3049,7 @@ void MacroNavUnknown(void) { MACRO_NAV(3); }
         found = jump('MACRO_NAV(3)'); spec.equal(#found, 1); spec.equal(found[1].range.start.line, 6)
         local V = navigation.view('spec', nav_root)
         local f = V.file_index['macro-nav.c']
-        local ids, handled = require('codeoutline.cpp_macros').context(V, V.js_context).resolve(f, 'MACRO_NAV', 9)
+        local ids, handled = require('codeoutline.analysis.cpp.cpp_macros').context(V, V.js_context).resolve(f, 'MACRO_NAV', 9)
         spec.equal(#ids, 0); spec.equal(handled, true, 'unknown branches must still block graph execution binding')
         navigation.sync({ session = 'macro-nav', open = { [doc.uri] = 1 }, changed = {
             [doc.uri] = { version = 1, language = 'c', source = source:gsub('#undef MACRO_NAV', '#define MACRO_NAV(x) 0') } } })
@@ -3155,7 +3155,7 @@ void MacroNavUnknown(void) { MACRO_NAV(3); }
                 spec.equal(#found, 1, 'a configured visible declaration still resolves normally')
                 found = jump('FallbackOrdinary', { includePaths = { 'missing-explicit-path' } })
                 spec.equal(#found, 0, 'an explicit include policy must not be bypassed')
-                local macros = require('codeoutline.cpp_macros')
+                local macros = require('codeoutline.analysis.cpp.cpp_macros')
                 local before = macros.MAX_FILES; macros.MAX_FILES = 0
                 local success, limited, response = pcall(jump, 'FallbackOrdinary')
                 macros.MAX_FILES = before; assert(success, limited)
@@ -3210,7 +3210,7 @@ void MacroNavUnknown(void) { MACRO_NAV(3); }
             for _, loc in ipairs(found) do spec.equal(loc.range.start.line, 2) end
             local V = navigation.view('spec', nav_root)
             local f = V.file_index['proxyUse/main.cpp']
-            local C = require('codeoutline.cpp_macros').context(V, V.js_context)
+            local C = require('codeoutline.analysis.cpp.cpp_macros').context(V, V.js_context)
             local ids, handled, sites = C.resolve(f, 'PROXY_NAV', 2)
             spec.equal(#ids, 0); spec.equal(handled, true); spec.equal(#sites, 0)
             ids, handled, sites = C.resolve(f, 'PROXY_NAV', 2, true)
@@ -3223,7 +3223,7 @@ void MacroNavUnknown(void) { MACRO_NAV(3); }
             spec.equal(#jump('PROXY_NAV(2)'), 0, 'a later undef clears the alternatives')
             found = jump('PROXY_NAV(3)'); spec.equal(#found, 1); spec.equal(found[1].uri, doc.uri)
             spec.equal(found[1].range.start.line, 4)
-            local macros = require('codeoutline.cpp_macros')
+            local macros = require('codeoutline.analysis.cpp.cpp_macros')
             local before = macros.MAX_FILES; macros.MAX_FILES = 2
             local bounded = navigation.view('spec', nav_root)
             local limited = macros.context(bounded, bounded.js_context)
@@ -3270,7 +3270,7 @@ void MacroNavUnknown(void) { MACRO_NAV(3); }
                 local implementation = query('lsp_implementation', (assert(source:find('save', 1, true))))
                 spec.equal(#implementation, 1); spec.equal(implementation[1].uri, nav_uri('search' .. name .. '/impl.cpp'))
                 local labels = {}
-                for _, item in ipairs(require('codeoutline.completion').complete({ uri = doc.uri, root = nav_root,
+                for _, item in ipairs(require('codeoutline.query.completion').complete({ uri = doc.uri, root = nav_root,
                     session = 'include-search', position = doc:position(assert(source:find('s->', 1, true)) + 2) }).items) do
                     labels[item.label] = true
                 end
@@ -3613,7 +3613,7 @@ end
 spec.describe('LSP navigation requests', function()
     spec.it('flushes protocol trace metadata without document or result bodies', function()
         local file = root .. '/protocol-trace.jsonl'
-        local trace = assert(require('codeoutline.lsp_trace').open(file, 'trace-test'))
+        local trace = assert(require('codeoutline.protocol.lsp_trace').open(file, 'trace-test'))
         trace:message('receive', { id = 2, method = 'textDocument/didOpen', params = {
             textDocument = { uri = 'file:///sample.c', languageId = 'c', version = 1, text = 'private_source_body' } } })
         trace:message('receive', { method = '$/cancelRequest', params = { id = 2 } })
@@ -3930,7 +3930,7 @@ spec.describe('LSP navigation requests', function()
             end }
             navigation.handles = function(method) return method:match('^lsp_') ~= nil end
             navigation.execute = function() return { result = {} } end
-            local worker = dofile('scripts/codeoutline/index_worker.lua')
+            local worker = dofile('scripts/codeoutline/runtime/index_worker.lua')
             for _, method in ipairs({ 'lsp_completion', 'lsp_hover', 'lsp_signature', 'lsp_references',
                 'lsp_incoming', 'lsp_outgoing', 'status', 'invalid', 'lsp_definition' }) do
                 local id = method == 'invalid' and 'failed' or method == 'lsp_definition' and 'cancelled' or method
@@ -3961,7 +3961,7 @@ spec.describe('LSP navigation requests', function()
                 results['nav-cancelled'] = { ok = success, result = result }
                 return true
             end }
-            local worker = dofile('scripts/codeoutline/index_worker.lua')
+            local worker = dofile('scripts/codeoutline/runtime/index_worker.lua')
             local lua = nav_uri('m.lua')
             local base = { method = 'lsp_definition', session = 'worker', root = nav_root, uri = lua,
                 position = { line = 0, character = 24 }, deadline = xtimer.now_ms() + 10000 }
@@ -3986,10 +3986,10 @@ spec.describe('LSP navigation requests', function()
     end)
 end)
 
-local completion = require('codeoutline.completion')
+local completion = require('codeoutline.query.completion')
 local comp_root = root .. '-complete'
 assert(xutils.mkdir_p(comp_root .. '/pkg')); assert(xutils.mkdir_p(comp_root .. '/core'))
-comp_root = assert(require('codeoutline.path').canonical(comp_root))
+comp_root = assert(require('codeoutline.shared.path').canonical(comp_root))
 -- `@@` marks completion positions; marks[path] lists their byte offsets.
 local comp_files = {
     ['p.h'] = 'struct Q { int depth; };\nstruct P { int x; struct Q *next; };\n',
@@ -4166,7 +4166,7 @@ spec.describe('LSP completion', function()
         write(path, source)
         service.refresh(comp_root, { cache_path = comp_root .. '/cache.idx', lister = 'walk' })
         local doc = docs.read(path)
-        local bindings = require('codeoutline.cpp_types')
+        local bindings = require('codeoutline.analysis.cpp.cpp_types')
         local original, clock, elapsed = bindings.imported_members, xtimer.now_ms, 0
         bindings.imported_members = function(...)
             elapsed = 1000

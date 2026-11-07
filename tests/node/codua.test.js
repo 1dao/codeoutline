@@ -15,7 +15,7 @@ test('unmodified Codua MCP client and tool adapter over real HTTP', { skip: !pro
     const endpoint = await startHttp(worker, await configurePaths({ project: root }), { port: 0 });
     try {
         const child = spawn(defaultRuntime, [fileURLToPath(new URL('../lua/codua_http.lua', import.meta.url))], {
-            cwd: fileURLToPath(new URL('../../xnet2lua/', import.meta.url)),
+            cwd: fileURLToPath(new URL('../../core/', import.meta.url)),
             windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
             env: { ...process.env, CODEOUTLINE_TEST_PROJECT: root, CODEOUTLINE_TEST_URL: endpoint.url },
         });

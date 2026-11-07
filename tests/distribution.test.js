@@ -55,7 +55,7 @@ test('packed npm and native artifacts work outside the checkout', { timeout: 120
                     assert(paths.includes(`editors/${asset}`), paths.join(' '));
                 }
             }
-            assert(!paths.some((p) => p.startsWith('xnet2lua/')), paths.join(' '));
+            assert(!paths.some((p) => p.startsWith('core/')), paths.join(' '));
         }
         archives.push(join(temp, packed.filename));
     }

@@ -43,7 +43,7 @@ test('HTTPS client sends requests larger than the default TLS queue', {
 test('network workers leave other threads sockets usable after shutdown', () => {
     const result = spawnSync(defaultRuntime, ['tests/lua/xnet_thread_lifecycle_test.lua',
         'LOG_STDERR=1', 'LOG_FILE=0', 'LOG_LEVEL=ERROR'], {
-        cwd: join(cwd, 'xnet2lua'), encoding: 'utf8', timeout: 10000, windowsHide: true });
+        cwd: join(cwd, 'core'), encoding: 'utf8', timeout: 10000, windowsHide: true });
     assert.equal(result.status, 0, `${result.error || ''}\n${result.stdout}\n${result.stderr}`);
     assert.match(result.stdout, /PASS network survives 3 worker shutdowns/);
 });

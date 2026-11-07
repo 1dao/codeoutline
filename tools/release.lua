@@ -169,7 +169,7 @@ local function release(project)
     -- A script-only update ships the base's runtime, so it must have been built
     -- from this submodule commit with these build scripts (older bases without
     -- runtimeBuild never match).
-    local runtime_commit = command('git -C xnet2lua rev-parse HEAD')
+    local runtime_commit = command('git -C core rev-parse HEAD')
     local runtime_build = dofile(root .. '/tools/runtime_build.lua')(root)
     if mode == 'update' and not options.BASE then
         local directories, truncated = u.list_dir(parent, 10000)

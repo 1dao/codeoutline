@@ -31,7 +31,7 @@ spec.describe('native Lua exports', function()
         return ci.parse(path, source, opts)
     end
     spec.it('infers the real xthread guest signature without changing its C signature', function()
-        local f = assert(io.open('xnet2lua/xlua/lua_xthread.c', 'rb'))
+        local f = assert(io.open('core/xlua/lua_xthread.c', 'rb'))
         local source = f:read('a'); f:close()
         local rec = native_parse('lua_xthread.c', source, { ranges = false })
         local node = rec.nodes[rec.foreign_exports.lua.xthread.create_thread]
@@ -77,7 +77,7 @@ int luaopen_old(lua_State *L) { luaL_register(L, "old", one); return 1; }
         end
     end)
     spec.it('extracts the real xscan module without leaking metatable methods', function()
-        local f = assert(io.open('xnet2lua/xlua/lua_xscan.c', 'rb'))
+        local f = assert(io.open('core/xlua/lua_xscan.c', 'rb'))
         local source = f:read('a'); f:close()
         local rec = native_parse('lua_xscan.c', source)
         local exports = assert(rec.foreign_exports.lua.xscan)
@@ -112,7 +112,7 @@ int luaopen_test(lua_State *L) { luaL_newlib(L, funcs); return 1; }
         end
     end)
     spec.it('types native objects by the metatable the implementation returns', function()
-        local f = assert(io.open('xnet2lua/xlua/lua_xrecord.c', 'rb'))
+        local f = assert(io.open('core/xlua/lua_xrecord.c', 'rb'))
         local source = f:read('a'); f:close()
         local rec = native_parse('lua_xrecord.c', source, { ranges = false })
         local foreign = require('codeoutline.analysis.foreign')

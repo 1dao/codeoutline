@@ -146,12 +146,12 @@ return {
             else stdio = mcp.new(config, submit, cancel) end
         else
             -- Packages ship the codec as lib/xhttp_codec.lua; a source checkout
-            -- reads it from the xnet2lua submodule.
+            -- reads it from the core submodule directory.
             local codec_path = options.RUNTIME_ROOT and options.RUNTIME_ROOT .. '/scripts/core/share/xhttp_codec.lua'
                 or install .. '/lib/xhttp_codec.lua'
             local probe = io.open(codec_path, 'rb')
             if probe then probe:close()
-            else codec_path = install .. '/xnet2lua/scripts/core/share/xhttp_codec.lua' end
+            else codec_path = install .. '/core/scripts/core/share/xhttp_codec.lua' end
             codec = dofile(codec_path)
             if not managed then listen()
             else

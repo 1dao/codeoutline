@@ -1,5 +1,5 @@
 $ErrorActionPreference = 'Stop'
-$runtimeRoot = Join-Path $PSScriptRoot '../xnet2lua'
+$runtimeRoot = Join-Path $PSScriptRoot '../core'
 $previousCompilerTail = $env:_CL_
 Push-Location $runtimeRoot
 try {

@@ -430,7 +430,7 @@ test('LSP stdio completes members, locals and draft edits', { timeout: 30000 }, 
 test('LSP completes xhash header functions at the end of xrecord_bind', { timeout: 30000 }, async (t) => {
     const client = await start(t);
     for (const name of ['xrecord.c', 'xrecord.h', 'xhash.h', 'xmacro.h']) {
-        await writeFile(join(client.project, name), await readFile(join(root, 'xnet2lua', name)));
+        await writeFile(join(client.project, name), await readFile(join(root, 'core', name)));
     }
     await initialize(client, [client.project]);
     await indexed(client);

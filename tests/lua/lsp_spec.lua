@@ -2075,7 +2075,7 @@ int luaopen_example_empty(lua_State *L) { return 0; }
         spec.equal(range_text('pool.c', found[1].range), 'pool_read')
     end)
     spec.it('shares native receiver bindings across completion and navigation', function()
-        local file = assert(io.open('xnet2lua/xlua/lua_xrecord.c', 'rb'))
+        local file = assert(io.open('core/xlua/lua_xrecord.c', 'rb'))
         nav_write('native_record.c', file:read('a')); file:close()
         local prefix = "local xr = require('xrecord')\nlocal schema = xr.schema({})\nlocal items = schema:new(4)\n"
         local cases = {

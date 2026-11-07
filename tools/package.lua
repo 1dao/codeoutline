@@ -49,8 +49,8 @@ local function git(command)
     assert(ok, 'run this tool from the repository root with Git available')
     return value:gsub('%s+$', '')
 end
-local runtime_commit = git('git -C xnet2lua rev-parse HEAD')
-assert(git('git -C xnet2lua diff --name-only') == '', 'runtime has uncommitted changes; commit upstream first')
+local runtime_commit = git('git -C core rev-parse HEAD')
+assert(git('git -C core diff --name-only') == '', 'runtime has uncommitted changes; commit upstream first')
 local runtime_build = dofile(root .. '/tools/runtime_build.lua')(root)
 local binary = platform[1] == 'win32' and 'xnet.exe' or 'xnet'
 copy(options.RUNTIME or root .. '/bin/' .. binary, 'bin/' .. binary)
@@ -58,20 +58,20 @@ copy_lua('scripts/codeoutline')
 copy_lua('scripts/xupgate')
 copy(root .. '/keys/update-public.pem', 'keys/update-public.pem')
 copy(root .. '/keys/update-ca.crt', 'keys/update-ca.crt')
-copy(root .. '/xnet2lua/scripts/core/share/xhttp_codec.lua', 'lib/xhttp_codec.lua')
-copy(root .. '/xnet2lua/LICENSE', 'licenses/xnet2lua.txt')
-copy(root .. '/xnet2lua/3rd/libdeflate/COPYING', 'licenses/libdeflate.txt')
+copy(root .. '/core/scripts/core/share/xhttp_codec.lua', 'lib/xhttp_codec.lua')
+copy(root .. '/core/LICENSE', 'licenses/xnet2lua.txt')
+copy(root .. '/core/3rd/libdeflate/COPYING', 'licenses/libdeflate.txt')
 copy(root .. '/LICENSE', 'LICENSE')
 -- This tool runs on the runtime it packages, so `jit` tells which Lua is linked in.
 if jit then
-    copy(root .. '/xnet2lua/3rd/luajit/COPYRIGHT', 'licenses/luajit.txt')
+    copy(root .. '/core/3rd/luajit/COPYRIGHT', 'licenses/luajit.txt')
 else
     copy(root .. '/licenses/lua-minilua.txt', 'licenses/lua-minilua.txt')
 end
 for _, name in ipairs({ 'lua-cmsgpack', 'mbedtls' }) do
     copy(root .. '/licenses/' .. name .. '.txt', 'licenses/' .. name .. '.txt')
 end
-local yyjson = read(root .. '/xnet2lua/3rd/yyjson.h'):match('^(.-)%*/')
+local yyjson = read(root .. '/core/3rd/yyjson.h'):match('^(.-)%*/')
 write(output .. '/native/licenses/yyjson.txt', assert(yyjson) .. '*/\n')
 copy(root .. '/README.md', 'README.md')
 copy(root .. '/README.zh-CN.md', 'README.zh-CN.md')

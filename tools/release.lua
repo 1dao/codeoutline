@@ -194,18 +194,31 @@ local function release(project)
         end
     end
     local highest = assert(version_parts(current))
+    local latest_published
     local sequence = require('codeoutline.update_sequence')
     for _, item in pairs(project.releases) do
         sequence = math.max(sequence, item.manifest.sequence)
         local parts = version_parts(item.manifest.version)
         if parts and newer(parts, highest) then highest = parts end
+        if parts and item.status == 'published' and (not latest_published or newer(parts, latest_published)) then
+            latest_published = parts
+        end
     end
     local remote_tags = command('git ls-remote --tags origin')
     local local_tags = command('git tag --list')
+    local recommended = string.format('%d.%d.%d', highest[1], highest[2], highest[3] + 1)
+    if not options.VERSION then
+        io.write('Local version: ', current, '; latest published XUpgate version: ',
+            latest_published and table.concat(latest_published, '.') or 'none', '\n')
+    end
     local version
     while true do
         if options.VERSION then version = options.VERSION
-        else io.write('New version (for example 0.1.4): '); io.stdout:flush(); version = io.read('*l'); assert(version, 'Cancelled') end
+        else
+            io.write('New version [recommended ', recommended, '; Enter to accept]: '); io.stdout:flush()
+            version = io.read('*l'); assert(version, 'Cancelled')
+            if version:match('^%s*$') then version = recommended end
+        end
         version = version:match('^%s*(.-)%s*$')
         local parts, reason = version_parts(version)
         if not parts then reason = 'Use a version such as 0.1.4.'

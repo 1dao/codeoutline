@@ -302,13 +302,7 @@ local function score(G, f, src_id, ref_kind, recv, cid, deps, paired, owner)
     if not s then return nil end
     local kind = c.kind
     if kind == 'prototype' then s = s - 3 end
-    if ref_kind == 'member_call' and (recv == 'self' or recv == 'this' or recv == 'cls') and src_id then
-        if owner and c.parent and G.id_of[cf][c.parent] == owner then
-            s = s + 80
-        elseif kind ~= 'method' then
-            s = s - 20
-        end
-    elseif ref_kind == 'member_call' and s <= 0 then
+    if ref_kind == 'member_call' and s <= 0 then
         -- obj.name() on an unknown receiver: binding it to any same-named
         -- method project-wide (str.format -> some format()) is mostly wrong,
         -- so only local candidates qualify.
@@ -327,7 +321,7 @@ local function is_decl(node) return node.kind == 'prototype' or node.decl end
 local scored_ids, scored_vals = {}, {}
 
 -- accept overrides the node kinds the ref kind may bind to (navigation only).
-local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired, accept, evidence, js_context, line)
+local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired, accept, evidence, js_context, line, offset)
     if kind == 'annotation' or kind == 'type' then return nil end
     local macro_state
     if kind == 'call' and C_FAMILY[G.files[f].language] and (not src_id or G.nodes[src_id].kind ~= 'macro') then
@@ -345,16 +339,15 @@ local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired, accept,
         or G.files[f].language == 'python' or G.files[f].language == 'java' or G.files[f].language == 'kotlin')
     if function_value and recv then kind = 'member_call' end
     if evidence == '' then evidence = nil end
+    local receiver_ids, receiver_reason = require('codeoutline.receivers').resolve(G, f, src_id, name, kind, recv,
+        evidence, js_context, accept, offset)
+    if receiver_ids ~= nil then
+        local filtered = {}
+        for _, id in ipairs(receiver_ids) do if accept[G.nodes[id].kind] then filtered[#filtered + 1] = id end end
+        return filtered, receiver_reason, macro_state
+    end
     local strategy = 'js/ts binding'
     local exact, binding_reason = js_resolution.resolve(G, f, name, kind, recv, evidence, js_context)
-    if G.files[f].language == 'go' then
-        strategy = 'go method set'
-        exact, binding_reason = require('codeoutline.go_methods').resolve(G, f, name, recv, evidence, js_context)
-        if exact == nil then
-            strategy = 'go package binding'
-            exact, binding_reason = require('codeoutline.go_modules').resolve(G, f, name, recv, js_context)
-        end
-    end
     if G.files[f].language == 'rust' and js_context then
         strategy = 'cargo crate/module binding'
         exact, binding_reason = require('codeoutline.rust_resolution').resolve(G, f, src_id, name, recv, evidence, js_context)
@@ -392,7 +385,7 @@ local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired, accept,
         for _, id in ipairs(exact) do if accept[G.nodes[id].kind] then result[#result + 1] = id end end
         return result, #result == 0 and (binding_reason or 'binding target unresolved') or strategy, macro_state
     end
-    if function_value and recv and recv ~= 'self' and recv ~= 'cls' and recv ~= 'this' then
+    if function_value and recv then
         return {}, 'unresolved function-value receiver'
     end
     local cands = G.by_name[name]
@@ -415,12 +408,11 @@ local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired, accept,
     -- candidates this call could actually reach. (Asking it over all
     -- same-named nodes let a Python `def work` hide the C prototype of
     -- `work`, after which the Python def was filtered out too.)
-    local self_call = kind == 'member_call' and src_id and (recv == 'self' or recv == 'this' or recv == 'cls')
-    local owner = (self_call or (kind == 'call' and src_id and (G.files[f].language == 'java' or G.files[f].language == 'kotlin')))
+    local owner = (kind == 'call' and src_id and (G.files[f].language == 'java' or G.files[f].language == 'kotlin'))
         and owner_class(G, src_id) or nil
     -- score() rejects an unknown-receiver member call to an unrelated file;
     -- checking placement first skips most candidates of common method names.
-    local local_only = kind == 'member_call' and not self_call
+    local local_only = kind == 'member_call'
     local n, has_def, has_name = 0, false, false
     for i = 1, math.min(#cands, M.MAX_CANDIDATES) do
         local cid = cands[i]
@@ -669,6 +661,7 @@ function M.query(symbols, opts)
         if go_frameworks.incomplete then incomplete('go_framework_analysis_incomplete') end
         if js_context.cpp_receivers_incomplete then incomplete('cpp_receiver_analysis_incomplete') end
         if js_context.rust_incomplete then incomplete('rust_resolution_incomplete') end
+        if js_context.receiver_incomplete then incomplete('receiver_resolution_incomplete') end
     end
     local function deps(f)
         local entry = dependencies[f]

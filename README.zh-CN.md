@@ -205,6 +205,14 @@ Linux 上解码 GBK 源码需要系统 iconv 的 GBK 模块；EL8/EL9 最小安�
 
 C、C++、C#、Go、Java、JavaScript / TypeScript（含 JSX/TSX）、ArkTS（`.ets`）、Kotlin（`.kt` / `.kts`）、Lua、Python、Rust。
 
+调用关系、导航与补全共用查询期接收者入口，由各语言提供绑定和成员查找规则。
+支持 Lua 方法接收者、Python 参数及重新赋值、JS/TS/ArkTS 箭头函数的词法 `this`
+与普通函数的动态 `this`、Kotlin 扩展和作用域接收者、Rust `self`/`Self`，并复用
+C/C++、C#、Java 和 Go 的声明类型解析。普通变量即使命名为 `self` 或 `cls`，
+也按其声明类型处理。详细绑定仅保留在有容量限制、经源码校验的内存缓存中；
+未知接收者不会退回同名方法猜测。运行时修改成员、任意动态调用和无法证明的泛型约束
+仍超出静态分析范围。
+
 ArkTS 复用 JS/TS 解析器，将组件 `struct` 按类索引，支持带装饰器的字段、方法、
 本地模块导入和 ArkUI 调用；声明式 UI 块不会被当作方法声明。
 这是启发式索引，不执行 ArkTS 类型检查；尚不解析 SDK `@kit.*`/`@ohos.*`、资源引用，

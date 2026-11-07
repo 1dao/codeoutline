@@ -179,6 +179,7 @@ function M.finish(r, T)
         require('codeoutline.automatic_events').collect(r, T)
         require('codeoutline.shared_events').collect(r, T)
     end
+    if T and not r.defer_analysis and (r.ranges or r.ordinary_bindings) then require('codeoutline.receivers').collect(r, T) end
     if T then require('codeoutline.indirect').collect(r, T) end
     r.collect_dispatch = nil
     local original_refs = r.refs
@@ -186,6 +187,7 @@ function M.finish(r, T)
     local js_receiver = not r.defer_analysis and r.js_imports and (r.ranges or r.ordinary_bindings) and {}
     local lua_binding = not r.defer_analysis and r.lua_imports and (r.ranges or r.ordinary_bindings) and {}
     local binding = (r.python_imports or r.has_bindings) and {}
+    local receiver = r.receivers and {}
     r.has_bindings = nil
     local start, stop = r.ranges and T and {}, r.ranges and T and {}
     for i, ref in ipairs(r.refs) do
@@ -193,6 +195,7 @@ function M.finish(r, T)
         if js_receiver then js_receiver[i] = ref.js_receiver or '' end
         if lua_binding then lua_binding[i] = ref.lua_binding or '' end
         if binding then binding[i] = ref.binding or '' end
+        if receiver then receiver[i] = ref.receiver or '' end
         if start then
             local named = T:text(ref.tok) == ref.name
             start[i], stop[i] = named and T.s[ref.tok] - 1 or false, named and T.e[ref.tok] or false
@@ -202,6 +205,7 @@ function M.finish(r, T)
     r.refs.js_receiver = js_receiver or nil
     r.refs.lua_binding = lua_binding or nil
     r.refs.binding = binding
+    r.refs.receiver = receiver
     if r.type_use_refs and #r.type_use_refs > 0 then
         r.type_sites = {}
         local positions = {}

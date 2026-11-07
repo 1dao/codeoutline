@@ -3053,14 +3053,14 @@ spec.describe('query-owned Cargo packages', function()
         write(root .. '/Cargo.toml', '[package]\nname="self-impl"\n')
         local source = 'mod left { struct Store<T> {} impl<T> Store<T> { fn save() {} fn LeftRun() { Self::save(); } } }\n'
             .. 'mod right { struct Store {} impl Store { fn save() {} fn RightRun() { Self::save(); } } }\n'
-            .. 'trait Save { fn save(); } struct Other {} impl Save for Other { fn save() {} fn TraitRun() { Self::save(); } }\n'
+            .. 'trait Save { fn save(); fn TraitRun(); } struct Other {} impl Save for Other { fn save() {} fn TraitRun() { Self::save(); } }\n'
             .. 'struct Empty {} impl Empty { fn MissingRun() { Self::save(); } }\n'
             .. 'fn OutsideRun() { Self::save(); }'
         for _, project in ipairs({ false, root }) do
             local G = build({ ['src/lib.rs'] = source }, project or nil)
             local Q = graph.query(G)
             for _, name in ipairs({ 'LeftRun', 'RightRun', 'TraitRun' }) do
-                local id = G.by_name[name][1]
+                local id = G.by_name[name][#G.by_name[name]]
                 spec.equal(#Q.out[id], graph.EDGE)
                 local target = G.nodes[Q.out[id][1]]
                 spec.equal(target.name, 'save'); spec.equal(target.parent, G.nodes[id].parent)
@@ -3068,6 +3068,64 @@ spec.describe('query-owned Cargo packages', function()
             spec.equal(#Q.out[G.by_name.MissingRun[1]], 0)
             spec.equal(#Q.out[G.by_name.OutsideRun[1]], 0)
         end
+    end)
+    spec.it('resolves Self across concrete impls with inherent precedence and trait defaults', function()
+        local root = tmp_root .. '/rust_self_shared'
+        write(root .. '/Cargo.toml', '[package]\nname="self-shared"\n')
+        local source = 'struct Store {}\ntrait Save { fn save(); fn run(); fn fallback() {} }\n'
+            .. 'impl Store { fn save() {} }\nimpl Store { fn split() { Self::save(); } }\n'
+            .. 'impl Save for Store { fn save() {} fn run() { Self::save(); Self::fallback(); } }\n'
+            .. 'trait Default { fn target(); fn invoke() { Self::target(); } }\n'
+            .. 'mod other { struct Store {} impl Store { fn save() {} } }\n'
+            .. 'struct Generic<T> {} impl Generic<u8> { fn pick() {} }\n'
+            .. 'impl Generic<u16> { fn reject() { Self::pick(); } }\n'
+            .. 'struct Boxy<T> {} impl<T> Boxy<T> { fn shared() {} }\n'
+            .. 'impl<U> Boxy<U> { fn generic_run() { Self::shared(); } }\n'
+            .. 'impl Boxy<u8> { fn concrete_run() { Self::shared(); } }\n'
+            .. 'struct Bound<T> {} impl<T: Clone> Bound<T> { fn bounded() {} }\n'
+            .. 'impl<T> Bound<T> { fn unproven() { Self::bounded(); } }\n'
+        for _, project in ipairs({ false, root }) do
+            local G = build({ ['src/lib.rs'] = source }, project or nil)
+            local Q = graph.query(G)
+            local split = Q.out[G.by_name.split[1]]
+            spec.equal(#split, graph.EDGE)
+            spec.equal(G.files[1].nodes[G.nodes[split[1]].parent].trait, nil)
+            for _, id in ipairs(G.by_name.run) do
+                if not G.nodes[id].abstract then
+                    local out = Q.out[id]; spec.equal(#out, 2 * graph.EDGE)
+                    spec.equal(G.files[1].nodes[G.nodes[out[1]].parent].trait, nil)
+                    spec.equal(G.nodes[out[graph.EDGE + 1]].name, 'fallback')
+                end
+            end
+            spec.equal(#Q.out[G.by_name.invoke[1]], graph.EDGE)
+            spec.equal(#Q.out[G.by_name.reject[1]], 0)
+            spec.equal(#Q.out[G.by_name.generic_run[1]], graph.EDGE)
+            spec.equal(#Q.out[G.by_name.concrete_run[1]], graph.EDGE)
+            spec.equal(#Q.out[G.by_name.unproven[1]], 0)
+        end
+    end)
+    spec.it('shares cross-file Self evidence after cache reload and invalidates edited impls', function()
+        local root = tmp_root .. '/rust_self_cached'
+        write(root .. '/Cargo.toml', '[package]\nname="self-cached"\n')
+        write(root .. '/src/lib.rs', 'mod model; mod extra;')
+        write(root .. '/src/model.rs', 'pub struct Store {} impl Store { pub fn save() {} }')
+        write(root .. '/src/extra.rs', 'use crate::model::Store; impl Store { fn run() { Self::save(); Self::save(); } }')
+        local options = { cache_path = root .. '/cache.idx', lister = 'walk' }
+        for _, reload in ipairs({ false, true }) do
+            if reload then svc.forget(root) end
+            local idx, G = svc.get(root, options)
+            for _, rec in pairs(idx.files) do spec.nil_value(rec.rust_impls) end
+            local Q = graph.query(G)
+            local out = Q.out[G.by_name.run[1]]
+            spec.equal(#out, 2 * graph.EDGE)
+            spec.equal(G.files[G.node_file[out[1]]].path, 'src/model.rs')
+            spec.equal(#Q.inn[out[1]], 2 * graph.EDGE)
+            for _, rec in pairs(idx.files) do spec.nil_value(rec.rust_impls) end
+        end
+        write(root .. '/src/model.rs', 'pub struct Store {} impl Store { pub fn renamed() {} }')
+        local _, G = svc.get(root, options)
+        spec.equal(#graph.query(G).out[G.by_name.run[1]], 0)
+        svc.forget(root)
     end)
     spec.it('resolves path dependencies, renamed crates and custom library entry names without sibling guesses', function()
         local root = tmp_root .. '/cargo_paths'
@@ -3545,6 +3603,139 @@ spec.describe('query-owned ordinary bindings', function()
     end)
 end)
 
+spec.describe('shared receiver bindings', function()
+    local function build(path, source)
+        return graph.build({ files = { [path] = ci.parse(path, source, { ordinary_bindings = true }) } })
+    end
+    spec.it('keeps implicit receiver calls inside their type and inheritance chain', function()
+        local cases = {
+            { 'py', 'class Base:\n    def save(self): pass\nclass B:\n    def save(self): pass\nclass A(Base):\n    def run(me): me.save()\n', 'Base.save' },
+            { 'js', 'class Base { save() {} } class B { save() {} } class A extends Base { run() { this.save(); } }', 'Base.save' },
+            { 'ts', 'class Base { save() {} } class B { save() {} } class A extends Base { run() { this.save(); } }', 'Base.save' },
+            { 'ets', 'class Base { save() {} } class B { save() {} } class A extends Base { run() { this.save(); } }', 'Base.save' },
+            { 'java', 'class Base { void save() {} } class B { void save() {} } class A extends Base { void run() { this.save(); } }', 'Base.save' },
+            { 'kt', 'open class Base { fun save() {} } class B { fun save() {} } class A: Base() { fun run() { this.save() } }', 'Base.save' },
+            { 'cs', 'class Base { public void save() {} } class B { public void save() {} } class A: Base { void run() { this.save(); } }', 'Base.save' },
+            { 'cpp', 'class Base { public: void save() {} }; class B { public: void save() {} }; class A: public Base { public: void run() { this->save(); } };', 'Base::save' },
+            { 'rs', 'struct A {} struct B {} impl A { fn save(&self) {} fn run(&self) { self.save(); } } impl B { fn save(&self) {} }', 'A::save' },
+        }
+        for _, case in ipairs(cases) do
+            local G = build('main.' .. case[1], case[2])
+            local Q = graph.query(G); local out = Q.out[G.by_name.run[1]]
+            spec.equal(#out, graph.EDGE, case[1]); spec.equal(G.nodes[out[1]].qualified, case[3], case[1])
+            spec.equal(#Q.inn[out[1]], graph.EDGE, case[1])
+        end
+    end)
+    spec.it('does not bind missing receiver members to unrelated methods', function()
+        local cases = {
+            { 'py', 'class B:\n    def save(self): pass\nclass A:\n    def run(self): self.save()\n' },
+            { 'js', 'class B { save() {} } class A { run() { this.save(); } }' },
+            { 'ts', 'class B { save() {} } class A { run() { this.save(); } }' },
+            { 'ets', 'class B { save() {} } class A { run() { this.save(); } }' },
+            { 'cpp', 'class B { public: void save() {} }; class A { public: void run() { this->save(); } };' },
+            { 'rs', 'struct A {} struct B {} impl A { fn run(&self) { self.save(); } } impl B { fn save(&self) {} }' },
+        }
+        for _, case in ipairs(cases) do
+            local G = build('main.' .. case[1], case[2]); spec.equal(#graph.query(G).out[G.by_name.run[1]], 0, case[1])
+        end
+    end)
+    spec.it('tracks Python receiver reassignment, nested parameter shadows and C3 ordering', function()
+        local G = build('main.py', 'class B:\n    def save(self): pass\nclass A:\n    def save(self): pass\n'
+            .. '    def run(me):\n        me = B()\n        me.save()\n'
+            .. '    def closure(self):\n        def captured(): self.save()\n        def blocked(self): self.save()\n'
+            .. 'class Left:\n    def save(self): pass\nclass Right:\n    def save(self): pass\n'
+            .. 'class Diamond(Left, Right):\n    def order(self): self.save()\n')
+        local Q = graph.query(G)
+        local out = Q.out[G.by_name.run[1]]
+        spec.equal(#out, graph.EDGE); spec.equal(G.nodes[out[1]].qualified, 'B.save')
+        spec.equal(G.nodes[Q.out[G.by_name.captured[1]][1]].qualified, 'A.save')
+        spec.equal(#Q.out[G.by_name.blocked[1]], 0)
+        spec.equal(G.nodes[Q.out[G.by_name.order[1]][1]].qualified, 'Left.save')
+        local scoped = build('scopes.py', 'class A:\n    def save(self): pass\n'
+            .. '    def run(self):\n        f = lambda self: self.save()\n        [self.save() for self in items]\n        self.save()\n')
+        local calls = graph.query(scoped).out[scoped.by_name.run[1]]
+        spec.equal(#calls, graph.EDGE); spec.equal(scoped.nodes[calls[1]].qualified, 'A.save')
+    end)
+    spec.it('distinguishes lexical arrow this, dynamic function this, aliases and static members', function()
+        for _, ext in ipairs({ 'js', 'ts', 'ets' }) do
+            local G = build('main.' .. ext, 'class A { save() {} static only_static() {} run() { '
+                .. 'const arrow = () => { this.save(); }; function dynamic() { this.save(); } '
+                .. 'const alias = this; alias.save(); } static entry() { this.only_static(); this.save(); } }')
+            local Q = graph.query(G)
+            spec.equal(#Q.out[G.by_name.arrow[1]], graph.EDGE, ext)
+            spec.equal(#Q.out[G.by_name.dynamic[1]], 0, ext)
+            local out = Q.out[G.by_name.run[1]]
+            spec.equal(#out, graph.EDGE, ext); spec.equal(G.nodes[out[1]].qualified, 'A.save')
+            spec.equal(#Q.out[G.by_name.entry[1]], graph.EDGE, ext)
+            local super = build('super.' .. ext, 'class Base { save() {} } class A extends Base { save() {} run() { super.save(); } }')
+            spec.equal(super.nodes[graph.query(super).out[super.by_name.run[1]][1]].qualified, 'Base.save')
+        end
+    end)
+    spec.it('binds Kotlin extension this to the declared extension receiver', function()
+        local G = build('main.kt', 'class B { fun save() {} } class A { fun save() {} } fun B.run() { this.save() }')
+        local out = graph.query(G).out[G.by_name.run[1]]
+        spec.equal(#out, graph.EDGE); spec.equal(G.nodes[out[1]].qualified, 'B.save')
+        local scoped = build('scope.kt', 'class B { fun save() {} } class A { fun save() {} '
+            .. 'fun run(b: B) { with(b) { this.save() }; b.apply { this.save() }; this@A.save() } }')
+        local calls = graph.query(scoped).out[scoped.by_name.run[1]]
+        local names = {}; for i = 1, #calls, graph.EDGE do if scoped.nodes[calls[i]].name == 'save' then names[#names + 1] = scoped.nodes[calls[i]].qualified end end
+        spec.equal(table.concat(names, ','), 'B.save,B.save,A.save')
+    end)
+    spec.it('keeps unified evidence out of saved indexes and invalidates source changes', function()
+        local root = tmp_root .. '/shared_receivers_cached'
+        write(root .. '/a.py', 'class A:\n    def save(self): pass\n    def run(me): me.save()\n')
+        local original = 'class A { save() {} run() { this.save(); } }'
+        write(root .. '/a.ts', original)
+        local options = { cache_path = root .. '/cache.idx', lister = 'walk' }
+        for _, reload in ipairs({ false, true }) do
+            if reload then svc.forget(root) end
+            local idx, G = svc.get(root, options)
+            local Q = graph.query(G)
+            for _, id in ipairs(G.by_name.run) do spec.equal(#Q.out[id], graph.EDGE) end
+            for _, rec in pairs(idx.files) do spec.nil_value(rec.receivers); spec.nil_value(rec.refs.receiver) end
+            spec.truthy(Q.stats.ordinary.files <= 16 and Q.stats.ordinary.bytes <= 8 * 1024 * 1024)
+        end
+        local _, G = svc.get(root, options)
+        local caller
+        for _, id in ipairs(G.by_name.run) do if G.files[G.node_file[id]].language == 'typescript' then caller = id end end
+        write(root .. '/a.ts', 'class A { run() { this.save(); } }')
+        local ok, err = pcall(function() return graph.query(G).out[caller] end)
+        spec.equal(ok, false); spec.contains(tostring(err), 'source changed during query')
+        _, G = svc.get(root, options)
+        for _, id in ipairs(G.by_name.run) do
+            if G.files[G.node_file[id]].language == 'typescript' then spec.equal(#graph.query(G).out[id], 0) end
+        end
+        svc.forget(root)
+    end)
+    spec.it('does not bypass shadowing fields or future local receiver declarations', function()
+        for _, case in ipairs({
+            { 'py', 'class Base:\n    def save(self): pass\nclass A(Base):\n    save = 1\n    def run(self): self.save()\n' },
+            { 'ts', 'class Base { save() {} } class A extends Base { save = 1; run() { this.save(); } }' },
+            { 'py', 'class A:\n    def save(self): pass\n    def run(self):\n        def inner():\n            self.save()\n            self = unknown\n' },
+        }) do
+            local G = build('main.' .. case[1], case[2])
+            spec.equal(#graph.query(G).out[(G.by_name.inner or G.by_name.run)[1]], 0, case[1])
+        end
+    end)
+    spec.it('reports receiver evidence limits instead of claiming complete results', function()
+        local receivers = require('codeoutline.receivers')
+        local limit = receivers.MAX_BINDINGS
+        receivers.MAX_BINDINGS = 2
+        local ok, err = pcall(function()
+            for _, case in ipairs({
+                { 'py', 'class A:\n    def save(self): pass\n    def run(self): self.save()\n' },
+                { 'kt', 'class A { fun save() {} fun run() { this.save() } }' },
+            }) do
+                local G = build('main.' .. case[1], case[2]); local Q = graph.query(G)
+                local _ = Q.out[G.by_name.run[1]]
+                spec.equal(Q.incomplete, true, case[1]); spec.truthy(Q.stats.incomplete_reasons.receiver_resolution_incomplete)
+            end
+        end)
+        receivers.MAX_BINDINGS = limit
+        assert(ok, err)
+    end)
+end)
+
 spec.describe('Python import bindings', function()
     local function build(files)
         local records = {}
@@ -3757,6 +3948,52 @@ spec.describe('Lua module return bindings', function()
         for path, source in pairs(files) do records[path] = ci.parse(path, source) end
         return graph.build({ root = root, files = records })
     end
+    spec.it('binds method self lexically and respects explicit parameters, closures and shadows', function()
+        local G = build({ ['main.lua'] = 'local self = require("other")\nlocal A, unused = {}, nil\nlocal B = {}\n'
+            .. 'function A:save() end\nfunction B:save() end\n'
+            .. 'function A:run() self:save() end\nfunction A.explicit(self) self:save() end\n'
+            .. 'A.assigned = function(self) self:save() end\n'
+            .. 'function A:closure() local function nested() self:save() end end\n'
+            .. 'function A:blocked() local self = {} self:save() end\n'
+            .. 'function A:parameter(self) self:save() end\n'
+            .. 'function A:recursive() local self = {} self:recursive() end\n'
+            .. 'function A.nonmethod() local self; self:save() end\n'
+            .. 'local Empty = {} function Empty:missing() self:save() end\nreturn A',
+            ['other.lua'] = 'local Other = {} function Other:save() end return Other' })
+        local Q = graph.query(G)
+        for _, name in ipairs({ 'run', 'explicit', 'nested', 'assigned' }) do
+            local out = Q.out[G.by_name[name][1]]
+            spec.equal(#out, graph.EDGE, name)
+            spec.equal(G.nodes[out[1]].qualified, 'A:save', name)
+        end
+        for _, name in ipairs({ 'blocked', 'parameter', 'recursive', 'missing', 'nonmethod' }) do
+            spec.equal(#Q.out[G.by_name[name][1]], 0, name)
+        end
+        local bare = build({ ['bare.lua'] = 'local A = {} function A:save() end function A.run() self:save() end' })
+        spec.equal(#graph.query(bare).out[bare.by_name.run[1]], 0)
+    end)
+    spec.it('keeps self evidence query-only through reloads and source changes', function()
+        local root = tmp_root .. '/lua_self_cached'
+        local source = 'local A = {}\nlocal B = {}\nfunction A:save() end\nfunction B:save() end\nfunction A:run() self:save() end\nreturn A'
+        write(root .. '/main.lua', source)
+        local options = { cache_path = root .. '/cache.idx', lister = 'walk' }
+        for _, reload in ipairs({ false, true }) do
+            if reload then svc.forget(root) end
+            local idx, G = svc.get(root, options)
+            spec.nil_value(idx.files['main.lua'].lua_self)
+            spec.nil_value(idx.files['main.lua'].refs.lua_binding)
+            local Q = graph.query(G)
+            local out = Q.out[G.by_name.run[1]]
+            spec.equal(#out, graph.EDGE); spec.equal(G.nodes[out[1]].qualified, 'A:save')
+            spec.equal(#Q.inn[out[1]], graph.EDGE)
+            spec.truthy(Q.stats.ordinary.parses > 0)
+            spec.nil_value(idx.files['main.lua'].lua_self)
+        end
+        write(root .. '/main.lua', source:gsub('function A:save%(%) end\n', ''))
+        local _, G = svc.get(root, options)
+        spec.equal(#graph.query(G).out[G.by_name.run[1]], 0)
+        svc.forget(root)
+    end)
     spec.it('pins dofile receivers to returned tables, including normalized paths', function()
         local G = build({
             ['a.lua'] = 'local M = {}\nfunction M.save() end\nreturn M',

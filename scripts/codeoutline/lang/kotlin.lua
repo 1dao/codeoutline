@@ -102,6 +102,8 @@ local function angles(T, i, b)
 end
 
 local function annotation(T, i, b, skip)
+    -- Qualified receivers use @ as a label separator, not an annotation.
+    if word(T, i - 1, 'this') or word(T, i - 1, 'super') then return i + 1 end
     local j = i + 1
     if is(T, j + 1, ':') then j = j + 2 end -- @file:JvmName, @get:Inject
     if is(T, j, '[') and T.m[j] then return T.m[j] + 1 end

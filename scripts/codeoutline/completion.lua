@@ -784,21 +784,8 @@ end
 -- A receiver: { types = ids } or { modules = files }.
 function Completion:receiver(item, depth)
     local name = item.name
-    if self.language == 'go' then
-        local receiver = require('codeoutline.go_methods').context(self.V, self.V.js_context).receiver(self.f, name, self.offset)
-        if receiver == false then return { go_blocked = true } end
-        if receiver then return { go_receiver = receiver } end
-    end
-    if self.language == 'lua' then
-        local target, bound = require('codeoutline.lua_bindings').receiver(
-            self.V, self.rec, self.T, name, self.offset, self.V.js_context.lua)
-        if target then return target end
-        if bound then return { owner = name, local_only = true } end
-    end
-    if SELF[name] or (self.language == 'rust' and name == 'self') then
-        local ids = self:self_types()
-        if #ids > 0 then return { types = ids } end
-    end
+    local receiver = require('codeoutline.receivers').completion(self, item)
+    if receiver then return receiver end
     local entry = find_local(self:locals(), name)
     if entry then
         if entry.module then
@@ -844,6 +831,7 @@ end
 
 function Completion:entries(target)
     if not target then return {} end
+    if target.receiver then return require('codeoutline.receivers').entries(self, target.receiver) end
     if target.go_blocked or target.cxx_blocked then return {} end
     if target.go_receiver then return require('codeoutline.go_methods').context(self.V, self.V.js_context).members(target.go_receiver, self.f) end
     if target.cxx_receiver then
@@ -958,7 +946,7 @@ local function receiver_chain(T, op, member)
         local call = false
         if is(T, i, ')') and T.m[i] then call = true; i = T.m[i] - 1 end
         if is(T, i, '>') and T.m[i] then i = T.m[i] - 1 end
-        if not (T.k[i] == 'id' or (T.k[i] == 'kw' and (SELF[text_of(T, i)] or text_of(T, i) == 'crate' or text_of(T, i) == 'super'))) then
+        if not (T.k[i] == 'id' or (T.k[i] == 'kw' and (SELF[text_of(T, i)] or text_of(T, i) == 'Self' or text_of(T, i) == 'crate' or text_of(T, i) == 'super'))) then
             if call or #chain == 0 then return nil end
             break
         end
@@ -1174,7 +1162,7 @@ function M.complete(req)
     end
     return { items = items, incomplete = self.incomplete or V.js_context.include_incomplete
         or V.js_context.workspace_incomplete or V.js_context.go_incomplete or V.js_context.go_methods_incomplete
-        or V.js_context.cpp_receivers_incomplete or V.js_context.rust_incomplete }
+        or V.js_context.cpp_receivers_incomplete or V.js_context.rust_incomplete or V.js_context.receiver_incomplete }
 end
 
 navigation.register('lsp_completion', function(req)

@@ -237,6 +237,16 @@ On Linux, decoding GBK sources needs the GBK module of the system iconv. Minimal
 
 C, C++, C#, Go, Java, JavaScript / TypeScript (including JSX/TSX), ArkTS (`.ets`), Kotlin (`.kt` / `.kts`), Lua, Python, and Rust.
 
+Receiver lookup shares one query-time entry point across call relationships,
+navigation and completion, with language-specific binding and member rules.
+It distinguishes Lua method receivers, Python parameters and rebinding, JS/TS/ArkTS
+lexical arrow `this` and dynamic function `this`, Kotlin extension/scope receivers,
+Rust `self`/`Self`, and declared receivers in C/C++, C#, Java and Go. Ordinary
+variables named `self` or `cls` retain their declared types. Detailed bindings stay
+in bounded, source-validated memory caches; unknown receivers do not become
+same-name method guesses. Runtime monkey-patching, arbitrary dynamic calls and
+unproven generic constraints remain outside this static analysis.
+
 ArkTS reuses the JS/TS parser: component `struct` declarations are indexed as classes,
 with decorated fields, methods, local module imports and ArkUI calls. Declarative UI
 blocks remain calls rather than method declarations. This is heuristic indexing, not

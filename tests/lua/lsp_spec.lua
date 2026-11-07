@@ -1088,6 +1088,136 @@ Manager* Factory();
             end
         end
     end)
+    spec.it('shares receiver identity across languages without treating ordinary self variables as keywords', function()
+        local prefix = 'shared-receivers/'
+        assert(xutils.mkdir_p(nav_root .. '/' .. prefix))
+        local cases = {
+            { 'py', 'class B:\n    def save(self): pass\n    def only_b(self): pass\nclass A:\n    def save(self): pass\n    def only_a(self): pass\n    def run(self):\n        self = B()\n        self.@@save()\n' },
+            { 'js', 'class B { save() {} only_b() {} } class A { save() {} only_a() {} run() { const self = new B(); self.@@save(); } }' },
+            { 'ts', 'class B { save() {} only_b() {} } class A { save() {} only_a() {} run(self: B) { self.@@save(); } }' },
+            { 'ets', 'class B { save() {} only_b() {} } class A { save() {} only_a() {} run(self: B) { self.@@save(); } }' },
+            { 'java', 'class B { void save() {} void only_b() {} } class A { void save() {} void only_a() {} void run(B self) { self.@@save(); } }' },
+            { 'kt', 'class B { fun save() {} fun only_b() {} } class A { fun save() {} fun only_a() {} fun run(self: B) { self.@@save() } }' },
+            { 'cs', 'class B { public void save() {} public void only_b() {} } class A { public void save() {} public void only_a() {} void run(B self) { self.@@save(); } }' },
+            { 'cpp', 'class B { public: void save() {} void only_b() {} }; class A { public: void save() {} void only_a() {} void run(B *self) { self->@@save(); } };' },
+            { 'go', 'package main\ntype B struct {}\nfunc (b *B) save() {}\nfunc (b *B) only_b() {}\ntype A struct {}\nfunc (a *A) save() {}\nfunc (a *A) only_a() {}\nfunc (self *A) run() { { self := &B{}; self.@@save() } }' },
+        }
+        for _, case in ipairs(cases) do
+            local offset = assert(case[2]:find('@@', 1, true)) - 1
+            local source = case[2]:gsub('@@', '')
+            local rel = prefix .. 'main.' .. case[1]
+            nav_write(rel, source)
+            service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+            local doc = docs.read(nav_root .. '/' .. rel)
+            local definition = nav({ method = 'lsp_definition', uri = doc.uri, position = doc:position(offset) })
+            spec.equal(#definition, 1, case[1]); spec.equal(definition[1].uri, doc.uri, case[1])
+            local expected = doc:position(assert(source:find('save', 1, true)) - 1)
+            spec.equal(definition[1].range.start.line, expected.line, case[1])
+            spec.equal(definition[1].range.start.character, expected.character, case[1])
+            local completion = nav({ method = 'lsp_completion', uri = doc.uri, position = doc:position(offset) })
+            local names = {}; for _, item in ipairs(completion.items) do names[item.label] = true end
+            spec.truthy(names.only_b, case[1]); spec.nil_value(names.only_a, case[1])
+        end
+    end)
+    spec.it('keeps Kotlin scope-function and labeled receivers distinct in navigation and completion', function()
+        local marked = 'package scoped_receiver\nclass B { fun save() {} fun only_b() {} }\nclass A { fun save() {} fun only_a() {} '
+            .. 'fun run(b: B) { with(b) { this.@@save() }; this@A.@@save() } }'
+        local source, offsets = '', {}
+        while true do
+            local at = marked:find('@@', 1, true)
+            if not at then source = source .. marked; break end
+            source = source .. marked:sub(1, at - 1); offsets[#offsets + 1] = #source; marked = marked:sub(at + 2)
+        end
+        local rel = 'shared-receivers/scoped.kt'
+        nav_write(rel, source)
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local doc = docs.read(nav_root .. '/' .. rel)
+        for i, offset in ipairs(offsets) do
+            local result = nav({ method = 'lsp_definition', uri = doc.uri, position = doc:position(offset) })
+            spec.equal(#result, 1, 'Kotlin receiver ' .. i); spec.equal(result[1].uri, doc.uri)
+            spec.equal(result[1].range.start.line, i)
+            local completion = nav({ method = 'lsp_completion', uri = doc.uri, position = doc:position(offset) })
+            local names = {}; for _, item in ipairs(completion.items) do names[item.label] = true end
+            spec.truthy(names[i == 1 and 'only_b' or 'only_a']); spec.nil_value(names[i == 1 and 'only_a' or 'only_b'])
+        end
+    end)
+    spec.it('shares lexical Lua self between definition and completion without reviving shadowed receivers', function()
+        local prefix = 'lua-self-lsp/'
+        assert(xutils.mkdir_p(nav_root .. '/' .. prefix))
+        nav_write(prefix .. 'other.lua', 'local Other = {}\nfunction Other:foreign_only() end\nfunction Other:save() end\nreturn Other')
+        local head = 'local self = require("lua-self-lsp.other")\nlocal A = { own_field = 1 }\nlocal B = {}\n'
+            .. 'function A:save() end\nfunction B:save() end\nfunction B:other_only() end\n'
+        local cases = {
+            { 'colon', 'function A:run() return self:@@save() end', 3 },
+            { 'dot', 'function A:run() return self.@@save() end', 3 },
+            { 'explicit', 'function A.run(self) return self:@@save() end', 3 },
+            { 'closure', 'function A:run() local function inner() return self:@@save() end end', 3 },
+            { 'shadow', 'function A:run() local self = {} return self:@@save() end', false },
+            { 'fields', 'function A:run() self.leaked = 1 local self = { local_field = 2 } return self.@@save() end', false },
+            { 'parameter', 'function A:run(self) return self:@@save() end', false },
+            { 'recursion', 'function A:save() local self = {} return self:@@save() end', false },
+        }
+        for _, case in ipairs(cases) do
+            local source = head .. case[2] .. '\nreturn A'
+            local at = assert(source:find('@@', 1, true)) - 1
+            source = source:gsub('@@', '')
+            local rel = prefix .. case[1] .. '.lua'
+            nav_write(rel, source)
+            service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+            local doc = docs.read(nav_root .. '/' .. rel)
+            local result = nav({ method = 'lsp_definition', uri = doc.uri, position = doc:position(at) })
+            spec.equal(#result, case[3] and 1 or 0, case[1])
+            if case[3] then spec.equal(result[1].uri, doc.uri); spec.equal(result[1].range.start.line, case[3]) end
+            local completion = nav({ method = 'lsp_completion', uri = doc.uri, position = doc:position(at) })
+            local names = {}; for _, item in ipairs(completion.items) do names[item.label] = true end
+            if case[3] then spec.truthy(names.save, case[1]) end
+            if case[1] == 'dot' then spec.truthy(names.own_field) end
+            if case[1] == 'fields' then spec.truthy(names.local_field); spec.nil_value(names.leaked) end
+            spec.nil_value(names.other_only); spec.nil_value(names.foreign_only)
+            if not case[3] then spec.nil_value(names.save) end
+        end
+    end)
+    spec.it('resolves and completes Rust Self across impls with inherent precedence and trait defaults', function()
+        local prefix = 'rust-self-shared-lsp/'
+        assert(xutils.mkdir_p(nav_root .. '/' .. prefix .. 'src'))
+        local marked = 'struct Store {}\ntrait Save { fn save(); fn run(); fn fallback() {} }\n'
+            .. 'impl Store { fn save() {} }\nimpl Store { fn split() { Self::@@save(); } }\n'
+            .. 'impl Save for Store { fn save() {} fn run() { Self::@@save(); Self::@@fallback(); } }\n'
+            .. 'trait Default { fn target(); fn invoke() { Self::@@target(); } }\n'
+        local source, offsets = '', {}
+        while true do
+            local at = marked:find('@@', 1, true)
+            if not at then source = source .. marked; break end
+            source = source .. marked:sub(1, at - 1); offsets[#offsets + 1] = #source
+            marked = marked:sub(at + 2)
+        end
+        local rel = prefix .. 'src/lib.rs'
+        nav_write(rel, source)
+        for _, cargo in ipairs({ false, true }) do
+            if cargo then nav_write(prefix .. 'Cargo.toml', '[package]\nname="self-shared-lsp"\n') end
+            service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+            local doc = docs.read(nav_root .. '/' .. rel)
+            for i, line in ipairs({ 2, 2, 1, 5 }) do
+                local result = nav({ method = 'lsp_definition', uri = doc.uri, position = doc:position(offsets[i]) })
+                spec.equal(#result, 1); spec.equal(result[1].range.start.line, line)
+                local completion = nav({ method = 'lsp_completion', uri = doc.uri, position = doc:position(offsets[i]) })
+                local names = {}; for _, item in ipairs(completion.items) do names[item.label] = true end
+                spec.truthy(names[({ 'save', 'save', 'fallback', 'target' })[i]])
+            end
+        end
+        nav_write(prefix .. 'src/lib.rs', source .. '\nmod model; mod extra;')
+        nav_write(prefix .. 'src/model.rs', 'pub struct Shared {}\nimpl Shared { pub fn save() {} }')
+        local extra = 'use crate::model::Shared as Selected;\nimpl Selected { fn alias_run() { Self::save(); } }'
+        nav_write(prefix .. 'src/extra.rs', extra)
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local doc = docs.read(nav_root .. '/' .. prefix .. 'src/extra.rs')
+        local at = assert(extra:find('Self::save', 1, true)) + 5
+        local result = nav({ method = 'lsp_definition', uri = doc.uri, position = doc:position(at) })
+        spec.equal(#result, 1); spec.equal(result[1].uri, nav_uri(prefix .. 'src/model.rs'))
+        local completion = nav({ method = 'lsp_completion', uri = doc.uri, position = doc:position(at) })
+        local names = {}; for _, item in ipairs(completion.items) do names[item.label] = true end
+        spec.truthy(names.save)
+    end)
     spec.it('shares Cargo package aliases, module paths, references and completion after manifest and draft changes', function()
         local prefix = 'cargo-workspace-lsp/'
         for _, path in ipairs({ 'app/src', 'first', 'second' }) do assert(xutils.mkdir_p(nav_root .. '/' .. prefix .. path)) end
@@ -3995,7 +4125,7 @@ spec.describe('LSP completion', function()
         { 'core/main.lua', 2, 'split,trim', 'Lua colon calls list functions only' },
         { 'box.go', 1, 'Area,Next,W', 'Go method receivers' },
         { 'box.go', 2, 'Area,Next,W', 'Go composite literals and pointer fields' },
-        { 'boxy.rs', 1, 'area,new,next,w', 'Rust self inside impl' },
+        { 'boxy.rs', 1, 'area,next,w', 'Rust self inside impl' },
         { 'boxy.rs', 2, 'area,new,next,w', 'Rust constructors and wrapped field types' },
         { 'box.ts', 1, 'area,next,w', 'TypeScript this' },
         { 'box.ts', 2, 'area,next,w', 'TypeScript optional field chains' },

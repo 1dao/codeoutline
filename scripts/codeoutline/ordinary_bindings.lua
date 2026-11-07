@@ -4,6 +4,7 @@ local control = require('codeoutline.control')
 local function js(rec) return rec.language == 'javascript' or rec.language == 'typescript' or rec.language == 'arkts' end
 local function evidence(rec, i)
     local refs = rec.refs
+    if refs.receiver and refs.receiver[i] ~= '' then return refs.receiver[i] end
     return refs.binding and refs.binding[i] or refs.lua_binding and refs.lua_binding[i]
         or refs.js_receiver and refs.js_receiver[i]
 end
@@ -181,12 +182,14 @@ function M.context(G, ctx, source, options)
                 and parsed.refs.line[i] == rec.refs.line[i] and parsed.refs.kind[i] == rec.refs.kind[i])
         end
         -- Keep only compact query evidence; source, tokens, and duplicate symbols die here.
-        local data = { refs = { binding = parsed.refs.binding, js_receiver = parsed.refs.js_receiver, lua_binding = parsed.refs.lua_binding },
+        local data = { refs = { binding = parsed.refs.binding, js_receiver = parsed.refs.js_receiver, lua_binding = parsed.refs.lua_binding,
+            receiver = parsed.refs.receiver },
             js_exports = parsed.js_exports, python_imports = parsed.python_imports, cpp_aliases = parsed.cpp_aliases,
             csharp_usings = parsed.csharp_usings, csharp_statics = parsed.csharp_statics,
             csharp_scopes = parsed.csharp_scopes, csharp_parameters = parsed.csharp_parameters, csharp_access = parsed.csharp_access }
         data.implementation_evidence = parsed.implementation_evidence
         data.lua_locals = parsed.lua_locals
+        data.lua_self = parsed.lua_self
         data.static_dispatch = parsed.static_dispatch
         data.type_sites, data.type_parameters = parsed.type_sites, parsed.type_parameters
         data.type_exclusions = parsed.type_exclusions
@@ -198,12 +201,30 @@ function M.context(G, ctx, source, options)
         data.shared_events = parsed.shared_events
         data.lua_callback_loops = parsed.lua_callback_loops
         data.rust_imports, data.rust_public = parsed.rust_imports, parsed.rust_public
+        data.rust_impls = parsed.rust_impls
+        data.rust_instance = parsed.rust_instance
+        data.receivers = parsed.receivers
         local type_count = 0; for _ in pairs(parsed.type_sites or {}) do type_count = type_count + 1 end
         local static_count = 0
         for _, site in ipairs(parsed.static_dispatch and parsed.static_dispatch.sites or {}) do
             static_count = static_count + 1 + #site.registrations
         end
-        local weight = #raw + #parsed.refs.name * 128 + #(parsed.js_exports or {}) * 256
+        local self_weight, self_seen = 0, {}
+        for _ in pairs(parsed.rust_instance or {}) do self_weight = self_weight + 32 end
+        for _, header in pairs(parsed.rust_impls or {}) do
+            self_weight = self_weight + 128 + #(header.path or '') + #(header.args or '') + #(header.trait or '')
+            for name in pairs(header.generics or {}) do self_weight = self_weight + #name + 32 end
+        end
+        for _, info in pairs(parsed.lua_self or {}) do
+            if not self_seen[info] then
+                self_seen[info] = true; self_weight = self_weight + 128
+                for name in pairs(info.members) do self_weight = self_weight + #name + 64 end
+                for name in pairs(info.fields) do self_weight = self_weight + #name + 64 end
+            end
+            self_weight = self_weight + 32
+        end
+        local weight = #raw + #parsed.refs.name * 128 + #(parsed.js_exports or {}) * 256 + self_weight
+            + (parsed.receivers and parsed.receivers.weight or 0)
             + type_count * 256 + #(parsed.type_parameters or {}) * 96
             + static_count * 256
             + #(parsed.lua_locals or {}) * 256
@@ -236,6 +257,7 @@ function M.context(G, ctx, source, options)
         if rec.language == 'lua' then
             if rec.refs.lua_binding then return value end
             local wanted = rec.refs.recv[i] or rec.refs.name[i]
+            if wanted == 'self' and C.available(f) then return evidence(C.data(f), i) or value end
             for _, imp in ipairs(rec.lua_imports or {}) do
                 if imp.member == rec.refs.name[i] then return evidence(C.data(f), i) or value end
             end
@@ -257,7 +279,7 @@ function M.context(G, ctx, source, options)
             return data.evidence[i] or value
         end
         if rec.language == 'c' and kind == 'member_call' then return evidence(C.data(f), i) or value end
-        if rec.language == 'python' and (recv == 'self' or recv == 'cls') then return value end
+        if rec.language == 'python' and recv then return evidence(C.data(f), i) or value end
         if rec.language == 'cpp' and recv == 'this' then return value end
         if rec.language == 'rust' and require('codeoutline.rust_packages').owner(G, f, ctx) then
             return require('codeoutline.rust_packages').guard(ctx, function() return evidence(C.data(f), i) or value end) or value

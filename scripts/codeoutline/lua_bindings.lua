@@ -32,6 +32,15 @@ local function value_end(T, i)
     return (T.k[i] ~= 'op' or tail == ';' or tail == ',') and tail ~= 'and' and tail ~= 'or'
 end
 
+local function binding_at(bindings, name, token)
+    local best
+    for _, b in ipairs(bindings[name] or {}) do
+        if b.token <= token and b.a <= token and b.b >= token
+            and (not best or b.a > best.a or b.a == best.a and b.token > best.token) then best = b end
+    end
+    return best
+end
+
 -- Shared lexical table-member lookup for normal references and query-only
 -- configured callback aliases. Results are local parser node indices.
 function M.local_members(nodes, scopes, name, token, scope, finish)
@@ -129,17 +138,85 @@ function M.collect(r, T, bm)
                 end
             end
         end
+        -- Derive method receivers only in query parses. Closures capture this
+        -- binding; a later local or parameter named self hides it normally.
+        r.lua_self = {}
+        local by_close, owners, receiver_tables = {}, {}, {}
+        for n, node in ipairs(r.nodes) do by_close[node.tj] = n end
+        for i = 1, T.n do
+            if T:text(i) == 'function' and T.k[i] == 'kw' then
+                local n = by_close[bm[i]]
+                local node = n and r.nodes[n]
+                local p = i + 1
+                while p < (bm[i] or i) and T:text(p) ~= '(' do p = p + 1 end
+                local implicit = T:text(p - 2) == ':'
+                local explicit = not implicit and T:text(p + 1) == 'self'
+                local owner = node and node.qualified:match('^(.*)[.:][%w_]+$')
+                if node and node.parent and T:text(i + 2) == '(' then owner = nil end
+                if implicit then
+                    for j = p + 1, (T.m[p] or p) - 1 do
+                        if T:text(j) == 'self' then implicit = false; break end
+                    end
+                end
+                if owner and (implicit or explicit) then
+                    local bound = binding_at(bindings, owner, i)
+                    local scope = bound and bound.a or scopes[i]
+                    local key = bound or owner .. '\0' .. scope
+                    local info = owners[key]
+                    if not info then
+                        local first, finish = bound and bound.token or 0, bound and bound.b or bm[scope] or T.n
+                        for _, later in ipairs(bindings[owner] or {}) do
+                            if later.a == scope and later.token > first then finish = math.min(finish, later.token - 1) end
+                        end
+                        info = { members = M.local_members(r.nodes, scopes, owner, first, scope, finish), fields = {} }
+                        owners[key] = info
+                        if bound then receiver_tables[bound] = info end
+                    end
+                    r.lua_self[n] = info
+                    local b
+                    if implicit then
+                        add('self', i, i, 'lua-self:' .. n)
+                        b = bindings.self[#bindings.self]
+                    else b = binding_at(bindings, 'self', p + 1) end
+                    b.hint, b.imported, b.self_info = 'lua-self:' .. n, false, info
+                    receiver_tables[b] = info
+                end
+            end
+        end
+        -- A shadowing self may itself be a literal table or an unknown
+        -- parameter. Keep its assigned fields separate from method receivers.
+        for _, b in ipairs(bindings.self or {}) do
+            local index = tonumber(b.hint:match('^lua%-local:(%d+)$'))
+            if not b.self_info and (index or b.hint == '?') and not b.imported then
+                b.self_info = { members = index and r.lua_locals[index] or {}, fields = {} }
+                receiver_tables[b] = b.self_info
+            end
+        end
+        for i = 1, T.n - 3 do
+            if i % 4096 == 0 then control.check() end
+            if T.k[i] == 'id' then
+                local info = receiver_tables[binding_at(bindings, T:text(i), i)]
+                if info and T:text(i + 1) == '.' and T.k[i + 2] == 'id' and T:text(i + 3) == '=' then
+                    info.fields[T:text(i + 2)] = true
+                elseif info and T:text(i + 1) == '=' and T:text(i + 2) == '{' then
+                    local j, close = i + 3, T.m[i + 2] or i + 2
+                    while j < close do
+                        if T.k[j] == 'id' and T:text(j + 1) == '=' then info.fields[T:text(j)] = true end
+                        if T.m[j] and T.m[j] > j then j = T.m[j]
+                        elseif bm[j] and bm[j] > j then j = bm[j] end
+                        j = j + 1
+                    end
+                end
+            end
+        end
         for _, ref in ipairs(r.refs) do
             if not ref.lua_binding then
-                local best
-                for _, b in ipairs(bindings[ref.recv or ref.name] or {}) do
-                    if b.token <= ref.tok and b.a <= ref.tok and b.b >= ref.tok
-                        and (not best or b.a > best.a or (b.a == best.a and b.token > best.token)) then best = b end
-                end
+                local best = binding_at(bindings, ref.recv or ref.name, ref.tok)
                 if best and (ref.recv or best.imported) then
                     local value = best.hint:match('^lua%-value:')
                     ref.lua_binding = value and (not ref.recv and best.hint or '?') or (ref.recv and best.hint or '?')
                 end
+                if ref.recv == 'self' and not best then ref.lua_binding = '?' end
                 if ref.recv and (T:text(ref.tok - 3) == '.' or T:text(ref.tok - 3) == ':') then ref.lua_binding = '?' end
             end
         end
@@ -469,9 +546,11 @@ function M.receiver(G, rec, T, name, offset, ctx, depth)
             and (not best or b.a > best.a or b.a == best.a and b.token > best.token) then best = b end
     end
     if not best then
+        if name == 'self' then return nil, true end
         local files = M.native_modules(G, name, ctx)
         return #files > 0 and { modules = files, module_name = name } or nil, (T.lua_bindings or {})[name] ~= nil
     end
+    if best.self_info then return { lua_self = best.self_info }, true end
     local imported = tonumber(best.hint:match('^lua:(%d+)$'))
     if imported then
         local imp = rec.lua_imports[imported]
@@ -510,6 +589,13 @@ function M.resolve(G, f, name, hint, ctx, recv)
         return #result > 0 and result or nil
     end
     if hint == '?' then return {} end
+    local self_index = tonumber(hint:match('^lua%-self:(%d+)$'))
+    if self_index then
+        local rec = G.files[f]
+        local selves = rec.lua_self or ctx and ctx.ordinary and ctx.ordinary.data(f).lua_self or {}
+        local n = selves[self_index] and selves[self_index].members[name]
+        return n and { G.id_of[f][n] } or {}
+    end
     local local_index = tonumber(hint:match('^lua%-local:(%d+)$'))
     if local_index then
         local rec = G.files[f]

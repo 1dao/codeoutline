@@ -4,10 +4,105 @@ local cargo, control = require('codeoutline.rust_packages'), require('codeoutlin
 local function join(a, b) return a == '' and b or b == '' and a or a .. '::' .. b end
 local function text(T, i) return i >= 1 and i <= T.n and T:text(i) or '' end
 
+-- Keep complete impl targets in query evidence; compact declaration names omit
+-- module prefixes and generic arguments and cannot identify an impl's type.
+local function impl_header(T, node)
+    local i = node.ti
+    while i < node.tj and text(T, i) ~= 'impl' do i = i + 1 end
+    i = i + 1
+    local function angle_end(at)
+        local depth = 0
+        for j = at, node.tj do
+            local token = text(T, j)
+            if token == '<' then depth = depth + 1
+            elseif token == '>' then depth = depth - 1
+            elseif token == '>>' then depth = depth - 2 end
+            if depth <= 0 then return j + 1 end
+        end
+        return node.tj
+    end
+    local generics, constrained = {}, false
+    if text(T, i) == '<' then
+        local finish = angle_end(i)
+        for j = i + 1, finish - 2 do
+            if T.k[j] == 'id' and (text(T, j - 1) == '<' or text(T, j - 1) == ',') then generics[text(T, j)] = true
+            elseif text(T, j) ~= ',' then constrained = true end
+        end
+        i = finish
+    end
+    local first, trait, depth, last = i, nil, 0, i - 1
+    for j = i, node.tj do
+        local token = text(T, j)
+        if depth == 0 and (token == 'where' or token == '{') then
+            if token == 'where' then constrained = true end
+            break
+        end
+        if token == 'for' and depth == 0 then
+            local parts = {}; for k = first, j - 1 do parts[#parts + 1] = text(T, k) end
+            trait, first = table.concat(parts), j + 1
+        end
+        if token == '<' then depth = depth + 1
+        elseif token == '>' then depth = depth - 1
+        elseif token == '>>' then depth = depth - 2 end
+        last = j
+    end
+    local path, args, target = {}, {}, {}
+    local j = first
+    while j <= last do
+        local token = text(T, j); target[#target + 1] = token
+        if token == '<' then
+            local finish = angle_end(j)
+            for k = j, finish - 1 do args[#args + 1] = text(T, k) end
+            j = finish
+        elseif T.k[j] == 'id' or T.k[j] == 'kw' or token == '::' then
+            path[#path + 1] = token; j = j + 1
+        else return { target = table.concat(target), trait = trait } end
+    end
+    return { path = table.concat(path), args = table.concat(args), trait = trait, generics = generics, constrained = constrained }
+end
+
+local function compatible_args(candidate, current)
+    if candidate.args == current.args then
+        if candidate.constrained and candidate ~= current then return nil end
+        return true
+    end
+    if not candidate.args or not current.args then return false end
+    local pattern = candidate.args:match('^<([%w_,]+)>$')
+    if not pattern then return false end
+    local args, first, depth = {}, 2, 0
+    for i = 2, #current.args do
+        local c = current.args:sub(i, i)
+        if c == ',' and depth == 0 or i == #current.args then args[#args + 1] = current.args:sub(first, i - 1); first = i + 1
+        elseif c == '<' or c == '(' or c == '[' then depth = depth + 1
+        elseif c == '>' or c == ')' or c == ']' then depth = depth - 1 end
+    end
+    local at, bindings = 0, {}
+    for name in pattern:gmatch('[^,]+') do
+        at = at + 1
+        if not args[at] then return false end
+        if candidate.generics[name] then
+            if bindings[name] and bindings[name] ~= args[at] then return false end
+            bindings[name] = args[at]
+        elseif name ~= args[at] then return false end
+    end
+    if at ~= #args then return false end
+    if candidate.constrained then return nil end
+    return true
+end
+
 function M.collect(r, T)
-    r.rust_imports, r.rust_public, r.has_bindings = {}, {}, true
+    r.rust_imports, r.rust_public, r.rust_impls, r.rust_instance, r.has_bindings = {}, {}, {}, {}, true
     for n, node in ipairs(r.nodes) do
         r.rust_public[n] = text(T, node.ti) == 'pub' and text(T, node.ti + 1) ~= '('
+        if node.kind == 'impl' then r.rust_impls[n] = impl_header(T, node) end
+        if node.kind == 'method' then
+            local p = node.ti
+            while p < node.tj and text(T, p) ~= '(' do p = p + 1 end
+            for i = p + 1, (T.m[p] or p) - 1 do
+                if text(T, i) == ',' then break end
+                if text(T, i) == 'self' then r.rust_instance[n] = true; break end
+            end
+        end
     end
     for i = 1, T.n do
         if text(T, i) == 'use' then
@@ -227,37 +322,225 @@ end
 function M.path(G, f, path, ctx, scope)
     return cargo.guard(ctx, walk, G, f, path, ctx, scope or '', {}, 0)
 end
+
+local function type_id(G, f, path, scope, ctx, kind)
+    if not path or path == '' then return nil end
+    if cargo.owner(G, f, ctx) then
+        local found = M.path(G, f, path, ctx, scope)
+        local id
+        for _, candidate in ipairs(found and found.ids or {}) do
+            local node = G.nodes[candidate]
+            if kind and node.kind == kind or not kind and (node.kind == 'struct' or node.kind == 'enum') then
+                if id then return nil end
+                id = candidate
+            end
+        end
+        return id
+    end
+    -- Standalone files have no Cargo module graph. Stay inside their lexical
+    -- namespaces instead of matching a same-named type in another file.
+    if path:match('^crate::') then path, scope = path:sub(8), ''
+    elseif path:match('^self::') then path = path:sub(7)
+    else
+        while path:match('^super::') do
+            path, scope = path:sub(8), scope:match('^(.*)::[^:]+$') or ''
+        end
+    end
+    local wanted, found = join(scope, path), nil
+    for n, node in ipairs(nodes(G, f, ctx)) do
+        if node.qualified == wanted and (kind and node.kind == kind
+            or not kind and (node.kind == 'struct' or node.kind == 'enum')) then
+            if found then return nil end
+            found = G.id_of[f][n]
+        end
+    end
+    return found
+end
+
+local function self_targets(G, f, src, member, ctx)
+    local parent = src and G.nodes[src] and G.nodes[src].parent
+    local rec = G.files[f]
+    while parent do
+        local owner = rec.nodes[parent]
+        if owner.kind == 'impl' or owner.kind == 'interface' then
+            local own = {}
+            for n, candidate in ipairs(nodes(G, f, ctx)) do
+                if candidate.parent == parent and candidate.name == member
+                    and (candidate.kind == 'method' or candidate.kind == 'constant') then own[#own + 1] = G.id_of[f][n] end
+            end
+            if owner.kind == 'interface' then return own, 'Rust trait Self binding' end
+            local header = (data(G, f, ctx).rust_impls or {})[parent]
+            local scope = scope_of(G, f, src)
+            local target = header and type_id(G, f, header.path, scope, ctx)
+            if target then
+                local inherent, files, count, candidates, truncated, constrained = {}, {}, 0, 0, false, false
+                for i, id in ipairs(G.by_name[member] or {}) do
+                    if i > M.MAX_NODES then ctx.rust_incomplete, truncated = true, true; break end
+                    control.check()
+                    local mf, method = G.node_file[id], G.nodes[id]
+                    local impl = method.parent and G.files[mf].nodes[method.parent]
+                    local plausible = impl and (impl.name == owner.name or impl.name == G.nodes[target].name)
+                    if impl and not plausible then
+                        for _, imp in ipairs(G.files[mf].imports or {}) do
+                            for _, alias in ipairs(imp.type_aliases or {}) do
+                                if alias.alias == impl.name and alias.name == G.nodes[target].name then plausible = true end
+                            end
+                        end
+                    end
+                    -- Names only narrow discovery; query-only target paths and
+                    -- generic arguments below establish the actual type identity.
+                    if impl and impl.kind == 'impl' and not impl.trait
+                        and plausible
+                        and (method.kind == 'method' or method.kind == 'constant')
+                        and (mf == f or cargo.owner(G, mf, ctx) == cargo.owner(G, f, ctx) and cargo.owner(G, f, ctx)) then
+                        candidates = candidates + 1
+                        if candidates > M.MAX_RESULTS then ctx.rust_incomplete, truncated = true, true; break end
+                        if not files[mf] then files[mf] = true; count = count + 1 end
+                        if count > M.MAX_ALIAS_FILES then ctx.rust_incomplete, truncated = true, true; break end
+                        local other = (data(G, mf, ctx).rust_impls or {})[method.parent]
+                        if other and type_id(G, mf, other.path, parent_scope(G, mf, impl.parent), ctx) == target then
+                            local compatible = compatible_args(other, header)
+                            if compatible then inherent[#inherent + 1] = id
+                            elseif compatible == nil then constrained = true end
+                        end
+                    end
+                end
+                if #inherent > 0 then return inherent, 'Rust inherent Self binding' end
+                if truncated then return {}, 'Rust Self candidate scan limit reached' end
+                if constrained then return {}, 'Rust Self generic constraints are not proven' end
+            end
+            if #own > 0 then return own, 'Rust lexical impl binding' end
+            local trait = header and header.trait and type_id(G, f, header.trait:gsub('%b<>', ''), scope, ctx, 'interface')
+            if trait then
+                local tf, index = G.node_file[trait], trait - G.id_of[G.node_file[trait]][1] + 1
+                local result = {}
+                for n, candidate in ipairs(nodes(G, tf, ctx)) do
+                    if candidate.parent == index and candidate.name == member
+                        and (candidate.kind == 'method' or candidate.kind == 'constant') then result[#result + 1] = G.id_of[tf][n] end
+                end
+                return result, 'Rust trait default Self binding'
+            end
+            return {}, 'Self member is not declared in a resolved impl or trait'
+        end
+        parent = owner.parent
+    end
+    return {}, 'Self has no enclosing impl or trait'
+end
+
 function M.resolve(G, f, src, name, recv, evidence, ctx)
     if evidence == 'rust:member' then return nil end
     local path = evidence and evidence:match('^rust:path:(.*)$') or (recv and recv .. '::' .. name or name)
     if path:match('^Self::') then
-        -- Self belongs to the lexical impl, not to a same-named type elsewhere.
-        -- Use declaration parents rather than the parser's shortened type name
-        -- (which omits generic arguments and module prefixes).
-        local node = src and G.nodes[src]
-        local parent = node and node.parent
-        while parent do
-            local owner = G.files[f].nodes[parent]
-            if owner.kind == 'impl' then
-                local member = path:match('^Self::([%w_]+)$')
-                local ids = {}
-                for n, candidate in ipairs(nodes(G, f, ctx)) do
-                    if member and candidate.parent == parent and candidate.name == member
-                        and (candidate.kind == 'method' or candidate.kind == 'constant') then
-                        ids[#ids + 1] = G.id_of[f][n]
-                    end
-                end
-                return ids, #ids == 0 and 'Self member is not declared in the enclosing impl' or 'Rust lexical impl binding'
-            end
-            -- A trait's Self is not a concrete impl receiver.
-            if owner.kind == 'interface' then break end
-            parent = owner.parent
+        local member = path:match('^Self::([%w_]+)$')
+        if not member then return {}, 'unsupported Self path' end
+        local key = tostring(src) .. '\0' .. member
+        local cache = ctx.rust_self_cache or {}; ctx.rust_self_cache = cache
+        if cache[key] then return cache[key][1], cache[key][2] end
+        local ids, reason = self_targets(G, f, src, member, ctx)
+        if (ctx.rust_self_count or 0) < M.MAX_RESULTS then
+            cache[key] = { ids, reason }; ctx.rust_self_count = (ctx.rust_self_count or 0) + 1
         end
-        return {}, 'Self has no enclosing impl'
+        return ids, reason
     end
     if not cargo.owner(G, f, ctx) then return ctx.rust_incomplete and {} or nil, ctx.rust_error end
     local found, reason = M.path(G, f, path, ctx, scope_of(G, f, src))
     return found and found.ids or {}, reason or 'Cargo crate/module target is not indexed or visible'
+end
+
+function M.self_members(G, f, src, ctx, expired)
+    local parent = src and G.nodes[src] and G.nodes[src].parent
+    while parent do
+        local owner = G.files[f].nodes[parent]
+        if owner.kind == 'impl' or owner.kind == 'interface' then
+            local names, result, count = {}, {}, 0
+            local function collect(file, index)
+                for _, candidate in ipairs(nodes(G, file, ctx)) do
+                    if candidate.parent == index and (candidate.kind == 'method' or candidate.kind == 'constant') then
+                        names[candidate.name] = true
+                    end
+                end
+            end
+            collect(f, parent)
+            local function owned(name)
+                for i, id in ipairs(G.by_owner[name] or {}) do
+                    if i > M.MAX_NODES then ctx.rust_incomplete = true; break end
+                    names[G.nodes[id].name] = true
+                end
+            end
+            owned(owner.name)
+            local header = owner.kind == 'impl' and (data(G, f, ctx).rust_impls or {})[parent]
+            local target = header and type_id(G, f, header.path, scope_of(G, f, src), ctx)
+            if target then owned(G.nodes[target].name) end
+            local trait = header and header.trait and type_id(G, f, header.trait:gsub('%b<>', ''), scope_of(G, f, src), ctx, 'interface')
+            if trait then collect(G.node_file[trait], trait - G.id_of[G.node_file[trait]][1] + 1) end
+            local ordered = {}; for name in pairs(names) do ordered[#ordered + 1] = name end; table.sort(ordered)
+            for _, name in ipairs(ordered) do
+                if expired and expired() then ctx.rust_incomplete = true; break end
+                count = count + 1
+                if count > M.MAX_RESULTS then ctx.rust_incomplete = true; break end
+                for _, id in ipairs(M.resolve(G, f, src, name, 'Self', 'rust:path:Self::' .. name, ctx)) do
+                    result[#result + 1] = { name = name, node = G.nodes[id], file = G.node_file[id], kind = G.nodes[id].kind, id = id }
+                end
+            end
+            return result
+        end
+        parent = owner.parent
+    end
+    return {}
+end
+
+local function receiver_fields(G, f, src, ctx)
+    local parent = src and G.nodes[src] and G.nodes[src].parent
+    while parent do
+        local owner = G.files[f].nodes[parent]
+        if owner.kind == 'impl' then
+            local header = (data(G, f, ctx).rust_impls or {})[parent]
+            local target = header and type_id(G, f, header.path, scope_of(G, f, src), ctx)
+            local result = {}
+            if target then
+                local tf = G.node_file[target]
+                for n, node in ipairs(nodes(G, tf, ctx)) do
+                    if node.kind == 'field' and node.parent and G.id_of[tf][node.parent] == target then
+                        result[#result + 1] = G.id_of[tf][n]
+                    end
+                end
+            end
+            return result
+        end
+        parent = owner.parent
+    end
+    return {}
+end
+
+function M.receiver_targets(G, f, src, name, instance, ctx, accept)
+    if instance and (not src or not (data(G, f, ctx).rust_instance or {})[src - G.id_of[f][1] + 1]) then return {} end
+    local ids = M.resolve(G, f, src, name, 'Self', 'rust:path:Self::' .. name, ctx)
+    if not instance then return ids end
+    local result = {}
+    for _, id in ipairs(ids) do
+        local tf = G.node_file[id]
+        local index = id - G.id_of[tf][1] + 1
+        if (data(G, tf, ctx).rust_instance or {})[index] then result[#result + 1] = id end
+    end
+    if not accept or accept.field then
+        for _, id in ipairs(receiver_fields(G, f, src, ctx)) do if G.nodes[id].name == name then result[#result + 1] = id end end
+    end
+    return result
+end
+
+function M.receiver_members(G, f, src, instance, ctx, expired)
+    if instance and (not src or not (data(G, f, ctx).rust_instance or {})[src - G.id_of[f][1] + 1]) then return {} end
+    local result = M.self_members(G, f, src, ctx, expired)
+    if not instance then return result end
+    local filtered = {}
+    for _, entry in ipairs(result) do
+        local index = entry.id - G.id_of[entry.file][1] + 1
+        if (data(G, entry.file, ctx).rust_instance or {})[index] then filtered[#filtered + 1] = entry end
+    end
+    for _, id in ipairs(receiver_fields(G, f, src, ctx)) do
+        filtered[#filtered + 1] = { name = G.nodes[id].name, node = G.nodes[id], kind = 'field', file = G.node_file[id] }
+    end
+    return filtered
 end
 function M.imports(G, f, imp, ctx)
     if not cargo.owner(G, f, ctx) then return ctx.rust_incomplete and {} or nil end

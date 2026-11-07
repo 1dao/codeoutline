@@ -92,6 +92,12 @@ function M.collect(r, T)
     -- C#/C++ bindings. No assignment flow or factory-return inference is done.
     local wanted, stack, scopes, bindings = {}, {}, {}, {}
     for _, ref in ipairs(r.refs) do if (ref.kind == 'member_call' or ref.kind == 'ref') and ref.recv then wanted[ref.recv] = true end end
+    if r.language == 'kotlin' then
+        for i = 1, T.n - 2 do
+            if T:text(i) == 'with' and T:text(i + 1) == '(' and T.k[i + 2] == 'id' then wanted[T:text(i + 2)] = true end
+            if (T:text(i) == 'apply' or T:text(i) == 'run') and T:text(i - 1) == '.' and T.k[i - 2] == 'id' then wanted[T:text(i - 2)] = true end
+        end
+    end
     if not next(wanted) then return end
     for i = 1, T.n do
         if T:text(i) == '{' and T.m[i] then stack[#stack + 1] = i end
@@ -134,6 +140,7 @@ function M.collect(r, T)
             end
         end
     end
+    T.jvm_bindings = bindings
     for _, ref in ipairs(r.refs) do
         if (ref.kind == 'member_call' or ref.kind == 'ref') and ref.recv then
             local best

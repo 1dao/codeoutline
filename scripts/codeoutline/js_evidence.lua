@@ -156,6 +156,7 @@ function M.collect(r, T)
         by_name[binding.name] = by_name[binding.name] or {}
         by_name[binding.name][#by_name[binding.name] + 1] = binding
     end
+    T.js_bindings = by_name
     -- Reuse dispatch's bounded lexical validation in explicit query parses.
     -- Ordinary indexing leaves this extra evidence ungenerated.
     local expand

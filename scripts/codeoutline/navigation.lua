@@ -32,7 +32,6 @@ local CALLS = { ['function'] = true, method = true, macro = true, constructor = 
     prototype = true, destructor = true, class = true, record = true }
 local MEMBER = { ['.'] = true, ['->'] = true, ['::'] = true, ['?.'] = true }
 local LUA_MEMBER = { ['.'] = true, [':'] = true }
-local SELF = { self = true, this = true, cls = true }
 local PROTOTYPE = { prototype = true }
 local C_FAMILY = { c = true, cpp = true }
 
@@ -179,7 +178,6 @@ end
 -- self.f() inside f, or M.f() inside M.f / Box::f() inside Box::f.
 local function recursive(node, recv)
     if not recv then return false end
-    if SELF[recv] then return true end
     local q = node.qualified
     for _, sep in ipairs({ '.', ':', '::' }) do
         local tail = recv .. sep .. node.name
@@ -208,7 +206,7 @@ local function resolve_site(V, f, from, name, kind, recv, evidence, offset, inde
     elseif kind == 'member_symbol' then rkind, accept = 'member_call', ANY
     elseif definition and kind == 'member_call' and V.files[f].language == 'cpp' then accept = ANY end
     local site_line = index and V.files[f].refs.line[index] or cursor_line
-    local targets, reason, macro_state = graph.resolve(V, f, src, name, rkind, recv or nil, direct, paired, accept, evidence, V.js_context, site_line)
+    local targets, reason, macro_state = graph.resolve(V, f, src, name, rkind, recv or nil, direct, paired, accept, evidence, V.js_context, site_line, offset)
     targets = targets or {}
     if kind == 'symbol' then
         local kept = {}
@@ -221,7 +219,8 @@ local function resolve_site(V, f, from, name, kind, recv, evidence, offset, inde
         targets = kept
     end
     -- The resolver never binds a ref to its enclosing node, which hides recursion.
-    if #targets == 0 and reason ~= 'unknown or unsupported macro visibility' and src and V.nodes[src].name == name and (kind == 'call' or recursive(V.nodes[src], recv)) then
+    local receiver_bound = recv and evidence and evidence ~= '' or reason and reason:match('^receiver:')
+    if #targets == 0 and not receiver_bound and reason ~= 'unknown or unsupported macro visibility' and src and V.nodes[src].name == name and (kind == 'call' or recursive(V.nodes[src], recv)) then
         targets = { src }
     end
     -- Definitions too far apart to choose between: a visible prototype still
@@ -668,7 +667,7 @@ local function scan(V, targets, name)
         end
     end
     return hits, V.js_context.include_incomplete or V.js_context.workspace_incomplete or V.js_context.go_incomplete or V.js_context.go_methods_incomplete
-        or V.js_context.rust_incomplete or false
+        or V.js_context.rust_incomplete or V.js_context.receiver_incomplete or false
 end
 
 -- Files one import record resolves to, through the graph's dependency
@@ -1281,7 +1280,7 @@ function handlers.lsp_definition(req)
         -- An import line: `require "a.b"`, `dofile("x.lua")`, `#include <x.h>`, `from . import m`.
         local files = import_targets(V, f, line)
         if #files > 0 or importer then
-            return files, V.js_context.include_incomplete or V.js_context.workspace_incomplete or V.js_context.go_incomplete or V.js_context.go_methods_incomplete or V.js_context.rust_incomplete
+            return files, V.js_context.include_incomplete or V.js_context.workspace_incomplete or V.js_context.go_incomplete or V.js_context.go_methods_incomplete or V.js_context.rust_incomplete or V.js_context.receiver_incomplete
         end
     end
     if #targets == 0 then
@@ -1311,7 +1310,7 @@ function handlers.lsp_definition(req)
             if hit then result[#result + 1] = { uri = target_doc.uri, range = target_doc:range(hit.name_start, hit.name_end) } end
         end
         return result, info.truncated or V.js_context.include_incomplete or V.js_context.workspace_incomplete
-            or V.js_context.go_incomplete or V.js_context.go_methods_incomplete or V.js_context.cpp_receivers_incomplete or V.js_context.rust_incomplete
+            or V.js_context.go_incomplete or V.js_context.go_methods_incomplete or V.js_context.cpp_receivers_incomplete or V.js_context.rust_incomplete or V.js_context.receiver_incomplete
     end
     if c.decl and is_decl(V.nodes[targets[1]]) then
         -- From a declaration, go to its definitions.
@@ -1323,7 +1322,7 @@ function handlers.lsp_definition(req)
     end
     local result = {}
     for _, id in ipairs(targets) do result[#result + 1] = (location(V, id)) end
-    return result, V.js_context.include_incomplete or V.js_context.workspace_incomplete or V.js_context.go_incomplete or V.js_context.go_methods_incomplete or V.js_context.cpp_receivers_incomplete or V.js_context.rust_incomplete
+    return result, V.js_context.include_incomplete or V.js_context.workspace_incomplete or V.js_context.go_incomplete or V.js_context.go_methods_incomplete or V.js_context.cpp_receivers_incomplete or V.js_context.rust_incomplete or V.js_context.receiver_incomplete
 end
 
 -- Display tags may be truncated before a heavily annotated SDK declaration's
@@ -1537,13 +1536,13 @@ function handlers.lsp_outgoing(req)
             end
         end
     end
-    return result, V.js_context.include_incomplete or V.js_context.workspace_incomplete or V.js_context.go_incomplete or V.js_context.go_methods_incomplete or V.js_context.cpp_receivers_incomplete or V.js_context.rust_incomplete
+    return result, V.js_context.include_incomplete or V.js_context.workspace_incomplete or V.js_context.go_incomplete or V.js_context.go_methods_incomplete or V.js_context.cpp_receivers_incomplete or V.js_context.rust_incomplete or V.js_context.receiver_incomplete
 end
 
 function handlers.lsp_references(req)
     local V, _, c, targets = at(req)
     if not V then return {} end
-    if #targets == 0 then return {}, V.js_context.workspace_incomplete or V.js_context.go_incomplete or V.js_context.go_methods_incomplete or V.js_context.cpp_receivers_incomplete or V.js_context.rust_incomplete end
+    if #targets == 0 then return {}, V.js_context.workspace_incomplete or V.js_context.go_incomplete or V.js_context.go_methods_incomplete or V.js_context.cpp_receivers_incomplete or V.js_context.rust_incomplete or V.js_context.receiver_incomplete end
     local set = {}
     local type_ids = {}
     for _, id in ipairs(targets) do if TYPES[V.nodes[id].kind] then type_ids[#type_ids + 1] = id end end

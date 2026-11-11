@@ -3534,6 +3534,95 @@ void MacroNavUnknown(void) { MACRO_NAV(3); }
         spec.equal(hover.contents.kind, 'markdown')
         spec.equal(range_text('main.c', hover.range), 'helper')
     end)
+    spec.it('shows leading Lua comments and annotations in hover and signature help across files', function()
+        local target = 'lua_tip_player.lua'
+        local definition = table.concat({
+            'local Player = {}',
+            '-- detached comment',
+            '',
+            '-- 根据功能 id 查询该功能是否可以开启',
+            '-- 前端使用 UICommonUtils.CheckFunctionOpen',
+            '---@param functionId integer',
+            '---@return boolean',
+            'function Player:canOpenFunctionById(functionId)',
+            '    -- body comment',
+            '    return functionId > 0',
+            'end',
+            'return Player',
+        }, '\r\n')
+        local call = 'return Player:canOpenFunctionById(123)'
+        nav_write(target, definition)
+        nav_write('lua_tip_call.lua', 'local Player = require("lua_tip_player")\n' .. call)
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local function request(method, text, session)
+            return nav({ method = method, uri = nav_uri('lua_tip_call.lua'), session = session,
+                position = { line = 1, character = assert(call:find(text, 1, true)) } })
+        end
+        local hover = request('lsp_hover', 'canOpenFunctionById')
+        local result = request('lsp_signature', '123')
+        local signature = result.signatures[1]
+        spec.equal(result.activeParameter, 0)
+        spec.equal(signature.parameters[1].label, 'functionId')
+        spec.equal(signature.documentation.kind, 'markdown')
+        for _, value in ipairs({ hover.contents.value, signature.documentation.value }) do
+            spec.contains(value, '根据功能 id 查询该功能是否可以开启')
+            spec.contains(value, '前端使用 UICommonUtils.CheckFunctionOpen')
+            spec.contains(value, '---@param functionId integer')
+            spec.contains(value, '---@return boolean')
+            spec.nil_value(value:find('detached comment', 1, true))
+            spec.nil_value(value:find('body comment', 1, true))
+        end
+        local uri, session = nav_uri(target), 'lua-tip-draft'
+        navigation.sync({ session = session, open = { [uri] = 1 }, changed = {
+            [uri] = { version = 1, language = 'lua', source = definition:gsub('functionId integer', 'functionId number') },
+        } })
+        local draft_hover = request('lsp_hover', 'canOpenFunctionById', session)
+        navigation.close(session)
+        spec.contains(draft_hover.contents.value, '---@param functionId number')
+        spec.nil_value(draft_hover.contents.value:find('functionId integer', 1, true))
+    end)
+    spec.it('shows native documentation comments in hover and signature help for other languages', function()
+        local cases = {
+            { 'tip.c', 'tip_c', '// C documentation\nint tip_c(int n) { return n; }\nvoid use_tip(void) { tip_c(1); }', 'C documentation' },
+            { 'tip.cpp', 'tip_cpp', '/** C++ documentation\n * \\param n the input\n */\nint tip_cpp(int n) { return n; }\nvoid use_tip() { tip_cpp(1); }', 'C++ documentation', '\\param n the input' },
+            { 'tip.py', 'tip_py', 'def tip_py(n: int) -> bool:\n    # The docstring may follow a comment.\n'
+                .. '    """Python documentation.\n\n    Returns whether n is positive.\n    """\n    return n > 0\ntip_py(1)\n\n'
+                .. 'def tip_py_expression(n):\n    """Not a docstring.""".strip()\n    return n\ntip_py_expression(1)',
+                'Python documentation.', 'Returns whether n is positive.' },
+            { 'Tip.java', 'tip_java', 'class Tip {\n    /** Java documentation */\n    static boolean tip_java(int n) { return true; }\n'
+                .. '    void useTip() { tip_java(1); }\n}', 'Java documentation' },
+            { 'tip.kt', 'tip_kt', '/** Kotlin documentation\n * @return whether n is positive\n */\n'
+                .. 'fun tip_kt(n: Int): Boolean = n > 0\nfun useTip() = tip_kt(1)', 'Kotlin documentation', '@return whether n is positive' },
+            { 'tip.go', 'tip_go', 'package main\n\n// Go documentation\nfunc tip_go(n int) bool { return n > 0 }\nfunc useTip() { tip_go(1) }', 'Go documentation' },
+            { 'tip.js', 'tip_js', '/** JavaScript documentation\n * @param {number} n\n * @returns {boolean}\n */\n'
+                .. 'function tip_js(n) { return n > 0; }\ntip_js(1);', 'JavaScript documentation', '@returns {boolean}' },
+            { 'tip.ts', 'tip_ts', '/** TypeScript documentation */\nfunction tip_ts(n: number): boolean { return n > 0; }\ntip_ts(1);', 'TypeScript documentation' },
+            { 'tip.ets', 'tip_ets', '/** ArkTS documentation */\nfunction tip_ets(n: number): boolean { return n > 0; }\ntip_ets(1);', 'ArkTS documentation' },
+            { 'Tip.cs', 'tip_cs', 'class TipCs {\n    /// <summary>C# documentation</summary>\n    /// <param name="n">The input</param>\n'
+                .. '    /// <returns>True for positive input.</returns>\n    static bool tip_cs(int n) { return n > 0; }\n'
+                .. '    void UseTip() { tip_cs(1); }\n}', 'C# documentation', '**Returns** True for positive input.' },
+            { 'tip.rs', 'tip_rs', '//! Module documentation\n/// Rust documentation\nfn tip_rs(n: i32) -> bool { n > 0 }\nfn use_tip() { tip_rs(1); }', 'Rust documentation' },
+        }
+        for _, case in ipairs(cases) do nav_write(case[1], case[3]) end
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        for _, case in ipairs(cases) do
+            local doc = docs.read(nav_root .. '/' .. case[1])
+            local call = assert(doc.source:find(case[2] .. '(1)', 1, true))
+            local hover = nav({ method = 'lsp_hover', uri = doc.uri, position = doc:position(call) })
+            local signature = nav({ method = 'lsp_signature', uri = doc.uri, position = doc:position(call + #case[2] + 1) })
+            spec.truthy(hover and hover.contents, case[1] .. ' hover')
+            spec.truthy(signature and signature.signatures[1].documentation, case[1] .. ' signature documentation')
+            for _, value in ipairs({ hover.contents.value, signature.signatures[1].documentation.value }) do
+                spec.contains(value, case[4], case[1])
+                if case[5] then spec.contains(value, case[5], case[1]) end
+                spec.nil_value(value:find('Module documentation', 1, true))
+            end
+        end
+        local python = docs.read(nav_root .. '/tip.py')
+        local expression = assert(python.source:find('tip_py_expression(1)', 1, true))
+        local hover = nav({ method = 'lsp_hover', uri = python.uri, position = python:position(expression) })
+        spec.nil_value(hover.contents.value:find('Not a docstring.', 1, true))
+    end)
     spec.it('finds references of a function including declarations', function()
         local refs = nav({ method = 'lsp_references', uri = nav_uri('util.c'), position = { line = 1, character = 5 },
             includeDeclaration = true })

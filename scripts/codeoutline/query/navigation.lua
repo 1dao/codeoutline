@@ -1343,6 +1343,115 @@ local function external_signature(entry)
     return label
 end
 
+-- Read adjacent comments from the validated definition source or its draft.
+local function leading_comments(doc, hit, language)
+    local line = doc:position(hit.start_byte).line + 1
+    local prefix = doc.source:sub(doc.lines[line] + 1, hit.start_byte)
+    local c_style = language ~= 'lua' and language ~= 'python'
+    local marker = c_style and '//[/!]?' or language == 'lua' and '%-%-%-?' or '#'
+    local comments = {}
+    local in_block = false
+    if prefix:find('%S') then
+        local inline = c_style and prefix:match('^%s*/%*%*?(.-)%*/%s*$')
+        if not inline or inline:find('*/', 1, true) or (language == 'rust' and prefix:match('^%s*/%*!')) then return comments end
+        comments[1] = inline:match('^%s*(.-)%s*$')
+    end
+    for i = line - 1, math.max(1, line - 40), -1 do
+        if doc.lines[line] - doc.lines[i] > 8192 then break end
+        local text = doc.source:sub(doc.lines[i] + 1, doc.lines[i + 1]):match('^%s*(.-)%s*$')
+        if (language == 'rust' and (text:match('^//!') or text:match('^/%*!')))
+            or (language == 'python' and text:match('^#!')) then break end
+        local comment = not in_block and text:match('^' .. marker .. '[ \t]*(.*)$')
+        if comment then
+            if language == 'lua' and (comment:match('^%[=*%[') or comment:match('^%]=*%]')) then break end
+            comments[#comments + 1] = comment
+        elseif c_style and (in_block or text:sub(-2) == '*/') then
+            if not in_block then
+                text = text:sub(1, -3)
+                in_block = #comments + 1
+            end
+            if text:find('*/', 1, true) then break end
+            local opening = text:match('^/%*[%*!]?(.*)$')
+            comment = (opening or text:gsub('^%*', '')):match('^%s*(.-)%s*$')
+            if comment ~= '' or not opening then comments[#comments + 1] = comment end
+            if opening then in_block = false end
+        else
+            break
+        end
+    end
+    if in_block then for i = #comments, in_block, -1 do comments[i] = nil end end
+    return comments
+end
+
+local function python_docstring(V, f, hit)
+    local _, T = M.full(V, f)
+    if not T then return nil end
+    local lo, hi = 1, T.n
+    while lo < hi do
+        local mid = math.floor((lo + hi) / 2)
+        if T.s[mid] <= hit.name_start then lo = mid + 1 else hi = mid end
+    end
+    if T.s[lo] ~= hit.name_start + 1 then return nil end
+    local i = lo + 1
+    while T.s[i] and T.s[i] - 1 < math.min(hit.end_byte, hit.name_start + 8192) and T.k[i] ~= 'nl' do
+        if T:text(i) == ':' then break end
+        i = (T.m[i] and T.m[i] > i) and T.m[i] + 1 or i + 1
+    end
+    if T:text(i) ~= ':' then return nil end
+    i = i + 1
+    while T.k[i] == 'nl' or T.k[i] == 'indent' do i = i + 1 end
+    if T.k[i] ~= 'str' or T.e[i] > hit.end_byte or T.e[i] - T.s[i] > 8192
+        or (T.k[i + 1] and T.k[i + 1] ~= 'nl' and T.k[i + 1] ~= 'dedent' and T:text(i + 1) ~= ';') then return nil end
+    local literal = T:text(i):gsub('^[rRuU]', '')
+    local quote = literal:match('^"""') or literal:match("^'''") or literal:match('^["\']')
+    if not quote or #literal < 2 * #quote or literal:sub(-#quote) ~= quote then return nil end
+    local value = literal:sub(#quote + 1, -#quote - 1):gsub('\r\n?', '\n')
+    local margin
+    for indent in value:gmatch('\n([ \t]*)%S') do margin = math.min(margin or #indent, #indent) end
+    if margin and margin > 0 then value = value:gsub('\n[ \t]+', function(indent) return '\n' .. indent:sub(margin + 2) end) end
+    return value:match('^%s*(.-)%s*$')
+end
+
+local function definition_documentation(V, id)
+    local node, f = V.nodes[id], V.node_file[id]
+    local record = V.files[f]
+    if not REFERENCE[node.kind] or (not V.drafts[f] and (record.size or 0) > M.MAX_FILE_BYTES) then return nil end
+    local doc, hit = locate(V, id)
+    if not hit then return nil end
+    local language = record.language
+    if language == 'python' then
+        local value = python_docstring(V, f, hit)
+        if value and value ~= '' then return { kind = 'markdown', value = value } end
+    end
+    local comments = leading_comments(doc, hit, language)
+    local prose, annotations = {}, {}
+    for i = #comments, 1, -1 do
+        local comment = comments[i]
+        if comment:match('^[@\\]%a+[%s:]') then
+            annotations[#annotations + 1] = language == 'lua' and '---' .. comment or comment
+        else
+            prose[#prose + 1] = comment
+        end
+    end
+    local value = table.concat(prose, '  \n'):match('^%s*(.-)%s*$')
+    if language == 'csharp' then
+        value = value:gsub('<param%s+name="([%w_]+)">', '**Parameter `%1`** ')
+            :gsub('<typeparam%s+name="([%w_]+)">', '**Type parameter `%1`** ')
+            :gsub('<paramref%s+name="([%w_]+)"%s*/>', '`%1`')
+            :gsub('<see%s+cref="([^"\r\n]+)"%s*/>', '`%1`')
+            :gsub('<returns>', '**Returns** '):gsub('<value>', '**Value** ')
+        for _, tag in ipairs({ 'summary', 'remarks', 'param', 'typeparam', 'returns', 'value' }) do
+            value = value:gsub('</?' .. tag .. '>', '')
+        end
+        value = value:match('^%s*(.-)%s*$')
+    end
+    if #annotations > 0 then
+        local fence = language == 'lua' and '```lua\n' or '```text\n'
+        value = value .. (value ~= '' and '\n\n' or '') .. fence .. table.concat(annotations, '\n') .. '\n```'
+    end
+    if value ~= '' then return { kind = 'markdown', value = value } end
+end
+
 -- Follow unmatched delimiters up to the cursor. Commas in nested calls,
 -- literals and indexing expressions do not advance the enclosing argument.
 function handlers.lsp_signature(req)
@@ -1404,9 +1513,10 @@ function handlers.lsp_signature(req)
     local V, _, c, targets, f = at(query)
     if not V or not c or c.decl then return false end
     local signatures, seen = {}, {}
-    local function add_signature(node, label, uri, foreign)
+    local function add_signature(node, label, uri, foreign, id)
         if foreign and not seen[foreign.label] then
             foreign.activeParameter = #foreign.parameters > 0 and math.min(call.argument, #foreign.parameters - 1) or nil
+            foreign.documentation = id and definition_documentation(V, id) or foreign.documentation
             signatures[#signatures + 1] = foreign
             seen[foreign.label] = true
         elseif not foreign and REFERENCE[node.kind] and label and not seen[label] then
@@ -1433,6 +1543,7 @@ function handlers.lsp_signature(req)
                     i = i + 1
                 end
                 signatures[#signatures + 1] = { label = label, parameters = parameters,
+                    documentation = id and definition_documentation(V, id),
                     activeParameter = #parameters > 0 and math.min(call.argument, #parameters - 1) or nil }
                 seen[label] = true
             end
@@ -1441,7 +1552,7 @@ function handlers.lsp_signature(req)
     for _, id in ipairs(targets) do
         local node = V.nodes[id]
         add_signature(node, M.detail(V, V.node_file[id], node).sig, uri_of(V, V.node_file[id]),
-            require('codeoutline.analysis.foreign').signature(node, doc:parse().language, T:text(name_token)))
+            require('codeoutline.analysis.foreign').signature(node, language, T:text(name_token)), id)
     end
     if #targets == 0 and C_FAMILY[doc:parse().language] then
         -- Share definition lookup's bounded, source-validated external-header
@@ -1466,6 +1577,8 @@ function handlers.lsp_hover(req)
         local foreign = require('codeoutline.analysis.foreign').signature(node, doc:parse().language, doc.source:sub(c.first + 1, c.last))
         parts[#parts + 1] = '```' .. (foreign and doc:parse().language or rec.language or '') .. '\n'
             .. (foreign and foreign.label or M.detail(V, V.node_file[id], node).sig or node.qualified) .. '\n```'
+        local documentation = definition_documentation(V, id)
+        if documentation then parts[#parts + 1] = documentation.value end
         parts[#parts + 1] = node.kind .. ' `' .. node.qualified .. '` — ' .. rec.path .. ':' .. node.line
     end
     return { contents = { kind = 'markdown', value = table.concat(parts, '\n\n') }, range = doc:range(c.first, c.last) }

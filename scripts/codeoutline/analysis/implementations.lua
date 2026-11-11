@@ -151,6 +151,8 @@ function M.collect(r, T)
             if best then
                 ref.binding = best.type and 'jvm:type:' .. best.type .. '\0' .. (T.s[best.token] - 1) or 'jvm:?'
                 if T:text(ref.tok - 3) == '.' or T:text(ref.tok - 3) == '?.' then ref.binding = 'jvm:?' end
+            elseif r.language == 'java' and ref.recv == 'super' and T:text(ref.tok - 3) == '.' then
+                ref.binding = 'jvm:?'
             elseif ref.recv == 'this' or ref.recv == 'super' then ref.binding = 'jvm:self:' .. ref.recv end
             r.has_bindings = true
         end

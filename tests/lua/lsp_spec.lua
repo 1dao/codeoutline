@@ -1119,6 +1119,54 @@ Manager* Factory();
             spec.truthy(names.only_b, case[1]); spec.nil_value(names.only_a, case[1])
         end
     end)
+    spec.it('jumps from Java super to a superclass method across files', function()
+        nav_write('JumpBase.java', 'class JumpBase { public void jumpParent() {} }\n')
+        local source = 'interface JumpDefault { default void jumpParent() {} }\n'
+            .. 'class JumpChild extends JumpBase implements JumpDefault {\n'
+            .. '    public void jumpParent() {}\n'
+            .. '    void run() { this.jumpParent(); super.jumpParent(); JumpDefault.super.jumpParent(); }\n}\n'
+        nav_write('JumpChild.java', source)
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local doc = docs.read(nav_root .. '/JumpChild.java')
+        local function jump(fragment)
+            local first = assert(source:find(fragment, 1, true))
+            return nav({ method = 'lsp_definition', uri = doc.uri,
+                position = doc:position(first + #fragment - 3) })
+        end
+        local own = jump('this.jumpParent')
+        spec.equal(#own, 1); spec.equal(own[1].uri, doc.uri); spec.equal(own[1].range.start.line, 2)
+        local parent = jump('super.jumpParent')
+        spec.equal(#parent, 1); spec.equal(parent[1].uri, nav_uri('JumpBase.java'))
+        spec.equal(#jump('JumpDefault.super.jumpParent'), 0, 'qualified super must not jump to the superclass')
+    end)
+    spec.it('resolves C# protected methods through a derived receiver or base access across files', function()
+        nav_write('JumpBase.cs', 'namespace JumpApi { public class JumpBase {\n'
+            .. '    protected void JumpProtected() {}\n    private void JumpPrivate() {}\n} }\n')
+        local source = 'using Parent = JumpApi.JumpBase;\n'
+            .. 'class JumpSibling : Parent {}\n'
+            .. 'class JumpChild : Parent {\n'
+            .. '    void Run(JumpChild child, Parent parent, JumpSibling sibling) {\n'
+            .. '        this.JumpProtected(); base.JumpProtected(); child.JumpProtected(); JumpProtected();\n'
+            .. '        parent.JumpProtected(); sibling.JumpProtected(); this.JumpPrivate();\n'
+            .. '    }\n}\n'
+            .. 'class JumpUnrelated { void Run(JumpChild foreign) { foreign.JumpProtected(); } }\n'
+        nav_write('JumpChild.cs', source)
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local doc = docs.read(nav_root .. '/JumpChild.cs')
+        local function jump(fragment)
+            local first = assert(source:find(fragment, 1, true))
+            return nav({ method = 'lsp_definition', uri = doc.uri,
+                position = doc:position(first + #fragment - 3) })
+        end
+        for _, fragment in ipairs({ 'this.JumpProtected', 'base.JumpProtected', 'child.JumpProtected', ' JumpProtected' }) do
+            local result = jump(fragment)
+            spec.equal(#result, 1, fragment); spec.equal(result[1].uri, nav_uri('JumpBase.cs'))
+            spec.equal(result[1].range.start.line, 1)
+        end
+        for _, fragment in ipairs({ 'parent.JumpProtected', 'sibling.JumpProtected', 'foreign.JumpProtected', 'this.JumpPrivate' }) do
+            spec.equal(#jump(fragment), 0, fragment)
+        end
+    end)
     spec.it('keeps Kotlin scope-function and labeled receivers distinct in navigation and completion', function()
         local marked = 'package scoped_receiver\nclass B { fun save() {} fun only_b() {} }\nclass A { fun save() {} fun only_a() {} '
             .. 'fun run(b: B) { with(b) { this.@@save() }; this@A.@@save() } }'

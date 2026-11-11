@@ -429,10 +429,16 @@ function M.binding(G, f, src, name, ctx, options)
             if info and info.static or G.nodes[src].static then ids = {} end
         end
         if language == 'kotlin' and src and G.nodes[src].receiver then ids = M.types(G, f, G.nodes[src].receiver, ctx) end
-        if name ~= 'this' then
-            ids = {}
-            for _, base in ipairs(cls and G.nodes[cls].bases or {}) do
-                for _, id in ipairs(M.types(G, f, base, ctx, G.nodes[cls].qualified)) do ids[#ids + 1] = id end
+        if name ~= 'this' and #ids > 0 then
+            if language == 'csharp' then
+                ids = require('codeoutline.analysis.csharp.csharp_bindings').base_classes(G, ids, ctx)
+            else
+                local node = cls and G.nodes[cls]
+                local bases = node and (language == 'java' and node.extends or node.bases)
+                ids = {}
+                for _, base in ipairs(bases or {}) do
+                    for _, id in ipairs(M.types(G, f, base, ctx, node.qualified)) do ids[#ids + 1] = id end
+                end
             end
         end
         return { kind = 'types', ids = ids, language = language, file = f }
@@ -448,6 +454,7 @@ function M.resolve(G, f, src, name, kind, recv, evidence, ctx, accept, offset)
         return require('codeoutline.analysis.go.go_modules').resolve(G, f, name, recv, ctx)
     end
     if evidence == '?' or evidence == 'py:?' then return nil end
+    if language == 'java' and recv == 'super' and evidence == 'jvm:?' then return {}, 'receiver: qualified Java super' end
     if language == 'lua' and (recv == 'self' or evidence and evidence:match('^lua%-self:')) then
         local ids = require('codeoutline.analysis.lua.lua_bindings').resolve(G, f, name, evidence, ctx.lua, recv)
         return ids or {}, 'receiver: Lua lexical binding'
@@ -468,7 +475,7 @@ function M.resolve(G, f, src, name, kind, recv, evidence, ctx, accept, offset)
         elseif language == 'csharp' then
             local cls = owner(G, f, src)
             return require('codeoutline.analysis.csharp.csharp_bindings').members(G, f, target.ids, name, false, ctx,
-                nil, nil, cls and G.nodes[cls].qualified), 'receiver: C# this binding'
+                cls and G.nodes[cls].qualified, recv == 'base'), 'receiver: C# instance binding'
         elseif language == 'java' or language == 'kotlin' then
             local ids = {}
             for _, id in ipairs(target.ids) do

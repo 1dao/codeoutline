@@ -198,6 +198,24 @@ local function context(G, ctx)
         end
         return ids
     end
+    local bases = {}
+    function C.bases(id)
+        if bases[id] then return bases[id] end
+        local node, f = G.nodes[id], G.node_file[id]
+        local ids = {}
+        if node.bases and #node.bases > 0 then
+            local at = 0
+            for _, scope in ipairs(C.data(f).csharp_scopes or {}) do
+                if scope.scope == node.qualified then at = scope.first; break end
+            end
+            local scope = node.qualified:match('^(.*)%.[^.]+$') or ''
+            for _, base in ipairs(node.bases) do
+                for _, base_id in ipairs(M.types(G, f, base, at, ctx, { scope = scope })) do ids[#ids + 1] = base_id end
+            end
+        end
+        bases[id] = ids
+        return ids
+    end
     function C.namespace(f, name)
         return namespaces[C.group(f)] and namespaces[C.group(f)][name] or false
     end
@@ -304,40 +322,67 @@ function M.types(G, f, name, at, ctx, options)
     return ids, nil, #ids > 0
 end
 
-function M.members(G, f, ids, name, static, ctx, depth, seen, access_scope)
-    depth, seen = depth or 0, seen or {}
+function M.base_classes(G, ids, ctx)
+    local C, result = context(G, ctx), {}
+    for _, id in ipairs(ids) do
+        for _, base in ipairs(C.bases(id)) do
+            if G.nodes[base].kind == 'class' or G.nodes[base].kind == 'record' then result[#result + 1] = base end
+        end
+    end
+    return result
+end
+
+local function derives_from(G, C, id, ancestor, depth, seen)
+    if seen[id] or depth > 8 then return false end
+    if G.nodes[id].qualified == G.nodes[ancestor].qualified then return true end
+    seen[id] = true
+    local interface = G.nodes[ancestor].kind == 'interface'
+    for _, base in ipairs(C.bases(id)) do
+        if (G.nodes[base].kind == 'interface') == interface
+            and derives_from(G, C, base, ancestor, depth + 1, seen) then return true end
+    end
+    return false
+end
+
+function M.members(G, f, ids, name, static, ctx, access_scope, base_access)
     local C, out, emitted = context(G, ctx), {}, {}
-    for _, cls in ipairs(ids) do
-        if not seen[cls] and depth <= 8 then
-            seen[cls] = true
-            local found = false
-            for _, id in ipairs(G.by_name[name] or {}) do
-                local n, g = G.nodes[id], G.node_file[id]
-                if callable[n.kind] and n.qualified == G.nodes[cls].qualified .. '.' .. name
-                    and G.files[g].language == 'csharp' and C.same(f, g) then
-                    local data, index = C.data(g), id - G.id_of[g][1] + 1
-                    local is_static, access = (data.csharp_statics or {})[index] or false, (data.csharp_access or {})[index]
-                    local owner = G.nodes[cls].qualified
-                    local own = access_scope and (access_scope == owner or access_scope:sub(1, #owner + 1) == owner .. '.')
-                    if (static == nil or is_static == static) and (access == 'public' or access == 'internal' or own) then
+    local access_types
+    local function visit(cls, receiver, depth, seen)
+        if seen[cls] or depth > 8 then return end
+        seen[cls] = true
+        local found, owner = false, G.nodes[cls].qualified
+        local own = access_scope and (access_scope == owner or access_scope:sub(1, #owner + 1) == owner .. '.')
+        for _, id in ipairs(G.by_name[name] or {}) do
+            local n, g = G.nodes[id], G.node_file[id]
+            if callable[n.kind] and n.qualified == owner .. '.' .. name
+                and G.files[g].language == 'csharp' and C.same(f, g) then
+                local data, index = C.data(g), id - G.id_of[g][1] + 1
+                local is_static, access = (data.csharp_statics or {})[index] or false, (data.csharp_access or {})[index]
+                if static == nil or is_static == static then
+                    local visible = own or access == 'public' or access == 'internal'
+                    if not visible and access == 'protected' and access_scope then
+                        access_types = access_types or C.exact(f, access_scope)
+                        -- An instance qualifier must have the accessing type or a subtype.
+                        for _, accessor in ipairs(access_types) do
+                            if (G.nodes[cls].kind ~= 'interface' or G.nodes[accessor].kind == 'interface')
+                                and derives_from(G, C, accessor, cls, 0, {})
+                                and (base_access or is_static or derives_from(G, C, receiver, accessor, 0, {})) then
+                                visible = true; break
+                            end
+                        end
+                    end
+                    if visible then
                         if not emitted[id] then emitted[id] = true; out[#out + 1] = id end
                         found = true
                     end
                 end
             end
-            if not found and static ~= true then
-                for _, base in ipairs(G.nodes[cls].bases or {}) do
-                    local g = G.node_file[cls]
-                    local at = 0
-                    for _, scope in ipairs(C.data(g).csharp_scopes or {}) do if scope.scope == G.nodes[cls].qualified then at = scope.first; break end end
-                    local more = M.types(G, g, base, at, ctx, { scope = G.nodes[cls].qualified:match('^(.*)%.[^.]+$') or '' })
-                    for _, id in ipairs(M.members(G, f, more, name, static, ctx, depth + 1, seen, access_scope)) do
-                        if not emitted[id] then emitted[id] = true; out[#out + 1] = id end
-                    end
-                end
-            end
+        end
+        if not found and static ~= true then
+            for _, base in ipairs(C.bases(cls)) do visit(base, receiver, depth + 1, seen) end
         end
     end
+    for _, cls in ipairs(ids) do visit(cls, cls, 0, {}) end
     return out
 end
 
@@ -356,7 +401,7 @@ function M.resolve(G, f, src, name, kind, recv, evidence, ctx)
                     and C.same(f, G.node_file[id]) then explicit = true; break end
             end
             if explicit then
-                for _, id in ipairs(M.members(G, f, { cls }, n.name, false, ctx, nil, nil, access_scope)) do result[#result + 1] = id end
+                for _, id in ipairs(M.members(G, f, { cls }, n.name, false, ctx, access_scope)) do result[#result + 1] = id end
             else result[#result + 1] = cls end
         end
         return result
@@ -374,26 +419,18 @@ function M.resolve(G, f, src, name, kind, recv, evidence, ctx)
     if tag == 'self' then
         local scope = src and G.nodes[src].qualified:match('^(.*)%.[^.]+$') or C.scope(f, at)
         local owners = C.exact(f, scope)
-        if value == 'base' then
-            local bases = {}
-            for _, id in ipairs(owners) do
-                for _, base in ipairs(G.nodes[id].bases or {}) do
-                    for _, target in ipairs(M.types(G, f, base, at, ctx)) do bases[#bases + 1] = target end
-                end
-            end
-            owners = bases
-        end
-        return M.members(G, f, owners, name, false, ctx, nil, nil, access_scope)
+        if value == 'base' then owners = M.base_classes(G, owners, ctx) end
+        return M.members(G, f, owners, name, false, ctx, access_scope, value == 'base')
     end
     if tag == 'type' or tag == 'owner' then
         local ids, _, known = M.types(G, f, value, at, ctx)
-        if tag == 'type' or known then return M.members(G, f, ids, name, tag == 'owner', ctx, nil, nil, access_scope) end
+        if tag == 'type' or known then return M.members(G, f, ids, name, tag == 'owner', ctx, access_scope) end
         return nil
     end
     if tag == 'call' then
         local owner = src and G.nodes[src].qualified:match('^(.*)%.[^.]+$')
         if owner then
-            local own = M.members(G, f, C.exact(f, owner), name, nil, ctx, nil, nil, access_scope)
+            local own = M.members(G, f, C.exact(f, owner), name, nil, ctx, access_scope)
             if #own > 0 then return own end
         end
         local out, known, seen = {}, false, {}
@@ -402,7 +439,7 @@ function M.resolve(G, f, src, name, kind, recv, evidence, ctx)
             if d.static then
                 known = true
                 local ids = M.types(G, entry.file, d.path, d.first, ctx, { exclude = d.first, no_global = true, scope = d.scope })
-                for _, id in ipairs(M.members(G, f, ids, name, true, ctx, nil, nil, access_scope)) do
+                for _, id in ipairs(M.members(G, f, ids, name, true, ctx, access_scope)) do
                     if not seen[id] then seen[id] = true; out[#out + 1] = id end
                 end
             end

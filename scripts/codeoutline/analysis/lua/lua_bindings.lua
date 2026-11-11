@@ -41,6 +41,24 @@ local function binding_at(bindings, name, token)
     return best
 end
 
+local function metatable_import(T, bindings, bound)
+    if not bound then return nil end
+    local call = bound.token + 2
+    if T:text(bound.token + 1) ~= '=' or T:text(call) ~= 'setmetatable'
+        or binding_at(bindings, 'setmetatable', call) or T:text(call + 1) ~= '('
+        or T:text(call + 2) ~= '{' then return nil end
+    local object_end = T.m[call + 2]
+    if not object_end or T:text(object_end + 1) ~= ',' or T:text(object_end + 2) ~= '{' then return nil end
+    local key = object_end + 3
+    if T:text(key) ~= '__index' or T:text(key + 1) ~= '=' or T.k[key + 2] ~= 'id' then return nil end
+    local close = key + 3
+    if T:text(close) == ',' or T:text(close) == ';' then close = close + 1 end
+    if T.m[object_end + 2] ~= close or T.m[call + 1] ~= close + 1
+        or not value_end(T, close + 2) then return nil end
+    local base = binding_at(bindings, T:text(key + 2), key + 2)
+    return base and tonumber(base.hint:match('^lua:(%d+)$'))
+end
+
 -- Shared lexical table-member lookup for normal references and query-only
 -- configured callback aliases. Results are local parser node indices.
 function M.local_members(nodes, scopes, name, token, scope, finish)
@@ -168,7 +186,8 @@ function M.collect(r, T, bm)
                         for _, later in ipairs(bindings[owner] or {}) do
                             if later.a == scope and later.token > first then finish = math.min(finish, later.token - 1) end
                         end
-                        info = { members = M.local_members(r.nodes, scopes, owner, first, scope, finish), fields = {} }
+                        info = { members = M.local_members(r.nodes, scopes, owner, first, scope, finish), fields = {},
+                            base_import = metatable_import(T, bindings, bound) }
                         owners[key] = info
                         if bound then receiver_tables[bound] = info end
                     end
@@ -519,6 +538,10 @@ end
 
 -- Shared query-time receiver resolution for completion and navigation. Reuse
 -- the parser's lexical bindings and loader contracts; never execute Lua.
+local function module_target(G, imp, ctx)
+    return { modules = M.modules(G, imp, ctx), module_name = imp.path }
+end
+
 function M.member(G, target, name)
     local result = {}
     for _, f in ipairs(target and target.modules or {}) do
@@ -550,11 +573,16 @@ function M.receiver(G, rec, T, name, offset, ctx, depth)
         local files = M.native_modules(G, name, ctx)
         return #files > 0 and { modules = files, module_name = name } or nil, (T.lua_bindings or {})[name] ~= nil
     end
-    if best.self_info then return { lua_self = best.self_info }, true end
+    if best.self_info then
+        local imp = rec.lua_imports[best.self_info.base_import]
+        local target = imp and module_target(G, imp, ctx) or {}
+        target.lua_self = best.self_info
+        return target, true
+    end
     local imported = tonumber(best.hint:match('^lua:(%d+)$'))
     if imported then
         local imp = rec.lua_imports[imported]
-        return { modules = M.modules(G, imp, ctx), module_name = imp.path }, true
+        return module_target(G, imp, ctx), true
     end
     local i = best.token + 2
     if best.imported or T:text(best.token + 1) ~= '=' or T.k[i] ~= 'id' then return nil, true end
@@ -593,8 +621,18 @@ function M.resolve(G, f, name, hint, ctx, recv)
     if self_index then
         local rec = G.files[f]
         local selves = rec.lua_self or ctx and ctx.ordinary and ctx.ordinary.data(f).lua_self or {}
-        local n = selves[self_index] and selves[self_index].members[name]
-        return n and { G.id_of[f][n] } or {}
+        local info = selves[self_index]
+        if not info then return {} end
+        local n = info.members[name]
+        if n then return { G.id_of[f][n] } end
+        local imp = (rec.lua_imports or EMPTY)[info.base_import]
+        local result = {}
+        if imp and not info.fields[name] then
+            for _, entry in ipairs(M.member(G, module_target(G, imp, ctx), name)) do
+                result[#result + 1] = G.id_of[entry.file][entry.index]
+            end
+        end
+        return result
     end
     local local_index = tonumber(hint:match('^lua%-local:(%d+)$'))
     if local_index then

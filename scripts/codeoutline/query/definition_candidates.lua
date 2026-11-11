@@ -29,10 +29,10 @@ function M.allowed(site)
         or site.kind == 'member_call' or site.kind == 'member_symbol'
 end
 
-function M.find(G, f, site, ctx)
+function M.find(G, f, site, ctx, lua_self)
     local info = { truncated = site and site.macro_state == 'limited' or false,
         scanned = 0, reason = 'exact name; binding unconfirmed' }
-    if not M.allowed(site) then return {}, info end
+    if not lua_self and not M.allowed(site) then return {}, info end
     local language = G.files[f].language
     -- These languages have package/project visibility that a name-only search
     -- cannot establish. Their existing resolvers retain authority.
@@ -43,10 +43,12 @@ function M.find(G, f, site, ctx)
     if site.evidence and site.evidence ~= '' then qualified = site.evidence:match('^cpp:name:(.-)%z') end
     qualified = qualified and normalized(qualified)
     if qualified and not qualified:find('.', 1, true) then qualified = nil end
-    if site.recv then
-        if site.recv == 'self' or site.recv == 'this' or site.recv == 'cls' then return {}, info end
-        qualified = qualified or normalized(site.recv .. '.' .. site.name)
-    elseif site.kind == 'member_call' or site.kind == 'member_symbol' then return {}, info end
+    if not lua_self then
+        if site.recv then
+            if site.recv == 'self' or site.recv == 'this' or site.recv == 'cls' then return {}, info end
+            qualified = qualified or normalized(site.recv .. '.' .. site.name)
+        elseif site.kind == 'member_call' or site.kind == 'member_symbol' then return {}, info end
+    end
     local list, hits, macro_hits = G.by_name[site.name] or {}, {}, {}
     local source_dir = G.files[f].path:match('^(.*)/') or ''
     for i = 1, math.min(#list, M.MAX_SCAN) do
@@ -79,7 +81,11 @@ function M.find(G, f, site, ctx)
         end
         -- No call sites, private locals, nested functions or unrelated class methods.
         -- Even same-file locals require lexical evidence from the strict resolver.
-        if kind and name_matches and graph.family(rec.language) == graph.family(language)
+        -- A lexical self can inherit through runtime metatables. The editor
+        -- can offer method definition tags even without a receiver binding.
+        local lua_method = lua_self and rec.language == 'lua' and node.name == site.name and not parent
+            and not graph.is_decl(node) and (node.kind == 'method' or node.kind == 'function' and graph.owner(node.qualified))
+        if lua_method or not lua_self and kind and name_matches and graph.family(rec.language) == graph.family(language)
             and (not node['local'] or published) and not (node.static and g ~= f)
             and (not parent or parent.kind == 'namespace' or qualified and (types[parent.kind]))
             and (qualified or node.kind ~= 'method' and node.kind ~= 'constructor') then

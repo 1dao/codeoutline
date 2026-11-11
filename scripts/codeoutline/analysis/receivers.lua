@@ -508,6 +508,11 @@ function M.entries(C, target)
             out[#out + 1] = { name = name, node = node, kind = node.kind, file = C.f }
         end
         for name in pairs(info.fields) do out[#out + 1] = { name = name, kind = 'field' } end
+        if target.value.modules then
+            for _, entry in ipairs(C:module_members(target.value.modules, target.value.module_name)) do
+                if not info.members[entry.name] and not info.fields[entry.name] then out[#out + 1] = entry end
+            end
+        end
         return out
     end
     if target.kind == 'rust' then

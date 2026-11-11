@@ -1269,14 +1269,16 @@ function handlers.lsp_definition(req)
     end
     -- Selecting a loader's member asks for that value, not the imported file.
     if #targets == 0 and c and type(c.evidence) == 'string' and c.evidence:match('^lua%-value:') then return {} end
+    local lua_self = c and c.recv == 'self' and V.files[f].language == 'lua'
+        and (c.kind == 'member_call' or c.kind == 'member_symbol')
     local importer = false
-    if c and not c.decl then
+    if c and not c.decl and not lua_self then
         -- `require`/`dofile` themselves name the file they load, not a same-named project function.
         for _, imp in ipairs(V.files[f].imports or {}) do
             if imp.line == line and imp.kind == c.name then importer = true end
         end
     end
-    if #targets == 0 or importer then
+    if (#targets == 0 and not lua_self) or importer then
         -- An import line: `require "a.b"`, `dofile("x.lua")`, `#include <x.h>`, `from . import m`.
         local files = import_targets(V, f, line)
         if #files > 0 or importer then
@@ -1295,7 +1297,8 @@ function handlers.lsp_definition(req)
                 return result, info.truncated
             end
         end
-        local ids, info = require('codeoutline.query.definition_candidates').find(V, f, c, V.js_context)
+        local self_fallback = lua_self and c.evidence and c.evidence:match('^lua%-self:%d+$')
+        local ids, info = require('codeoutline.query.definition_candidates').find(V, f, c, V.js_context, self_fallback)
         local result, seen, bytes, started = {}, {}, 0, os.clock()
         local count = 0
         for _, id in ipairs(ids) do

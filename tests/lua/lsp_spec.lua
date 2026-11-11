@@ -1177,6 +1177,44 @@ Manager* Factory();
             if not case[3] then spec.nil_value(names.save) end
         end
     end)
+    spec.it('jumps to imported Lua metatable methods before falling back to same-name method definitions', function()
+        local prefix = 'lua-self-metatable/'
+        assert(xutils.mkdir_p(nav_root .. '/' .. prefix))
+        nav_write(prefix .. 'base.lua', 'local Base = {}\nfunction Base:base_lookup() end\n'
+            .. 'function Base:override_lookup() end\nreturn Base\n')
+        nav_write(prefix .. 'other.lua', 'local Other = {}\nfunction Other:base_lookup() end\n'
+            .. 'Other.dynamic_lookup = function() end\nreturn Other\n')
+        nav_write(prefix .. 'calls.lua', 'local function dynamic_lookup() end\n'
+            .. 'local function run(self) self:dynamic_lookup() end\nOther.dynamic_lookup()\n')
+        local source = 'local Base = require("lua-self-metatable.base")\n'
+            .. 'local Child = setmetatable({}, { __index = Base })\n'
+            .. 'function Child:override_lookup() end\n'
+            .. 'function Child:run()\n'
+            .. '    self:base_lookup()\n    self.override_lookup()\n'
+            .. '    local helper = require("lua-self-metatable.base"); self:dynamic_lookup()\n'
+            .. '    local self = {}\n    self:dynamic_lookup()\nend\nreturn Child\n'
+        local rel = prefix .. 'child.lua'
+        nav_write(rel, source)
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local doc = docs.read(nav_root .. '/' .. rel)
+        local function request(method, fragment, skip)
+            local first, last = assert(source:find(fragment, 1, true))
+            if skip then first = assert(source:find(fragment, last + 1, true)) end
+            return nav({ method = method, uri = doc.uri, position = doc:position(first + 4) })
+        end
+        for _, case in ipairs({ { 'self:base_lookup', 'base.lua', 1 }, { 'self.override_lookup', 'child.lua', 2 },
+            { 'self:dynamic_lookup', 'other.lua', 2 } }) do
+            local found = request('lsp_definition', case[1])
+            spec.equal(#found, 1, case[1])
+            spec.equal(found[1].uri, nav_uri(prefix .. case[2]))
+            spec.equal(found[1].range.start.line, case[3])
+        end
+        spec.equal(#request('lsp_definition', 'self:dynamic_lookup', true), 0)
+        local names = {}
+        for _, item in ipairs(request('lsp_completion', 'self:base_lookup').items) do names[item.label] = true end
+        spec.truthy(names.base_lookup)
+        spec.nil_value(names.dynamic_lookup)
+    end)
     spec.it('resolves and completes Rust Self across impls with inherent precedence and trait defaults', function()
         local prefix = 'rust-self-shared-lsp/'
         assert(xutils.mkdir_p(nav_root .. '/' .. prefix .. 'src'))

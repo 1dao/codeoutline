@@ -1119,6 +1119,55 @@ Manager* Factory();
             spec.truthy(names.only_b, case[1]); spec.nil_value(names.only_a, case[1])
         end
     end)
+    spec.it('joins conditional Python and JavaScript-family receivers for navigation and completion', function()
+        local prefix = 'branch_receiver/'
+        assert(xutils.mkdir_p(nav_root .. '/' .. prefix))
+        local cases = {
+            { 'py', 'from .first import First\nfrom .second import Second\n',
+                'def run(flag):\n    obj = None\n    if flag:\n        obj = First()\n    if obj is not None:\n        obj.@@visit()\n',
+                'def run(flag, other):\n    if flag:\n        obj = First()\n    elif other:\n        obj = None\n    else:\n        obj = Second()\n    obj.@@visit()\n',
+                'def run(flag):\n    if flag:\n        obj = First()\n    else:\n        obj = make_unknown()\n    obj.@@visit()\n' },
+            { 'js', 'import { First } from "./first.js"; import { Second } from "./second.js";\n',
+                'function run(flag) { let obj; if (flag) { obj = new First(); } if (obj) obj.@@visit(); }',
+                'function run(flag, other) { let obj; if (flag) { obj = new First(); } else if (other) { obj = null; } else { obj = new Second(); } obj.@@visit(); }',
+                'function run(flag) { let obj; if (flag) { obj = new First(); } else { obj = unknown(); } obj.@@visit(); }' },
+            { 'ts', 'import { First } from "./first"; import { Second } from "./second";\n',
+                'function run(flag: boolean) { let obj: First | undefined = undefined; if (flag) { obj = new First(); } if (obj) obj.@@visit(); }',
+                'function run(flag: boolean) { let obj; if (flag) { obj = new First(); } else { obj = new Second(); } obj.@@visit(); }',
+                'function run(flag: boolean) { let obj; if (flag) { let obj = new First(); } if (obj) obj.@@visit(); }' },
+        }
+        for _, case in ipairs(cases) do
+            local ext, imports = case[1], case[2]
+            local dir = prefix .. ext .. '/'
+            assert(xutils.mkdir_p(nav_root .. '/' .. dir))
+            if ext == 'py' then nav_write(dir .. '__init__.py', '') end
+            for _, def in ipairs({ { 'first', 'First' }, { 'second', 'Second' } }) do
+                local text = ext == 'py' and ('class ' .. def[2] .. ':\n    def visit(self): pass\n    def only_' .. def[1] .. '(self): pass\n')
+                    or ('export class ' .. def[2] .. ' { visit() {} only_' .. def[1] .. '() {} }')
+                nav_write(dir .. def[1] .. '.' .. ext, text)
+            end
+            for i = 3, 5 do nav_write(dir .. 'use' .. i .. '.' .. ext, (imports .. case[i]):gsub('@@', '')) end
+        end
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        for _, case in ipairs(cases) do
+            local ext, dir = case[1], prefix .. case[1] .. '/'
+            for i, expected in ipairs({ 1, 2, 0 }) do
+                local marked = case[2] .. case[i + 2]
+                local doc = docs.read(nav_root .. '/' .. dir .. 'use' .. (i + 2) .. '.' .. ext)
+                local req = { method = 'lsp_definition', uri = doc.uri,
+                    position = doc:position(assert(marked:find('@@', 1, true)) - 1) }
+                local found = nav(req)
+                spec.equal(#found, expected, ext .. ' case ' .. i)
+                if expected > 0 then spec.equal(found[1].uri, nav_uri(dir .. 'first.' .. ext)) end
+                if expected == 2 then spec.equal(found[2].uri, nav_uri(dir .. 'second.' .. ext)) end
+                req.method = 'lsp_completion'
+                local labels = {}
+                for _, item in ipairs(nav(req).items) do labels[item.label] = true end
+                spec.equal(not not labels.only_first, expected > 0, ext .. ' first case ' .. i)
+                spec.equal(not not labels.only_second, expected == 2, ext .. ' second case ' .. i)
+            end
+        end
+    end)
     spec.it('jumps from Java super to a superclass method across files', function()
         nav_write('JumpBase.java', 'class JumpBase { public void jumpParent() {} }\n')
         local source = 'interface JumpDefault { default void jumpParent() {} }\n'

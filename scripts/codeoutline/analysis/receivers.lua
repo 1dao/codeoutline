@@ -10,7 +10,7 @@ function M.at(meta, name, offset)
     local best, index, future
     for _, i in ipairs(meta and meta.by_name[name] or {}) do
         local b = meta.bindings[i]
-        if b.first <= offset and offset < b.last and b.at <= offset
+        if b.first <= offset and offset < b.last and b.at <= offset and (not b.branch_end or offset < b.branch_end)
             and (not best or b.first > best.first or b.first == best.first and b.at > best.at) then best, index = b, i end
         if b.hoisted and b.first <= offset and offset < b.last and b.at > offset
             and (not future or b.first > future.first) then future = b end
@@ -19,19 +19,131 @@ function M.at(meta, name, offset)
     return best, index
 end
 
+-- Collect simple if/else joins using existing delimiter matches. Assignments in
+-- compound bodies stay with the language's ordinary lexical analysis.
+local function join_conditionals(T, language, assignments, meta, add)
+    local python = language == 'python'
+    local function text(i) return T:text(i) end
+    local function end_offset(close) return python and T.s[close] - 1 or T.e[close] end
+    local function arm_at(i)
+        if python then
+            local limit = i + 128
+            while i <= T.n and T.k[i] ~= 'nl' do
+                if i > limit then return nil end
+                i = (T.m[i] and T.m[i] > i and T.m[i] or i) + 1
+            end
+            i = i + 1
+            if T.k[i] ~= 'indent' then return nil end
+        else
+            if text(i) == '(' then i = T.m[i] and T.m[i] + 1 or i end
+            if text(i) ~= '{' then return nil end
+        end
+        local close = T.m[i]
+        if not close then return nil end
+        local first = i + 1
+        while T.k[first] == 'nl' do first = first + 1 end
+        if first == close or (python and text(first) == 'pass' and first + 2 == close) then return close end
+        local b = assignments[first]
+        if not b or text(first + 1) ~= '=' then return nil end
+        -- Check that the assignment occupies the arm. A second statement or
+        -- a nested block needs richer control-flow analysis.
+        local j = first + 2
+        while j < close and text(j) ~= ';' and T.k[j] ~= 'nl' do
+            if j > first + 128 then return nil end
+            if text(j) == '{' and not T.m[j] then return nil end
+            if not python and j > first + 2 and T.l[j] > T.el[j - 1] then return nil end
+            j = (T.m[j] and T.m[j] > j and T.m[j] or j) + 1
+        end
+        local last = j
+        if text(j) == ';' then j = j + 1 end
+        while T.k[j] == 'nl' do j = j + 1 end
+        if j ~= close then return nil end
+        local value = first + 2
+        if not python and text(value) == 'new' then value = value + 1 end
+        value = value + 1
+        while text(value) == '.' and T.k[value + 1] == 'id' do value = value + 2 end
+        if text(value) == '(' and T.m[value] then value = T.m[value] + 1 end
+        return close, b, value == last
+    end
+
+    local blocks = {}
+    for i = 1, T.n do
+        if i % 1024 == 0 then control.check() end
+        while blocks[#blocks] and blocks[#blocks] <= i do blocks[#blocks] = nil end
+        if (python and T.k[i] == 'indent' or not python and text(i) == '{') and T.m[i] and T.m[i] > i then
+            blocks[#blocks + 1] = T.m[i]
+        end
+        if T.k[i] == 'kw' and text(i) == 'if' and (python and (i == 1 or T.k[i - 1] == 'nl'
+            or T.k[i - 1] == 'indent' or T.k[i - 1] == 'dedent') or not python and text(i - 1) ~= 'else') then
+            local arms, next_arm, has_else = {}, i + 1, false
+            while next_arm and #arms < 8 do
+                local close, assignment, simple_value = arm_at(next_arm)
+                if not close then break end
+                arms[#arms + 1] = { close = close, assignment = assignment, simple_value = simple_value }
+                local after = close + (python and 0 or 1)
+                if python and T.k[after] == 'dedent' then after = after + 1 end
+                if python and text(after) == 'elif' then next_arm = after + 1
+                elseif text(after) == 'else' and not has_else then
+                    has_else = python or text(after + 1) ~= 'if'
+                    next_arm = after + (has_else and 1 or 2)
+                else next_arm = nil end
+            end
+            if not next_arm then
+                local writes, count = {}, {}
+                for _, arm in ipairs(arms) do
+                    local b = arm.assignment
+                    if b then writes[b.name] = b; count[b.name] = (count[b.name] or 0) + 1 end
+                end
+                for name, sample in pairs(writes) do
+                    local before = M.at(meta, name, T.s[i] - 1)
+                    if python and before and before.blocked and not before.name then before = nil end
+                    if python or before and not before.blocked and before.first < sample.first then
+                        local values, seen, unknown, empty = {}, {}, false, false
+                        local function include(b)
+                            if not b or b.empty then empty = true end
+                            if not b then return end
+                            for _, value in ipairs(b.alternatives or { b }) do
+                                if value.type or value.owner then
+                                    local key = (value.type or '') .. '\0' .. tostring(value.owner) .. '\0' .. tostring(value.static)
+                                    if not seen[key] then seen[key] = true; values[#values + 1] = value end
+                                elseif not value.empty then unknown = true end
+                            end
+                        end
+                        if not has_else or count[name] < #arms then include(before) end
+                        for _, arm in ipairs(arms) do
+                            local b = arm.assignment
+                            if b and b.name == name then
+                                if arm.simple_value then include(b) else unknown = true end
+                                if python then b.branch_end = end_offset(arm.close) end
+                            end
+                        end
+                        local close = arms[#arms].close
+                        local scope = python and sample or before
+                        local parent_end = blocks[#blocks]
+                        local last = parent_end and math.min(scope.last, end_offset(parent_end)) or scope.last
+                        local value = not unknown and #values <= 8 and { alternatives = values, empty = empty } or { blocked = true }
+                        add(name, close, scope.first, last, value, end_offset(close))
+                    end
+                end
+            end
+        end
+    end
+end
+
 function M.collect(r, T)
     local language = r.language
     if language ~= 'python' and language ~= 'kotlin' and not js(language) then return end
     local meta = { bindings = {}, by_name = {}, statics = {}, fields = {}, weight = 128 }
     r.receivers = meta
-    local function add(name, token, first, last, value)
+    local function add(name, token, first, last, value, at)
         if #meta.bindings >= M.MAX_BINDINGS then meta.incomplete = true; return end
-        local b = { name = name, at = token > 0 and T.s[token] - 1 or 0, first = first, last = last,
+        local b = { name = name, at = at or (token > 0 and T.s[token] - 1 or 0), first = first, last = last,
             owner = value and value.owner, type = value and value.type, static = value and value.static,
-            super = value and value.super }
+            super = value and value.super, alternatives = value and value.alternatives,
+            empty = value and value.empty, blocked = value and value.blocked }
         local n = #meta.bindings + 1; meta.bindings[n] = b
         meta.by_name[name] = meta.by_name[name] or {}; table.insert(meta.by_name[name], n)
-        meta.weight = meta.weight + 192 + #name + #(b.type or '')
+        meta.weight = meta.weight + 192 + #name + #(b.type or '') + 16 * #(b.alternatives or {})
         if name == 'this' and js(language) then
             add('super', token, first, last, { owner = b.owner, type = b.type, static = b.static, super = true })
         end
@@ -53,6 +165,7 @@ function M.collect(r, T)
         while text(j) == '.' and T.k[j + 1] == 'id' do parts[#parts + 1] = text(j + 1); j = j + 2 end
         return table.concat(parts, '.'), j
     end
+    local assignments = {}
     if language == 'kotlin' then
         local declarations = {}
         for _, node in ipairs(r.nodes) do
@@ -142,11 +255,12 @@ function M.collect(r, T)
                 local value
                 if next == '=' or next == ':=' then
                     local name, after = written(i + 2)
-                    if name and text(after) == '(' then value = { type = name }
+                    if text(i + 2) == 'None' and (T.k[i + 3] == 'nl' or text(i + 3) == ';') then value = { empty = true }
+                    elseif name and text(after) == '(' then value = { type = name }
                     elseif name then value = M.at(meta, name, T.s[i] - 1) end
                 end
                 local b = add(text(i), i, first, last, value)
-                if b then b.hoisted = true end
+                if b then b.hoisted = true; if next == '=' then assignments[i] = b end end
             end
             if T.k[i] == 'id' and prev == 'for' and next == 'in' and depth > 0 then
                 local open = brackets[#brackets]
@@ -212,6 +326,10 @@ function M.collect(r, T)
         local bindings = {}
         for _, list in pairs(T.js_bindings or {}) do for _, b in ipairs(list) do bindings[#bindings + 1] = b end end
         table.sort(bindings, function(a, b) return a.token < b.token end)
+        local function ends_statement(i)
+            return text(i) == ';' or text(i) == '}' or text(i) == ''
+                or (T.k[i] == 'id' or T.k[i] == 'kw') and T.l[i] > T.el[i - 1]
+        end
         for _, b in ipairs(bindings) do
             local first = b.a > 0 and T.s[b.a] - 1 or 0
             local last = b.b > 0 and T.e[b.b] + 1 or #T.src + 1
@@ -219,10 +337,25 @@ function M.collect(r, T)
             if text(b.token + 1) == '=' and (text(b.token + 2) == 'this' or T.k[b.token + 2] == 'id') then
                 value = value or M.at(meta, text(b.token + 2), T.s[b.token] - 1)
             end
+            if not value then
+                local tail = b.token + 1
+                local _, after = written(b.token + 2)
+                if text(tail) == ':' and after and text(after) == '|'
+                    and (text(after + 1) == 'undefined' or text(after + 1) == 'null') then tail = after + 2 end
+                local nil_value = text(tail + 1) == 'null' or text(tail + 1) == 'undefined'
+                    and not M.at(meta, 'undefined', T.s[b.token] - 1)
+                if b.declaration and ends_statement(tail) or text(tail) == '=' and nil_value and ends_statement(tail + 2) then
+                    value = { empty = true }
+                end
+            end
             local added = add(b.name, b.token, first, last, value)
-            if added then added.hoisted = b.declaration end
+            if added then
+                added.hoisted = b.declaration
+                if not b.declaration then assignments[b.token] = added end
+            end
         end
     end
+    if next(assignments) then join_conditionals(T, language, assignments, meta, add) end
     for _, ref in ipairs(r.refs) do
         if ref.recv and text(ref.tok - 3) ~= '.' and text(ref.tok - 3) ~= '?.' then
             local name = ref.recv
@@ -291,6 +424,19 @@ end
 
 local function from_binding(G, f, b, ctx)
     if not b then return nil end
+    if b.alternatives then
+        local ids, seen, static = {}, {}, nil
+        for _, alternative in ipairs(b.alternatives) do
+            local target = from_binding(G, f, alternative, ctx)
+            local mode = target.static == true
+            if #target.ids == 0 or static ~= nil and static ~= mode then ids = {}; break end
+            static = mode
+            for _, id in ipairs(target.ids) do
+                if not seen[id] then seen[id] = true; ids[#ids + 1] = id end
+            end
+        end
+        return { kind = 'types', ids = ids, static = static, language = G.files[f].language, file = f }
+    end
     local ids = b.owner and { G.id_of[f][b.owner] } or M.types(G, f, b.type, ctx)
     if b.super then
         local bases = {}
@@ -357,7 +503,7 @@ local function field_visible(target, bound)
 end
 
 function M.member_ids(G, target, name, ctx, accept)
-    local result = {}
+    local result, emitted = {}, {}
     for _, cls in ipairs(target.ids or {}) do
         local chain = ancestors(G, cls, ctx)
         for _, id in ipairs(chain or {}) do
@@ -381,7 +527,12 @@ function M.member_ids(G, target, name, ctx, accept)
                     end
                 end
             end
-            if shadowed then for _, mid in ipairs(found) do result[#result + 1] = mid end; break end
+            if shadowed then
+                for _, mid in ipairs(found) do
+                    if not emitted[mid] then emitted[mid] = true; result[#result + 1] = mid end
+                end
+                break
+            end
         end
     end
     return result
@@ -414,7 +565,9 @@ function M.binding(G, f, src, name, ctx, options)
         local index = options.evidence and tonumber(options.evidence:match('^receiver:(%d+)$'))
         local b = index == 0 and { blocked = true } or index and meta and meta.bindings[index]
             or options.offset and M.at(meta, name, options.offset)
-        if b and (index or b.blocked or b.owner or b.type or language == 'python' or name == 'this') then return from_binding(G, f, b, ctx) end
+        if b and (index or b.blocked or b.empty or b.owner or b.type or b.alternatives or language == 'python' or name == 'this') then
+            return from_binding(G, f, b, ctx)
+        end
         if js(language) and (name == 'this' or name == 'super') or language == 'python' and (name == 'self' or name == 'cls') then
             return { kind = 'types', ids = {}, language = language, file = f }
         end

@@ -1327,6 +1327,28 @@ Manager* Factory();
             { 'overwritten', 'local mod\nif a then mod = ' .. first .. ' end\nmod = {}\nmod.@@record(1)', 0 },
             { 'shadowed', 'local mod\nif a then local mod = ' .. first .. ' end\nmod.@@record(1)', 0 },
             { 'before', 'local mod\nmod.@@record(1)\nif a then mod = ' .. first .. ' end', 0 },
+            { 'multi_statement', 'local mod = nil\nif enabled then\n    local counter = 0\n    mod = ' .. first
+                .. '\n    counter = counter + 1\nend\nmod.@@record(1)', 1 },
+            { 'import_first', 'local mod = nil\nif enabled then\n    mod = ' .. first
+                .. '\n    local counter = 0\nend\nmod.@@record(1)', 1 },
+            { 'branch_overwrite', 'local mod = nil\nif enabled then\n    mod = ' .. first .. '\n    mod = ' .. second
+                .. '\nend\nmod.@@record(1)', 1, 'second.lua' },
+            { 'branch_nil_after', 'local mod = nil\nif enabled then\n    mod = ' .. first
+                .. '\n    mod = nil\nend\nmod.@@record(1)', 0 },
+            { 'branch_unknown_after', 'local mod = nil\nif enabled then\n    mod = ' .. first
+                .. '\n    mod = unknown()\nend\nmod.@@record(1)', 0 },
+            { 'branch_loop', 'local mod = nil\nif enabled then\n    for i = 1, 2 do mod = ' .. first
+                .. ' end\nend\nmod.@@record(1)', 0 },
+            { 'branch_nested', 'local mod = nil\nif enabled then\n    if other then mod = ' .. first
+                .. ' end\nend\nmod.@@record(1)', 0 },
+            { 'branch_expression', 'local mod = nil\nif enabled then\n    mod = ' .. first
+                .. ' .. ""\nend\nmod.@@record(1)', 0 },
+            { 'branch_fallback', 'local mod = nil\nif enabled then\n    mod = ' .. first
+                .. ' or unknown()\nend\nmod.@@record(1)', 0 },
+            { 'nil_fallback', 'local mod = nil\nif a then\n    mod = nil or unknown()\nend\nif b then\n    mod = '
+                .. first .. '\nend\nmod.@@record(1)', 0 },
+            { 'arms_multi', 'local mod = nil\nif a then\n    local n = 0\n    mod = ' .. first
+                .. '\nelseif b then\n    mod = ' .. second .. '\n    local m = 0\nelse\n    mod = nil\nend\nmod.@@record(1)', 2 },
         }
         for _, case in ipairs(cases) do nav_write(prefix .. case[1] .. '.lua', case[2]:gsub('@@', '')) end
         service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
@@ -1337,13 +1359,14 @@ Manager* Factory();
             local found = nav(req)
             spec.equal(#found, case[3], case[1])
             if case[3] > 0 then
-                spec.equal(found[1].uri, nav_uri(prefix .. 'first.lua'))
+                local primary = case[4] or 'first.lua'
+                spec.equal(found[1].uri, nav_uri(prefix .. primary), case[1])
                 if case[3] == 2 then spec.equal(found[2].uri, nav_uri(prefix .. 'second.lua')) end
                 req.method = 'lsp_completion'
                 local labels = {}
                 for _, item in ipairs(nav(req).items) do labels[item.label] = true end
-                spec.truthy(labels.record and labels.only_first, case[1])
-                spec.equal(not not labels.only_second, case[3] == 2, case[1])
+                spec.truthy(labels.record and labels['only_' .. primary:match('^%a+')], case[1])
+                spec.equal(not not labels.only_second, case[3] == 2 or primary == 'second.lua', case[1])
             end
         end
     end)
@@ -3127,6 +3150,86 @@ int luaopen_example_empty(lua_State *L) { return 0; }
             spec.equal(#jump(nil, calls[1]), 1, 'closing the draft restores the disk definition')
         end)
         navigation.close('lua-initializer-draft')
+        assert(xutils.rmtree(nav_root .. '/' .. prefix))
+        service.refresh(nav_root, options); assert(ok, err)
+    end)
+    spec.it('jumps to Lua member aliases assigned on a global table', function()
+        local prefix = 'luaMemberAlias/'
+        for _, dir in ipairs({ prefix .. 'Core', prefix .. 'Logic' }) do assert(xutils.mkdir_p(nav_root .. '/' .. dir)) end
+        nav_write(prefix .. 'Core/Logger.lua', 'Logger = {}\n'
+            .. 'local function LocalAliasES(fmt, ...)\n    return fmt\nend\n'
+            .. 'local function LocalAliasD(fmt, ...)\n    return fmt\nend\n'
+            .. 'Logger.d = LocalAliasD\n'
+            .. 'Logger.es = LocalAliasES\n'
+            .. 'Logger.es = nil\n'
+            .. 'Logger.es = LocalAliasD\n'
+            .. 'Logger.aliasOnly = LocalAliasES\n'
+            .. 'function Logger.AddLog(msg) return msg end\n')
+        nav_write(prefix .. 'Core/private.lua', 'local Hidden = {}\n'
+            .. 'local function HiddenAliasES(fmt, ...)\n    return fmt\nend\n'
+            .. 'Hidden.es = HiddenAliasES\n')
+        nav_write(prefix .. 'Core/exports.lua', 'local function PublishedAliasES(fmt, ...)\n    return fmt\nend\n'
+            .. 'g_exports.publishedAlias = PublishedAliasES\n')
+        local lines = {
+            'Logger.es("x")',
+            'Logger.d("x")',
+            'Logger.aliasOnly("x")',
+            'Logger.AddLog("x")',
+            'Hidden.es("x")',
+            'aliasOnly("bare")',
+            'g_exports.publishedAlias("x")',
+            'publishedAlias("bare")',
+            'local Logger = {}',
+            'Logger.es("shadowed")',
+        }
+        nav_write(prefix .. 'Logic/caller.lua', table.concat(lines, '\n') .. '\n')
+        local calls = {
+            { line = 0, needle = 'es', file = 'Core/Logger.lua', target = 'LocalAliasD', hits = 1 },
+            { line = 1, needle = 'd', file = 'Core/Logger.lua', target = 'LocalAliasD', hits = 1 },
+            { line = 2, needle = 'aliasOnly', file = 'Core/Logger.lua', target = 'LocalAliasES', hits = 1 },
+            { line = 3, needle = 'AddLog', file = 'Core/Logger.lua', target = 'AddLog(msg)', hits = 1 },
+            { line = 4, needle = 'es', hits = 0 },
+            { line = 5, needle = 'aliasOnly', hits = 0 },
+            { line = 6, needle = 'publishedAlias', file = 'Core/exports.lua', target = 'PublishedAliasES', hits = 1 },
+            { line = 7, needle = 'publishedAlias', file = 'Core/exports.lua', target = 'PublishedAliasES', hits = 1 },
+            { line = 9, needle = 'es', hits = 0 },
+        }
+        local options = { cache_path = nav_root .. '/cache.idx', lister = 'walk' }
+        service.refresh(nav_root, options)
+        local ok, err = pcall(function()
+            local doc = docs.read(nav_root .. '/' .. prefix .. 'Logic/caller.lua')
+            local function jump(session, call)
+                return nav({ method = 'lsp_definition', session = session, uri = doc.uri,
+                    position = { line = call.line, character = assert(lines[call.line + 1]:find(call.needle, 1, true)) - 1 } })
+            end
+            for _, call in ipairs(calls) do
+                local found = jump(nil, call)
+                spec.equal(#found, call.hits, lines[call.line + 1])
+                if call.hits == 1 then
+                    local target = docs.read(nav_root .. '/' .. prefix .. call.file)
+                    local at = assert(target.source:find(call.target, 1, true)) - 1
+                    spec.equal(found[1].uri, target.uri, lines[call.line + 1])
+                    spec.equal(found[1].range.start.line, target:position(at).line, lines[call.line + 1])
+                end
+            end
+            for _, method in ipairs({ 'lsp_references', 'lsp_prepare_calls', 'lsp_implementation' }) do
+                local strict = nav({ method = method, uri = doc.uri,
+                    position = { line = calls[1].line, character = 7 } })
+                spec.truthy(strict == false or #strict == 0, method .. ' must not use navigation candidates')
+            end
+            -- An unsaved defining file publishes its aliases through the same overlay.
+            local session, logger_uri = 'lua-alias-draft', nav_uri(prefix .. 'Core/Logger.lua')
+            navigation.sync({ session = session, open = { [logger_uri] = 1 }, changed = {
+                [logger_uri] = { source = 'Logger = {}\nlocal function DraftAliasES(fmt, ...)\n    return fmt\nend\n'
+                    .. 'Logger.es = DraftAliasES\n', version = 1 } } })
+            local drafted = jump(session, calls[1])
+            spec.equal(#drafted, 1, 'an unsaved alias replaces the disk target')
+            spec.equal(drafted[1].range.start.line, 1, 'the draft declaration is the target')
+            spec.equal(#jump(session, calls[2]), 0, 'a draft masks the aliases it no longer defines')
+            navigation.close(session)
+            spec.equal(#jump(nil, calls[1]), 1, 'closing the draft restores the disk alias')
+        end)
+        navigation.close('lua-alias-draft')
         assert(xutils.rmtree(nav_root .. '/' .. prefix))
         service.refresh(nav_root, options); assert(ok, err)
     end)

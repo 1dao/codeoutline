@@ -550,6 +550,7 @@ function M.add_file(G, rel, rec)
         ids[n] = id
         insert(G, G.by_name, node.name, id, node_before)
         for _, alias in ipairs(lua_bindings.aliases(node, G.lua_global_export_tables)) do insert(G, G.by_name, alias, id, node_before) end
+        for _, alias in ipairs(lua_bindings.member_aliases(node)) do insert(G, G.by_name, alias, id, node_before) end
         insert(G, G.by_lname, node.name:lower(), id, node_before)
         insert(G, G.by_qualified, node.qualified, id, node_before)
         local owner = M.owner(node.qualified)
@@ -568,6 +569,7 @@ function M.remove_file(G, rel)
         local node = G.nodes[id]
         remove(G, G.by_name, node.name, id, node_before)
         for _, alias in ipairs(lua_bindings.aliases(node, G.lua_global_export_tables)) do remove(G, G.by_name, alias, id, node_before) end
+        for _, alias in ipairs(lua_bindings.member_aliases(node)) do remove(G, G.by_name, alias, id, node_before) end
         remove(G, G.by_lname, node.name:lower(), id, node_before)
         remove(G, G.by_qualified, node.qualified, id, node_before)
         local owner = M.owner(node.qualified)

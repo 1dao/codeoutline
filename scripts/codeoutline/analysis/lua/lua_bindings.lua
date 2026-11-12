@@ -3,6 +3,7 @@ local M = {}
 local control = require('codeoutline.shared.control')
 local loaders = { require = true, dofile = true, loadfile = true }
 local EXPORT_OWNER = '__exports'
+local EMPTY = {}
 -- Loader call at token j: a known loader name, or any dotted/plain name whose
 -- last segment ends in `import` (`ks.import`, `skynet_import`). Returns the
 -- kind recorded in lua_imports, the callee's last token, and the base name
@@ -42,23 +43,31 @@ local function binding_at(bindings, name, token)
 end
 
 -- A nil-initialized local can receive a module in a sibling if block. Keep
--- possible imports at later uses, and stop on a write we cannot model.
+-- possible imports at later uses, and stop on a write we cannot model. Only the
+-- last write of each branch survives; sibling branches keep their source order.
 local function conditional_hint(bindings, name, base, token, T, offset)
     if not base or not base.nil_local then return nil end
     local writes = bindings[name]
     if #writes > 32 then return nil end
-    local imports = {}
+    local branches, last, seen = {}, {}, {}
     for _, write in ipairs(writes) do
         local finished = token and write.b < token or offset and T.e[write.b] <= offset
         if base.token < write.token and finished then
             if write.assignment then
                 if not write.branch or write.outer ~= base.a then return nil end
-                if write.branch_import then imports[#imports + 1] = write.branch_import end
+                local arm = write.arm or write.a
+                if not seen[arm] then seen[arm], branches[#branches + 1] = true, arm end
+                last[arm] = write
             elseif write.if_local and write.outer == base.a then
                 -- Branch-local declarations can hide a different variable.
                 return nil
             end
         end
+    end
+    local imports = {}
+    for _, scope in ipairs(branches) do
+        local import = last[scope].branch_import
+        if import then imports[#imports + 1] = import end
     end
     if #imports == 1 then return 'lua:' .. imports[1] end
     if #imports > 1 then return 'lua-conditional:' .. table.concat(imports, ',') end
@@ -82,6 +91,11 @@ local function metatable_import(T, bindings, bound)
     return base and tonumber(base.hint:match('^lua:(%d+)$'))
 end
 
+local function declared_local(T, params, token)
+    return T:text(token - 1) == 'local' or params[token] ~= nil
+        or T:text(token - 1) == 'function' and T:text(token - 2) == 'local'
+end
+
 -- Shared lexical table-member lookup for normal references and query-only
 -- configured callback aliases. Results are local parser node indices.
 function M.local_members(nodes, scopes, name, token, scope, finish)
@@ -99,12 +113,23 @@ function M.collect(r, T, bm)
     r.lua_imports, r.lua_exports, r.lua_locals = {}, {}, {}
     local details = not r.defer_analysis and (r.ranges or r.ordinary_bindings)
     local scopes, stack, params, bindings, function_scopes = {}, {}, {}, {}, {}
+    -- Query-only: `then`/`else` do not open a block, so every arm of one `if`
+    -- shares its scope. Arm openings tell sequential writes from alternatives.
+    local arms = {}
     for i = 1, T.n do
         if stack[#stack] and bm[stack[#stack]] == i then stack[#stack] = nil end
         scopes[i] = stack[#stack] or 0
         if bm[i] and bm[i] > i then
             function_scopes[i] = T:text(i) == 'function' or function_scopes[scopes[i]]
             stack[#stack + 1] = i
+        end
+        if details and T.k[i] == 'kw' then
+            local text = T:text(i)
+            if text == 'then' or text == 'else' then
+                local list = arms[scopes[i]]
+                if not list then list = {}; arms[scopes[i]] = list end
+                list[#list + 1] = i
+            end
         end
         if T:text(i) == 'function' and T.k[i] == 'kw' then
             local p = i + 1
@@ -126,22 +151,23 @@ function M.collect(r, T, bm)
         if details then
             local local_decl = T:text(token - 1) == 'local'
             local next = T:text(token + 1)
-            binding.local_declaration = local_decl or params[token] ~= nil
-                or T:text(token - 1) == 'function' and T:text(token - 2) == 'local'
+            binding.local_declaration = declared_local(T, params, token)
             binding.nil_local = local_decl and (next == '=' and T:text(token + 2) == 'nil' and value_end(T, token + 3)
                 or next ~= '=' and next ~= ',' and (T.k[token + 1] ~= 'op' or next == ';'))
             binding.assignment = not local_decl and not params[token] and next == '='
             if T:text(scope) == 'if' then
                 binding.outer = scopes[scope]
                 binding.if_local = local_decl or T:text(token - 2) == 'local' and T:text(token - 1) == 'function'
-                local prev = T:text(token - 1)
                 local index = hint:match('^lua:(%d+)$')
                 local last = index and finish or T:text(token + 2) == 'nil' and token + 2
-                if binding.assignment and last and (prev == 'then' or prev == 'else') then
-                    local tail = T:text(last + 1)
-                    if tail == ';' then tail = T:text(last + 2) end
-                    binding.branch = tail == 'end' or tail == 'elseif' or tail == 'else'
+                -- Any top-level write in the branch counts; the scope check
+                -- already excludes writes nested in a deeper block.
+                if binding.assignment and last and value_end(T, last + 1) then
+                    binding.branch = true
                     binding.branch_import = index
+                    for _, opening in ipairs(arms[scope] or EMPTY) do
+                        if opening < token then binding.arm = opening else break end
+                    end
                 end
             end
         end
@@ -318,20 +344,31 @@ function M.collect(r, T, bm)
             end
         end
     end
+    -- Only a local declaration or parameter hides a project-wide table name.
+    -- `Logger = {}` is a global assignment, so its members stay global aliases.
+    local function local_owner(name, token)
+        local list = bindings[name]
+        if not list then return false end
+        for _, b in ipairs(list) do
+            if b.token <= token and b.a <= token and b.b >= token
+                and declared_local(T, params, b.token) then return true end
+        end
+        return false
+    end
     -- A global alias is a statement of its own: the right-hand side is a bare
     -- identifier and nothing but a separator follows it on that line. The key
     -- is dotted (`g_exports.name`) or a literal (`g_exports['name']`).
     local globals, definitions = {}, {}
     for index, n in ipairs(r.nodes) do
         local owner, key = n.qualified:match('^([%a_][%w_]*)[.:]([%a_][%w_]*)$')
-        if owner and not bindings[owner] and not n.parent and (n.kind == 'function' or n.kind == 'method') then
+        if owner and not local_owner(owner, n.ti) and not n.parent and (n.kind == 'function' or n.kind == 'method') then
             definitions[n.ti] = { owner = owner, key = key, index = index }
         end
     end
     for i = 1, T.n - 4 do
         if i % 4096 == 0 then control.check() end
         local owner = T:text(i)
-        if T.k[i] == 'id' and not bindings[owner] and T:text(i - 1) ~= '.' and T:text(i - 1) ~= ':' then
+        if T.k[i] == 'id' and not local_owner(owner, i) and T:text(i - 1) ~= '.' and T:text(i - 1) ~= ':' then
             local key, eq
             if T:text(i + 1) == '.' and T.k[i + 2] == 'id' then key, eq = T:text(i + 2), i + 3
             elseif T:text(i + 1) == '[' and T.m[i + 1] == i + 3 and T.k[i + 2] == 'str' then key, eq = literal(T, i + 2), i + 4 end
@@ -515,7 +552,6 @@ function M.context(G)
     return ctx
 end
 -- Project-selected aliases share the normal name index and overlay path.
-local EMPTY = {}
 function M.aliases(node, owners)
     if not node.lua_aliases then return EMPTY end
     local names, seen = {}, {}
@@ -533,6 +569,29 @@ function M.exported(node, name, owners)
     for _, owner in ipairs(owners) do
         for _, alias in ipairs(node.lua_aliases[owner] or EMPTY) do if alias == name then return true end end
     end
+    return false
+end
+-- A member alias is only nameable through its owner (`Logger.es`), so it never
+-- publishes the bare key. Direct definitions already carry the dotted name.
+function M.member_aliases(node)
+    if not node.lua_aliases then return EMPTY end
+    local names, seen = {}, {}
+    for owner, keys in pairs(node.lua_aliases) do
+        for _, name in ipairs(keys) do
+            local qualified = owner .. '.' .. name
+            if name ~= node.name and not seen[qualified] then
+                names[#names + 1], seen[qualified] = qualified, true
+            end
+        end
+    end
+    table.sort(names)
+    return names
+end
+function M.member_alias(node, qualified)
+    if not node.lua_aliases or not qualified then return false end
+    local owner, name = qualified:match('^([%a_][%w_]*)%.([%a_][%w_]*)$')
+    if not owner then return false end
+    for _, alias in ipairs(node.lua_aliases[owner] or EMPTY) do if alias == name then return true end end
     return false
 end
 function M.modules(G, imp, ctx)

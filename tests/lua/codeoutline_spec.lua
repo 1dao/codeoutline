@@ -4226,6 +4226,37 @@ return M
             spec.nil_value(replaced.nodes[1].lua_aliases)
         end
     end)
+    spec.it('indexes Lua member aliases under their dotted global name', function()
+        local G = build({
+            ['Core/Logger.lua'] = 'Logger = {}\nlocal function impl() end\nLogger.es = impl\n'
+                .. 'function Logger.AddLog(msg) end\n',
+            ['Logic/caller.lua'] = 'function run() Logger.es("x") end\n',
+        })
+        spec.equal(#G.by_name['Logger.es'], 1)
+        spec.nil_value(G.by_name.es, 'a member alias never publishes the bare key')
+        spec.nil_value(G.by_name['Logger.AddLog'], 'a direct definition adds no duplicate dotted entry')
+        spec.equal(edges_from(G, 'run'), '', 'a member alias stays a navigation candidate, not a call edge')
+        local private = build({
+            ['Core/Logger.lua'] = 'local Logger = {}\nlocal function impl() end\nLogger.es = impl\n',
+        })
+        spec.nil_value(private.by_name['Logger.es'], 'a locally defined table has no global members')
+        local scoped = build({
+            ['Core/Logger.lua'] = 'local function impl() end\nfunction setup()\n    local Logger = {}\nend\n'
+                .. 'Logger.es = impl\n',
+        })
+        spec.equal(#scoped.by_name['Logger.es'], 1, 'an out-of-scope local does not hide the global table')
+        local hidden = build({
+            ['Core/Logger.lua'] = 'Logger = {}\nlocal function impl() end\nfunction setup()\n'
+                .. '    local Logger = {}\n    Logger.es = impl\nend\n',
+        })
+        spec.nil_value(hidden.by_name['Logger.es'], 'a visible local owns the member assignment')
+        local replaced = build({
+            ['Core/Logger.lua'] = 'Logger = {}\nlocal function impl() end\nLogger.es = impl\n'
+                .. 'function Logger.es(msg) end\n',
+        })
+        spec.nil_value(replaced.by_name['Logger.es'], 'a later direct definition overwrites the alias')
+        spec.equal(#replaced.by_name.es, 1)
+    end)
     spec.it('configures global export tables across cached and resident indexes', function()
         local root = tmp_root .. '/global_export_config'
         write(root .. '/exports.lua', 'local function impl() end\ncustom_exports.custom_export = impl\n'

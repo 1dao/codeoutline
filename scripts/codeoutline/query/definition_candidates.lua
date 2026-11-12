@@ -50,6 +50,17 @@ function M.find(G, f, site, ctx, lua_self, lua_initializers)
         elseif site.kind == 'member_call' or site.kind == 'member_symbol' then return {}, info end
     end
     local list, hits, macro_hits = G.by_name[site.name] or {}, {}, {}
+    -- A Lua member alias is only reachable through its dotted name; its bare
+    -- key stays unpublished unless the owner is a configured export table.
+    local dotted = language == 'lua' and qualified and G.by_name[qualified]
+    if dotted and dotted ~= list then
+        local merged, seen = {}, {}
+        for _, id in ipairs(list) do merged[#merged + 1], seen[id] = id, true end
+        for _, id in ipairs(dotted) do
+            if not seen[id] then merged[#merged + 1], seen[id] = id, true end
+        end
+        list = merged
+    end
     local source_dir = G.files[f].path:match('^(.*)/') or ''
     for i = 1, math.min(#list, M.MAX_SCAN) do
         if i % 16 == 0 then control.check() end
@@ -71,14 +82,8 @@ function M.find(G, f, site, ctx, lua_self, lua_initializers)
                 and (g ~= f or site.line and node.line < site.line)
         end
         local name_matches = (node.name == site.name or published) and (normalized(node.qualified) == site.name or published)
-        if qualified then
-            name_matches = normalized(node.qualified) == qualified
-            if not name_matches and language == 'lua' then
-                for _, alias in ipairs(require('codeoutline.analysis.lua.lua_bindings').aliases(node, G.lua_global_export_tables)) do
-                    if normalized(alias) == qualified then name_matches = true; break end
-                end
-            end
-        end
+        local aliased = language == 'lua' and require('codeoutline.analysis.lua.lua_bindings').member_alias(node, qualified)
+        if qualified then name_matches = normalized(node.qualified) == qualified or aliased end
         -- No call sites, private locals, nested functions or unrelated class methods.
         -- Even same-file locals require lexical evidence from the strict resolver.
         -- A lexical self can inherit through runtime metatables. The editor
@@ -89,7 +94,7 @@ function M.find(G, f, site, ctx, lua_self, lua_initializers)
             and callable[parent.kind] and (node.kind == 'function' or node.kind == 'method')
             and graph.owner(parent.qualified) == site.recv and normalized(node.qualified) == qualified
         if lua_method or not lua_self and kind and name_matches and graph.family(rec.language) == graph.family(language)
-            and (not node['local'] or published) and not (node.static and g ~= f)
+            and (not node['local'] or published or aliased) and not (node.static and g ~= f)
             and (not parent or parent.kind == 'namespace' or qualified and types[parent.kind] or initialized_member)
             and (qualified or node.kind ~= 'method' and node.kind ~= 'constructor') then
             local score = g == f and 100 or (rec.path:match('^(.*)/') or '') == source_dir and 20 or 0

@@ -128,6 +128,10 @@ local function view(session, root, include_paths, only)
                 added[alias] = added[alias] or {}
                 added[alias][#added[alias] + 1] = id
             end
+            for _, alias in ipairs(require('codeoutline.analysis.lua.lua_bindings').member_aliases(node)) do
+                added[alias] = added[alias] or {}
+                added[alias][#added[alias] + 1] = id
+            end
         end
         return f
     end

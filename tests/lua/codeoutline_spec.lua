@@ -5273,7 +5273,7 @@ spec.describe('unconfirmed exploration candidates', function()
         local ok, err = pcall(explore.run, G, idx, 'AgentFallbackStart')
         spec.equal(ok, false); spec.contains(tostring(err), 'candidate source changed')
     end)
-    spec.it('retains known Lua bindings and C++ receiver barriers', function()
+    spec.it('offers Lua module member candidates while retaining C++ receiver barriers', function()
         local G, idx = project({
             ['use/start.lua'] = 'local api = require("lib.api")\nfunction AgentBlockedImport() api.AgentMissing() end\n',
             ['lib/api.lua'] = 'local M = {}\nreturn M\n',
@@ -5281,11 +5281,22 @@ spec.describe('unconfirmed exploration candidates', function()
             ['types.hpp'] = 'class AgentA {}; class AgentB { public: void AgentMethod() {} };\n',
             ['use/types.cpp'] = '#include "../types.hpp"\nvoid AgentBlockedReceiver(AgentA *p) { p->AgentMethod(); }\n',
         })
-        for _, name in ipairs({ 'AgentBlockedImport', 'AgentBlockedReceiver' }) do
-            local output, info = explore.run(G, idx, name)
-            spec.equal(#info.unresolved_candidates, 0)
-            spec.nil_value(output:find('## Unconfirmed definition candidates', 1, true))
-        end
+        local output, info = explore.run(G, idx, 'AgentBlockedImport')
+        spec.equal(#info.unresolved_candidates, 1)
+        local group = info.unresolved_candidates[1]
+        spec.equal(group.status, 'unconfirmed')
+        spec.equal(#group.candidates, 1)
+        spec.equal(group.candidates[1].path, 'elsewhere/free.lua')
+        spec.equal(group.candidates[1].status, 'unconfirmed')
+        spec.contains(group.candidates[1].reason, 'binding unconfirmed')
+        spec.contains(output, '## Unconfirmed definition candidates')
+        local Q = graph.query(G)
+        spec.equal(#Q.out[G.by_name.AgentBlockedImport[1]], 0)
+        for _, id in ipairs(G.by_name.AgentMissing) do spec.equal(#Q.inn[id], 0) end
+        -- A class-nested member stays out of reach for an unbound receiver.
+        output, info = explore.run(G, idx, 'AgentBlockedReceiver')
+        spec.equal(#info.unresolved_candidates, 0)
+        spec.nil_value(output:find('## Unconfirmed definition candidates', 1, true))
     end)
     spec.it('offers alternative proxy macro declarations without treating them as calls', function()
         local header = '#ifndef AGENT_PROXY_H\n#define AGENT_PROXY_H\n#define AgentProxy proxy->call\n#endif\n'

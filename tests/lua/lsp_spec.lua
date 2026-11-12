@@ -1324,7 +1324,7 @@ Manager* Factory();
                 .. ' else mod = ' .. second .. ' end\nmod.@@record(1)', 2 },
             { 'unknown', 'local mod\nif a then mod = ' .. first .. ' else mod = unknown() end\nmod.@@record(1)', 0 },
             { 'later_write', 'local mod\nif a then mod = ' .. first .. ' end\nif b then mod = unknown() end\nmod.@@record(1)', 0 },
-            { 'overwritten', 'local mod\nif a then mod = ' .. first .. ' end\nmod = {}\nmod.@@record(1)', 0 },
+            { 'overwritten', 'local mod\nif a then mod = ' .. first .. ' end\nmod = {}\nmod.@@record(1)', 0, nil, true },
             { 'shadowed', 'local mod\nif a then local mod = ' .. first .. ' end\nmod.@@record(1)', 0 },
             { 'before', 'local mod\nmod.@@record(1)\nif a then mod = ' .. first .. ' end', 0 },
             { 'multi_statement', 'local mod = nil\nif enabled then\n    local counter = 0\n    mod = ' .. first
@@ -1357,8 +1357,17 @@ Manager* Factory();
             local offset = assert(case[2]:find('@@', 1, true)) - 1
             local req = { method = 'lsp_definition', uri = doc.uri, position = doc:position(offset) }
             local found = nav(req)
-            spec.equal(#found, case[3], case[1])
-            if case[3] > 0 then
+            if case[3] == 0 then
+                -- The binding is refused. Definition may still offer unconfirmed
+                -- name candidates, but nothing may resolve as a real reference.
+                if case[5] then spec.equal(#found, 0, case[1] .. ' stays silent') end
+                req.method = 'lsp_references'
+                spec.equal(#nav(req), 0, case[1] .. ' must not bind')
+                req.method = 'lsp_prepare_calls'
+                local calls = nav(req)
+                spec.truthy(calls == false or #calls == 0, case[1] .. ' must not create a call edge')
+            else
+                spec.equal(#found, case[3], case[1])
                 local primary = case[4] or 'first.lua'
                 spec.equal(found[1].uri, nav_uri(prefix .. primary), case[1])
                 if case[3] == 2 then spec.equal(found[2].uri, nav_uri(prefix .. 'second.lua')) end
@@ -3062,7 +3071,7 @@ int luaopen_example_empty(lua_State *L) { return 0; }
         for _, dir in ipairs({ 'candidateA', 'candidateB', 'candidateUse' }) do assert(xutils.rmtree(nav_root .. '/' .. dir)) end
         service.refresh(nav_root, options); assert(ok, err)
     end)
-    spec.it('limits candidate sources and preserves Lua import, local and receiver barriers', function()
+    spec.it('limits candidate sources and keeps private Lua locals out of suggestions', function()
         for _, dir in ipairs({ 'candidateLua', 'candidateCpp', 'candidateCaller' }) do assert(xutils.mkdir_p(nav_root .. '/' .. dir)) end
         for i = 1, 10 do nav_write('candidateCpp/f' .. i .. '.c', 'int CandidateMany(void) { return 1; }\n') end
         nav_write('candidateCaller/use.cpp', 'void UseMany() { CandidateMany(); }\n')
@@ -3079,12 +3088,70 @@ int luaopen_example_empty(lua_State *L) { return 0; }
             local result, out = nav({ method = 'lsp_definition', uri = doc.uri, position = { line = 0, character = 19 } })
             spec.equal(#result, 4); spec.equal(out.incomplete, true, 'candidate sources are bounded')
             local lua_doc = docs.read(nav_root .. '/candidateCaller/use.lua')
-            for _, case in ipairs({ { 0, 8, 2 }, { 1, 9, 0 }, { 2, 3, 0 }, { 4, 8, 0 } }) do
-                result = nav({ method = 'lsp_definition', uri = lua_doc.uri, position = { line = case[1], character = case[2] } })
+            -- An unbound or module receiver still gets name candidates; only a
+            -- private local stays silent. None of them may become a binding.
+            for _, case in ipairs({ { 0, 8, 2 }, { 1, 9, 2 }, { 2, 3, 0 }, { 4, 8, 2 } }) do
+                local req = { method = 'lsp_definition', uri = lua_doc.uri, position = { line = case[1], character = case[2] } }
+                result = nav(req)
                 spec.equal(#result, case[3], 'Lua line ' .. case[1])
+                req.method = 'lsp_references'
+                spec.equal(#nav(req), 0, 'Lua line ' .. case[1] .. ' must not bind')
+                if case[3] > 0 then
+                    req.method = 'lsp_hover'
+                    spec.contains(nav(req).contents.value, 'Definition candidate')
+                end
             end
         end)
         for _, dir in ipairs({ 'candidateLua', 'candidateCpp', 'candidateCaller' }) do assert(xutils.rmtree(nav_root .. '/' .. dir)) end
+        service.refresh(nav_root, options); assert(ok, err)
+    end)
+    spec.it('offers bare-name definition candidates when a Lua receiver binding fails', function()
+        local prefix = 'luaFallback/'
+        for _, dir in ipairs({ prefix .. 'Logic', prefix .. 'Other' }) do assert(xutils.mkdir_p(nav_root .. '/' .. dir)) end
+        nav_write(prefix .. 'Logic/NetPlayer.lua', 'local NetPlayer = {}\nfunction NetPlayer:load(uid) end\n'
+            .. 'function NetPlayer:setChannel(a, b, c) end\nfunction NetPlayer:run() self:load(1) end\nreturn NetPlayer\n')
+        nav_write(prefix .. 'Logic/Role.lua', 'local Role = {}\nfunction Role:checkClientVersion(a, b) end\nreturn Role\n')
+        nav_write(prefix .. 'Other/loader.lua', 'local L = {}\nfunction L:load(x) end\nreturn L\n')
+        nav_write(prefix .. 'Logic/private.lua', 'local function hiddenLoad() end\n')
+        local calls = {
+            { 'player:load(1)', 'load', 'Logic/NetPlayer.lua' },
+            { 'player:setChannel(1, 2, 3)', 'setChannel', 'Logic/NetPlayer.lua' },
+            { 'player:checkClientVersion("a", "b")', 'checkClientVersion', 'Logic/Role.lua' },
+            { 'hiddenLoad()', 'hiddenLoad' },
+        }
+        local source = 'local player = data.player\n'
+        for i, call in ipairs(calls) do
+            call.line, call.character = i, assert(call[1]:find(call[2], 1, true)) - 1
+            source = source .. call[1] .. '\n'
+        end
+        nav_write(prefix .. 'Logic/caller.lua', source)
+        local options = { cache_path = nav_root .. '/cache.idx', lister = 'walk' }
+        service.refresh(nav_root, options)
+        local ok, err = pcall(function()
+            local doc = docs.read(nav_root .. '/' .. prefix .. 'Logic/caller.lua')
+            for _, call in ipairs(calls) do
+                local req = { method = 'lsp_definition', uri = doc.uri,
+                    position = { line = call.line, character = call.character } }
+                local found = nav(req)
+                if not call[3] then
+                    spec.equal(#found, 0, call[2] .. ' stays private')
+                else
+                    spec.truthy(#found >= 1, call[2])
+                    local target = docs.read(nav_root .. '/' .. prefix .. call[3])
+                    spec.equal(found[1].uri, target.uri, call[2] .. ' prefers the same directory')
+                    req.method = 'lsp_references'
+                    spec.equal(#nav(req), 0, call[2] .. ' never becomes a reference')
+                    req.method = 'lsp_hover'
+                    spec.contains(nav(req).contents.value, 'Definition candidate')
+                end
+            end
+            local owner = docs.read(nav_root .. '/' .. prefix .. 'Logic/NetPlayer.lua')
+            local at = assert(owner.source:find('self:load', 1, true))
+            local found = nav({ method = 'lsp_definition', uri = owner.uri, position = owner:position(at + 4) })
+            spec.equal(#found, 1, 'self keeps its own receiver path')
+            spec.equal(found[1].range.start.line, 1, 'self')
+        end)
+        for _, dir in ipairs({ prefix .. 'Logic', prefix .. 'Other' }) do assert(xutils.rmtree(nav_root .. '/' .. dir)) end
         service.refresh(nav_root, options); assert(ok, err)
     end)
     spec.it('jumps to Lua members defined inside a same-receiver initializer', function()

@@ -6,25 +6,18 @@ local callable = { ['function'] = true, prototype = true, method = true, constru
 local types = { class = true, struct = true, union = true, interface = true, record = true,
     enum = true, typedef = true }
 local values = { variable = true, constant = true, field = true, enum_member = true }
-local reasons = { ['no indexed target'] = true, ['no eligible target'] = true,
-    ['unresolved c++ name'] = true, ['name/locality match'] = true,
-    ['multiple name/locality candidates'] = true }
 local function normalized(name) return (name:gsub('::', '.'):gsub(':', '.'):gsub('^%.', '')) end
 
+-- An empty answer leaves the editor and the agent nothing to inspect, so a
+-- failed binding still gets name-based suggestions. They remain unconfirmed
+-- candidates: never call edges, references or index data.
 function M.allowed(site)
     if not site or site.decl or not site.name or not site.name:match('^[%a_$][%w_$]*$') then return false end
-    -- Uncertain preprocessing may hide an ordinary function even when the only
-    -- same-name macro is in an unrelated header. Definition suggestions can
-    -- inspect ordinary tags after the macro declaration pass found nothing.
-    -- This does not establish a call edge or permit guessing macro definitions.
-    local macro_unknown = site.kind == 'call' and site.reason == 'unknown or unsupported macro visibility'
-        and (site.macro_state == 'uncertain' or site.macro_state == 'limited')
-    if not macro_unknown and not reasons[site.reason]
-        and not (site.reason or ''):match('^ambiguous name candidates') then return false end
-    -- A known binding that failed is a barrier, not permission to guess another
-    -- imported value, local, receiver type, package, or constructor.
-    if site.evidence ~= nil and site.evidence ~= ''
-        and not (type(site.evidence) == 'string' and site.evidence:match('^cpp:name:')) then return false end
+    -- A table literal declared in this file is a bound receiver, not a failed
+    -- one: its whole contents are visible, so another file's member is a
+    -- different object. A module binding stays eligible because members can be
+    -- attached to it from other files.
+    if type(site.evidence) == 'string' and site.evidence:match('^lua%-local:') then return false end
     return site.kind == 'call' or site.kind == 'ref' or site.kind == 'symbol' or site.kind == 'new'
         or site.kind == 'member_call' or site.kind == 'member_symbol'
 end
@@ -49,7 +42,7 @@ function M.find(G, f, site, ctx, lua_self, lua_initializers)
             qualified = qualified or normalized(site.recv .. '.' .. site.name)
         elseif site.kind == 'member_call' or site.kind == 'member_symbol' then return {}, info end
     end
-    local list, hits, macro_hits = G.by_name[site.name] or {}, {}, {}
+    local list = G.by_name[site.name] or {}
     -- A Lua member alias is only reachable through its dotted name; its bare
     -- key stays unpublished unless the owner is a configured export table.
     local dotted = language == 'lua' and qualified and G.by_name[qualified]
@@ -62,47 +55,62 @@ function M.find(G, f, site, ctx, lua_self, lua_initializers)
         list = merged
     end
     local source_dir = G.files[f].path:match('^(.*)/') or ''
-    for i = 1, math.min(#list, M.MAX_SCAN) do
-        if i % 16 == 0 then control.check() end
-        info.scanned = i
-        local id = list[i]
-        local node, g = G.nodes[id], G.node_file[id]
-        local rec = G.files[g]
-        local parent = node.parent and rec.nodes[node.parent]
-        local published = language == 'lua' and require('codeoutline.analysis.lua.lua_bindings').exported(node, site.name, G.lua_global_export_tables)
-        local kind = site.kind == 'new' and types[node.kind]
-            or site.kind ~= 'new' and (callable[node.kind]
-                or (site.kind == 'symbol' or site.kind == 'member_symbol') and (types[node.kind] or values[node.kind]))
-        -- Unresolved macro visibility can still offer unconfirmed definition
-        -- tags for navigation, including when include paths are configured.
-        -- An explicit undef remains a barrier.
-        if node.kind == 'macro' then
-            kind = site.kind == 'call' and (site.macro_state == 'unseen'
-                or site.macro_state == 'uncertain' or site.macro_state == 'limited')
-                and (g ~= f or site.line and node.line < site.line)
+    -- `bare` drops the receiver qualifier: the member name alone still names a
+    -- definition worth offering, including top-level method definitions.
+    local function scan(qualifier, bare)
+        local hits, macro_hits, scanned = {}, {}, 0
+        for i = 1, math.min(#list, M.MAX_SCAN) do
+            if i % 16 == 0 then control.check() end
+            scanned = i
+            local id = list[i]
+            local node, g = G.nodes[id], G.node_file[id]
+            local rec = G.files[g]
+            local parent = node.parent and rec.nodes[node.parent]
+            local published = language == 'lua' and require('codeoutline.analysis.lua.lua_bindings').exported(node, site.name, G.lua_global_export_tables)
+            local kind = site.kind == 'new' and types[node.kind]
+                or site.kind ~= 'new' and (callable[node.kind]
+                    or (site.kind == 'symbol' or site.kind == 'member_symbol') and (types[node.kind] or values[node.kind]))
+            -- Unresolved macro visibility can still offer unconfirmed definition
+            -- tags for navigation, including when include paths are configured.
+            -- An explicit undef remains a barrier.
+            if node.kind == 'macro' then
+                kind = site.kind == 'call' and (site.macro_state == 'unseen'
+                    or site.macro_state == 'uncertain' or site.macro_state == 'limited')
+                    and (g ~= f or site.line and node.line < site.line)
+            end
+            local name_matches = node.name == site.name or published
+            if not bare then name_matches = name_matches and (normalized(node.qualified) == site.name or published) end
+            local aliased = language == 'lua' and require('codeoutline.analysis.lua.lua_bindings').member_alias(node, qualifier)
+            if qualifier then name_matches = normalized(node.qualified) == qualifier or aliased end
+            -- No call sites, private locals, nested functions or unrelated class
+            -- methods. A class-nested member stays excluded even in the bare
+            -- pass, so an unbound C++ receiver cannot reach another class.
+            -- A lexical self can inherit through runtime metatables. The editor
+            -- can offer method definition tags even without a receiver binding.
+            local lua_method = lua_self and rec.language == 'lua' and node.name == site.name and not parent
+                and not graph.is_decl(node) and (node.kind == 'method' or node.kind == 'function' and graph.owner(node.qualified))
+            local initialized_member = lua_initializers and language == 'lua' and rec.language == 'lua' and site.recv and parent
+                and callable[parent.kind] and (node.kind == 'function' or node.kind == 'method')
+                and graph.owner(parent.qualified) == site.recv and normalized(node.qualified) == qualifier
+            if lua_method or not lua_self and kind and name_matches and graph.family(rec.language) == graph.family(language)
+                and (not node['local'] or published or aliased) and not (node.static and g ~= f)
+                and (not parent or parent.kind == 'namespace' or qualifier and types[parent.kind] or initialized_member)
+                and (qualifier or bare or node.kind ~= 'method' and node.kind ~= 'constructor') then
+                local score = g == f and 100 or (rec.path:match('^(.*)/') or '') == source_dir and 20 or 0
+                if node.kind ~= 'prototype' and not node.decl then score = score + 1 end
+                local bucket = node.kind == 'macro' and macro_hits or hits
+                bucket[#bucket + 1] = { id = id, score = score }
+            end
         end
-        local name_matches = (node.name == site.name or published) and (normalized(node.qualified) == site.name or published)
-        local aliased = language == 'lua' and require('codeoutline.analysis.lua.lua_bindings').member_alias(node, qualified)
-        if qualified then name_matches = normalized(node.qualified) == qualified or aliased end
-        -- No call sites, private locals, nested functions or unrelated class methods.
-        -- Even same-file locals require lexical evidence from the strict resolver.
-        -- A lexical self can inherit through runtime metatables. The editor
-        -- can offer method definition tags even without a receiver binding.
-        local lua_method = lua_self and rec.language == 'lua' and node.name == site.name and not parent
-            and not graph.is_decl(node) and (node.kind == 'method' or node.kind == 'function' and graph.owner(node.qualified))
-        local initialized_member = lua_initializers and language == 'lua' and rec.language == 'lua' and site.recv and parent
-            and callable[parent.kind] and (node.kind == 'function' or node.kind == 'method')
-            and graph.owner(parent.qualified) == site.recv and normalized(node.qualified) == qualified
-        if lua_method or not lua_self and kind and name_matches and graph.family(rec.language) == graph.family(language)
-            and (not node['local'] or published or aliased) and not (node.static and g ~= f)
-            and (not parent or parent.kind == 'namespace' or qualified and types[parent.kind] or initialized_member)
-            and (qualified or node.kind ~= 'method' and node.kind ~= 'constructor') then
-            local score = g == f and 100 or (rec.path:match('^(.*)/') or '') == source_dir and 20 or 0
-            if node.kind ~= 'prototype' and not node.decl then score = score + 1 end
-            local bucket = node.kind == 'macro' and macro_hits or hits
-            bucket[#bucket + 1] = { id = id, score = score }
-        end
+        return hits, macro_hits, scanned
     end
+    local hits, macro_hits, scanned = scan(qualified, false)
+    -- An unbound receiver still names a member. Offer the bare name instead of
+    -- an empty answer, keeping the qualified match authoritative when it hits.
+    if #hits == 0 and #macro_hits == 0 and qualified and not lua_self then
+        hits, macro_hits, scanned = scan(nil, true)
+    end
+    info.scanned = scanned
     -- Ordinary definitions are more useful than unrelated proxy macros.
     if #hits == 0 then hits = macro_hits
     elseif configured then hits = {} end

@@ -1263,6 +1263,41 @@ Manager* Factory();
         spec.truthy(names.base_lookup)
         spec.nil_value(names.dynamic_lookup)
     end)
+    spec.it('resolves Lua module receivers initialized by conditional assignments', function()
+        local prefix = 'lua-conditional-import/'
+        assert(xutils.mkdir_p(nav_root .. '/' .. prefix))
+        nav_write(prefix .. 'first.lua', 'local M = {}\nfunction M.record(value) end\nfunction M.only_first() end\nreturn M\n')
+        nav_write(prefix .. 'second.lua', 'local M = {}\nfunction M.record(value) end\nfunction M.only_second() end\nreturn M\n')
+        local first, second = 'require "lua-conditional-import.first"', 'require "lua-conditional-import.second"'
+        local cases = {
+            { 'guarded', 'local mod\nif enabled then mod = ' .. first .. ' end\nif mod then mod.@@record(1) end', 1 },
+            { 'branches', 'local mod = nil\nif a then mod = ' .. first .. ' elseif b then mod = nil'
+                .. ' else mod = ' .. second .. ' end\nmod.@@record(1)', 2 },
+            { 'unknown', 'local mod\nif a then mod = ' .. first .. ' else mod = unknown() end\nmod.@@record(1)', 0 },
+            { 'later_write', 'local mod\nif a then mod = ' .. first .. ' end\nif b then mod = unknown() end\nmod.@@record(1)', 0 },
+            { 'overwritten', 'local mod\nif a then mod = ' .. first .. ' end\nmod = {}\nmod.@@record(1)', 0 },
+            { 'shadowed', 'local mod\nif a then local mod = ' .. first .. ' end\nmod.@@record(1)', 0 },
+            { 'before', 'local mod\nmod.@@record(1)\nif a then mod = ' .. first .. ' end', 0 },
+        }
+        for _, case in ipairs(cases) do nav_write(prefix .. case[1] .. '.lua', case[2]:gsub('@@', '')) end
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        for _, case in ipairs(cases) do
+            local doc = docs.read(nav_root .. '/' .. prefix .. case[1] .. '.lua')
+            local offset = assert(case[2]:find('@@', 1, true)) - 1
+            local req = { method = 'lsp_definition', uri = doc.uri, position = doc:position(offset) }
+            local found = nav(req)
+            spec.equal(#found, case[3], case[1])
+            if case[3] > 0 then
+                spec.equal(found[1].uri, nav_uri(prefix .. 'first.lua'))
+                if case[3] == 2 then spec.equal(found[2].uri, nav_uri(prefix .. 'second.lua')) end
+                req.method = 'lsp_completion'
+                local labels = {}
+                for _, item in ipairs(nav(req).items) do labels[item.label] = true end
+                spec.truthy(labels.record and labels.only_first, case[1])
+                spec.equal(not not labels.only_second, case[3] == 2, case[1])
+            end
+        end
+    end)
     spec.it('resolves and completes Rust Self across impls with inherent precedence and trait defaults', function()
         local prefix = 'rust-self-shared-lsp/'
         assert(xutils.mkdir_p(nav_root .. '/' .. prefix .. 'src'))
@@ -3628,6 +3663,39 @@ void MacroNavUnknown(void) { MACRO_NAV(3); }
         navigation.close(session)
         spec.contains(draft_hover.contents.value, '---@param functionId number')
         spec.nil_value(draft_hover.contents.value:find('functionId integer', 1, true))
+    end)
+    spec.it('shares Lua definition tags with hover and signature help for typed stubs', function()
+        local stub, caller = 'tip-stubs/native.lua', 'tip-caller/use.lua'
+        assert(xutils.mkdir_p(nav_root .. '/tip-stubs'))
+        assert(xutils.mkdir_p(nav_root .. '/tip-caller'))
+        nav_write(stub, 'do return end\n\n--- brief Start a task.\n--- param task The callback.\n'
+            .. 'function runtime.start(task:function, ...)\nend\n\n'
+            .. '--- brief Fetch the current task.\nfunction runtime.current():Task\nend\n')
+        local source = 'runtime.start(callback, 42)\nruntime.current()\n'
+            .. 'local runtime = {}\nruntime.start(callback, 42)\n'
+        nav_write(caller, source)
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local doc = docs.read(nav_root .. '/' .. caller)
+        local function request(method, line, character)
+            return nav({ method = method, uri = doc.uri, position = { line = line, character = character } })
+        end
+        for line, method in ipairs({ 'start', 'current' }) do
+            local targets = request('lsp_definition', line - 1, 9)
+            spec.equal(#targets, 1, method)
+            spec.equal(targets[1].uri, nav_uri(stub))
+            spec.equal(range_text(stub, targets[1].range), method)
+            local hover = request('lsp_hover', line - 1, 9)
+            spec.contains(hover.contents.value, 'Definition candidate')
+            spec.contains(hover.contents.value, method == 'start' and 'Start a task.' or 'Fetch the current task.')
+        end
+        local signature = request('lsp_signature', 0, assert(source:find('42', 1, true)) - 1)
+        spec.equal(signature.activeParameter, 1)
+        spec.equal(signature.signatures[1].parameters[1].label, 'task:function')
+        spec.equal(signature.signatures[1].parameters[2].label, '...')
+        spec.contains(signature.signatures[1].documentation.value, 'The callback.')
+        spec.equal(request('lsp_hover', 3, 9), false, 'a shadowing local table blocks the tag')
+        spec.equal(request('lsp_signature', 3, 15), false, 'signature help obeys the same binding barrier')
+        spec.equal(request('lsp_prepare_calls', 0, 9), false, 'a tag alone does not establish a call edge')
     end)
     spec.it('shows native documentation comments in hover and signature help for other languages', function()
         local cases = {

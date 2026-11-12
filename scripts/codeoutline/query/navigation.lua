@@ -1187,6 +1187,29 @@ end
 
 local handlers = {}
 
+local function lua_self_member(V, f, c)
+    return c and c.recv == 'self' and V.files[f].language == 'lua'
+        and (c.kind == 'member_call' or c.kind == 'member_symbol')
+end
+
+local function definition_tags(V, f, c)
+    local self_fallback = lua_self_member(V, f, c) and c.evidence and c.evidence:match('^lua%-self:%d+$')
+    local ids, info = require('codeoutline.query.definition_candidates').find(V, f, c, V.js_context, self_fallback)
+    local result, seen, bytes, started, count = {}, {}, 0, os.clock(), 0
+    for _, id in ipairs(ids) do
+        local g = V.node_file[id]
+        local size = V.files[g].size or 0
+        if not seen[g] then
+            if count >= 4 or size > M.MAX_FILE_BYTES or bytes + size > 2 * M.MAX_FILE_BYTES
+                or os.clock() - started >= 0.5 then info.truncated = true; break end
+            seen[g], bytes, count = true, bytes + size, count + 1
+        end
+        local _, hit = locate(V, id)
+        if hit then result[#result + 1] = id end
+    end
+    return result, info.truncated
+end
+
 -- Best-effort idle work: share the exact caches used by navigation, rather
 -- than retaining answers that could outlive a document/configuration change.
 function handlers.lsp_warm(req)
@@ -1269,8 +1292,7 @@ function handlers.lsp_definition(req)
     end
     -- Selecting a loader's member asks for that value, not the imported file.
     if #targets == 0 and c and type(c.evidence) == 'string' and c.evidence:match('^lua%-value:') then return {} end
-    local lua_self = c and c.recv == 'self' and V.files[f].language == 'lua'
-        and (c.kind == 'member_call' or c.kind == 'member_symbol')
+    local lua_self = lua_self_member(V, f, c)
     local importer = false
     if c and not c.decl and not lua_self then
         -- `require`/`dofile` themselves name the file they load, not a same-named project function.
@@ -1297,22 +1319,10 @@ function handlers.lsp_definition(req)
                 return result, info.truncated
             end
         end
-        local self_fallback = lua_self and c.evidence and c.evidence:match('^lua%-self:%d+$')
-        local ids, info = require('codeoutline.query.definition_candidates').find(V, f, c, V.js_context, self_fallback)
-        local result, seen, bytes, started = {}, {}, 0, os.clock()
-        local count = 0
-        for _, id in ipairs(ids) do
-            local g = V.node_file[id]
-            local size = V.files[g].size or 0
-            if not seen[g] then
-                if count >= 4 or size > M.MAX_FILE_BYTES or bytes + size > 2 * M.MAX_FILE_BYTES
-                    or os.clock() - started >= 0.5 then info.truncated = true; break end
-                seen[g], bytes, count = true, bytes + size, count + 1
-            end
-            local target_doc, hit = locate(V, id)
-            if hit then result[#result + 1] = { uri = target_doc.uri, range = target_doc:range(hit.name_start, hit.name_end) } end
-        end
-        return result, info.truncated or V.js_context.include_incomplete or V.js_context.workspace_incomplete
+        local ids, truncated = definition_tags(V, f, c)
+        local result = {}
+        for _, id in ipairs(ids) do result[#result + 1] = (location(V, id)) end
+        return result, truncated or V.js_context.include_incomplete or V.js_context.workspace_incomplete
             or V.js_context.go_incomplete or V.js_context.go_methods_incomplete or V.js_context.cpp_receivers_incomplete or V.js_context.rust_incomplete or V.js_context.receiver_incomplete
     end
     if c.decl and is_decl(V.nodes[targets[1]]) then
@@ -1468,7 +1478,7 @@ function handlers.lsp_signature(req)
         if i % 128 == 0 then control.check() end
         if language == 'lua' and T.k[i] == 'kw' then
             local s = T:text(i)
-            if lua_blocks[s] then
+            if lua_blocks[s] and (s ~= 'function' or T:text(i - 1) ~= ':') then
                 stack[#stack + 1] = { token = i, delimiter = s, block = true, argument = 0 }
             elseif s == 'end' or s == 'until' then
                 while #stack > 0 do if table.remove(stack).block then break end end
@@ -1512,6 +1522,7 @@ function handlers.lsp_signature(req)
     query.position = doc:position(T.s[name_token] - 1)
     local V, _, c, targets, f = at(query)
     if not V or not c or c.decl then return false end
+    if #targets == 0 and language == 'lua' then targets = definition_tags(V, f, c) end
     local signatures, seen = {}, {}
     local function add_signature(node, label, uri, foreign, id)
         if foreign and not seen[foreign.label] then
@@ -1568,8 +1579,11 @@ function handlers.lsp_signature(req)
 end
 
 function handlers.lsp_hover(req)
-    local V, doc, c, targets = at(req)
-    if not V or #targets == 0 then return false end
+    local V, doc, c, targets, f = at(req)
+    if not V then return false end
+    local fallback = #targets == 0 and V.files[f].language == 'lua'
+    if fallback then targets = definition_tags(V, f, c) end
+    if #targets == 0 then return false end
     local parts = {}
     for k, id in ipairs(targets) do
         if k > M.MAX_HOVER then break end
@@ -1579,7 +1593,8 @@ function handlers.lsp_hover(req)
             .. (foreign and foreign.label or M.detail(V, V.node_file[id], node).sig or node.qualified) .. '\n```'
         local documentation = definition_documentation(V, id)
         if documentation then parts[#parts + 1] = documentation.value end
-        parts[#parts + 1] = node.kind .. ' `' .. node.qualified .. '` — ' .. rec.path .. ':' .. node.line
+        parts[#parts + 1] = (fallback and 'Definition candidate · ' or '')
+            .. node.kind .. ' `' .. node.qualified .. '` — ' .. rec.path .. ':' .. node.line
     end
     return { contents = { kind = 'markdown', value = table.concat(parts, '\n\n') }, range = doc:range(c.first, c.last) }
 end

@@ -681,7 +681,9 @@ function Completion:module_members(files, module_name)
             local ids = self.V.id_of[g]
             for n, node in ipairs(rec.nodes) do
                 if node.name == exported and not node.parent then
-                    for _, entry in ipairs(self:members({ ids[n] })) do out[#out + 1] = entry end
+                    for _, entry in ipairs(self:members({ ids[n] })) do
+                        if entry.file == g or not node['local'] then out[#out + 1] = entry end
+                    end
                     break
                 end
             end
@@ -864,6 +866,14 @@ function Completion:entries(target)
     end
     if target.csharp_namespace ~= nil then
         return require('codeoutline.analysis.csharp.csharp_bindings').namespace_members(self.V, self.f, target.csharp_namespace, self.V.js_context)
+    end
+    if target.alternatives then
+        local out = {}
+        for _, alternative in ipairs(target.alternatives) do
+            if self:expired() then break end
+            for _, entry in ipairs(self:module_members(alternative.modules, alternative.module_name)) do out[#out + 1] = entry end
+        end
+        return out
     end
     if target.modules then return self:module_members(target.modules, target.module_name) end
     if target.owner then

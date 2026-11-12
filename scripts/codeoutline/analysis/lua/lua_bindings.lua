@@ -41,6 +41,29 @@ local function binding_at(bindings, name, token)
     return best
 end
 
+-- A nil-initialized local can receive a module in a sibling if block. Keep
+-- possible imports at later uses, and stop on a write we cannot model.
+local function conditional_hint(bindings, name, base, token, T, offset)
+    if not base or not base.nil_local then return nil end
+    local writes = bindings[name]
+    if #writes > 32 then return nil end
+    local imports = {}
+    for _, write in ipairs(writes) do
+        local finished = token and write.b < token or offset and T.e[write.b] <= offset
+        if base.token < write.token and finished then
+            if write.assignment then
+                if not write.branch or write.outer ~= base.a then return nil end
+                if write.branch_import then imports[#imports + 1] = write.branch_import end
+            elseif write.if_local and write.outer == base.a then
+                -- Branch-local declarations can hide a different variable.
+                return nil
+            end
+        end
+    end
+    if #imports == 1 then return 'lua:' .. imports[1] end
+    if #imports > 1 then return 'lua-conditional:' .. table.concat(imports, ',') end
+end
+
 local function metatable_import(T, bindings, bound)
     if not bound then return nil end
     local call = bound.token + 2
@@ -89,7 +112,7 @@ function M.collect(r, T, bm)
             for j = p + 1, (T.m[p] or p) - 1 do if T.k[j] == 'id' then params[j] = i end end
         end
     end
-    local function add(name, token, scope, hint, imported)
+    local function add(name, token, scope, hint, imported, finish)
         bindings[name] = bindings[name] or {}
         -- Reassignment/parameter shadowing must not revive a global name
         -- after a loader value was bound under this lexical name.
@@ -98,7 +121,28 @@ function M.collect(r, T, bm)
                 if b.imported and b.token < token and b.a <= token and b.b >= token then imported = true end
             end
         end
-        bindings[name][#bindings[name] + 1] = { token = token, a = scope, b = bm[scope] or T.n, hint = hint, imported = imported }
+        local binding = { token = token, a = scope, b = bm[scope] or T.n, hint = hint, imported = imported }
+        bindings[name][#bindings[name] + 1] = binding
+        if details then
+            local local_decl = T:text(token - 1) == 'local'
+            local next = T:text(token + 1)
+            binding.nil_local = local_decl and (next == '=' and T:text(token + 2) == 'nil' and value_end(T, token + 3)
+                or next ~= '=' and next ~= ',' and (T.k[token + 1] ~= 'op' or next == ';'))
+            binding.assignment = not local_decl and not params[token] and next == '='
+            if T:text(scope) == 'if' then
+                binding.outer = scopes[scope]
+                binding.if_local = local_decl or T:text(token - 2) == 'local' and T:text(token - 1) == 'function'
+                local prev = T:text(token - 1)
+                local index = hint:match('^lua:(%d+)$')
+                local last = index and finish or T:text(token + 2) == 'nil' and token + 2
+                if binding.assignment and last and (prev == 'then' or prev == 'else') then
+                    local tail = T:text(last + 1)
+                    if tail == ';' then tail = T:text(last + 2) end
+                    binding.branch = tail == 'end' or tail == 'elseif' or tail == 'else'
+                    binding.branch_import = index
+                end
+            end
+        end
     end
     for i = 1, T.n do
         if i % 4096 == 0 then control.check() end
@@ -109,7 +153,7 @@ function M.collect(r, T, bm)
             elseif prev == 'local' or (next == '=' and prev ~= '.' and prev ~= ':' and prev ~= '{' and prev ~= ',') then
                 local hint = '?'
                 if next == '=' and T:text(i + 2) == '{' then hint = 'lua-local:' .. T:text(i) end
-                local kind, call, base
+                local kind, call, base, finish
                 if next == '=' then kind, call, base = loader_call(T, i + 2) end
                 local imported = kind ~= nil
                 if kind then
@@ -130,6 +174,7 @@ function M.collect(r, T, bm)
                                 r.lua_imports[#r.lua_imports + 1] = { path = path, kind = kind,
                                     member = member and T:text(member) or nil }
                                 hint = (member and 'lua-value:' or 'lua:') .. #r.lua_imports
+                                finish = close
                                 if kind == 'loadfile' then hint = '?' end
                                 if member and kind ~= 'loadfile' then
                                     r.refs[#r.refs + 1] = { tok = member, name = T:text(member), kind = 'ref',
@@ -140,7 +185,7 @@ function M.collect(r, T, bm)
                     end
                 end
                 -- Keep ordinary local function/table lookup; block unknown imported receivers.
-                add(T:text(i), i, scopes[i], hint, imported)
+                add(T:text(i), i, scopes[i], hint, imported, finish)
             end
         end
     end
@@ -233,7 +278,8 @@ function M.collect(r, T, bm)
                 local best = binding_at(bindings, ref.recv or ref.name, ref.tok)
                 if best and (ref.recv or best.imported) then
                     local value = best.hint:match('^lua%-value:')
-                    ref.lua_binding = value and (not ref.recv and best.hint or '?') or (ref.recv and best.hint or '?')
+                    local hint = ref.recv and conditional_hint(bindings, ref.recv, best, ref.tok) or best.hint
+                    ref.lua_binding = value and (not ref.recv and hint or '?') or (ref.recv and hint or '?')
                 end
                 if ref.recv == 'self' and not best then ref.lua_binding = '?' end
                 if ref.recv and (T:text(ref.tok - 3) == '.' or T:text(ref.tok - 3) == ':') then ref.lua_binding = '?' end
@@ -542,7 +588,36 @@ local function module_target(G, imp, ctx)
     return { modules = M.modules(G, imp, ctx), module_name = imp.path }
 end
 
+local function imported_target(G, rec, hint, ctx)
+    local index = tonumber(hint:match('^lua:(%d+)$'))
+    if index then
+        local imp = (rec.lua_imports or EMPTY)[index]
+        return imp and module_target(G, imp, ctx)
+    end
+    local branches = hint:match('^lua%-conditional:([%d,]+)$')
+    if not branches then return nil end
+    local alternatives, seen = {}, {}
+    for i in branches:gmatch('%d+') do
+        local imp = rec.lua_imports[tonumber(i)]
+        local key = imp.kind .. '\0' .. imp.path
+        if not seen[key] then
+            seen[key] = true
+            alternatives[#alternatives + 1] = module_target(G, imp, ctx)
+        end
+    end
+    return { alternatives = alternatives }
+end
+
 function M.member(G, target, name)
+    if target and target.alternatives then
+        local result, seen = {}, {}
+        for _, alternative in ipairs(target.alternatives) do
+            for _, entry in ipairs(M.member(G, alternative, name)) do
+                if not seen[entry.node] then seen[entry.node] = true; result[#result + 1] = entry end
+            end
+        end
+        return result
+    end
     local result = {}
     for _, f in ipairs(target and target.modules or {}) do
         local rec = G.files[f]
@@ -579,11 +654,9 @@ function M.receiver(G, rec, T, name, offset, ctx, depth)
         target.lua_self = best.self_info
         return target, true
     end
-    local imported = tonumber(best.hint:match('^lua:(%d+)$'))
-    if imported then
-        local imp = rec.lua_imports[imported]
-        return module_target(G, imp, ctx), true
-    end
+    local hint = conditional_hint(T.lua_bindings, name, best, nil, T, offset) or best.hint
+    local imported = imported_target(G, rec, hint, ctx)
+    if imported then return imported, true end
     local i = best.token + 2
     if best.imported or T:text(best.token + 1) ~= '=' or T.k[i] ~= 'id' then return nil, true end
     local target = M.receiver(G, rec, T, T:text(i), T.s[best.token] - 1, ctx, depth + 1)
@@ -642,16 +715,17 @@ function M.resolve(G, f, name, hint, ctx, recv)
         return n and { G.id_of[f][n] } or {}
     end
     local value = tonumber(hint:match('^lua%-value:(%d+)$'))
-    local index = value or tonumber(hint:match('^lua:(%d+)$'))
-    local imp = index and (G.files[f].lua_imports or {})[index]
-    if not imp then return nil end
-    if value then name = imp.member end
+    local rec = G.files[f]
+    if value then
+        local imp = (rec.lua_imports or EMPTY)[value]
+        if not imp then return nil end
+        name, hint = imp.member, 'lua:' .. value
+    end
+    local target = imported_target(G, rec, hint, ctx)
+    if not target then return nil end
     local result = {}
-    for _, target in ipairs(M.modules(G, imp, ctx)) do
-        local rec = G.files[target]
-        local exports = require('codeoutline.analysis.foreign').exports(rec, 'lua', imp.path) or rec.lua_exports
-        local n = (exports or {})[name]
-        if n then result[#result + 1] = G.id_of[target][n] end
+    for _, entry in ipairs(M.member(G, target, name)) do
+        result[#result + 1] = G.id_of[entry.file][entry.index]
     end
     return result
 end

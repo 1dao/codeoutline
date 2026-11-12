@@ -38,7 +38,8 @@ local function block_matches(T)
     for i = 1, T.n do
         if T.k[i] == 'kw' then
             local t = T:text(i)
-            if OPENS[t] then
+            -- Lua dialect annotations can use the keyword as a type (`cb:function`).
+            if OPENS[t] and (t ~= 'function' or not is(T, i - 1, ':')) then
                 stack[#stack + 1] = i
             elseif t == 'end' or t == 'until' then
                 local top = stack[#stack]
@@ -119,7 +120,7 @@ function M.parse(path, src, language, opts)
 
     for i = 1, T.n do
         local k = T.k[i]
-        if k == 'kw' and T:text(i) == 'function' then
+        if k == 'kw' and T:text(i) == 'function' and not is(T, i - 1, ':') then
             local close = bm[i] or T.n
             local parent = parent_at(i)
             local name, qualified, kind, start, name_tok

@@ -3064,6 +3064,72 @@ int luaopen_example_empty(lua_State *L) { return 0; }
         for _, dir in ipairs({ 'candidateLua', 'candidateCpp', 'candidateCaller' }) do assert(xutils.rmtree(nav_root .. '/' .. dir)) end
         service.refresh(nav_root, options); assert(ok, err)
     end)
+    spec.it('jumps to Lua members defined inside a same-receiver initializer', function()
+        local prefix = 'luaInitializer/'
+        for _, dir in ipairs({ prefix .. 'Data', prefix .. 'Logic' }) do assert(xutils.mkdir_p(nav_root .. '/' .. dir)) end
+        nav_write(prefix .. 'Data/Config.lua', 'if not Config or not Config.table then\n    Config = {}\n    Config.table = {}\nend\n'
+            .. 'function Config.Load(isHotfix)\n    function Config.GetConfigInfo(key)\n        return key\n    end\nend\n')
+        nav_write(prefix .. 'Data/initializers.lua', 'Config = {}\n'
+            .. 'function Config.LoadGlobal()\n    function Config.GetGlobalInfo(key) return key end\nend\n'
+            .. 'function Config.LoadBranch()\n    if enabled then\n        function Config.GetBranchInfo(key) return key end\n    end\nend\n'
+            .. 'function Config.LoadLocal()\n    local Config = {}\n    function Config.GetLocalInfo(key) return key end\nend\n'
+            .. 'function Config.LoadParam(Config)\n    function Config.GetParamInfo(key) return key end\nend\n'
+            .. 'function Config.LoadLocalFn()\n    local function Config() end\n    function Config.GetLocalFnInfo(key) return key end\nend\n'
+            .. 'function Init()\n    function Config.GetUnrelatedInfo(key) return key end\nend\n')
+        local calls = {
+            { 'local awardList = Config.GetConfigInfo("FirstGacha")', 'GetConfigInfo', 'Data/Config.lua', 1 },
+            { 'Config.GetGlobalInfo(1)', 'GetGlobalInfo', 'Data/initializers.lua', 1 },
+            { 'Config.GetBranchInfo(1)', 'GetBranchInfo', 'Data/initializers.lua', 1 },
+            { 'Config.GetLocalInfo(1)', 'GetLocalInfo', 'Data/initializers.lua', 0 },
+            { 'Config.GetParamInfo(1)', 'GetParamInfo', 'Data/initializers.lua', 0 },
+            { 'Config.GetLocalFnInfo(1)', 'GetLocalFnInfo', 'Data/initializers.lua', 0 },
+            { 'Config.GetUnrelatedInfo(1)', 'GetUnrelatedInfo', 'Data/initializers.lua', 0 },
+        }
+        local source = ''
+        for i, call in ipairs(calls) do
+            call.line, call.character = i - 1, assert(call[1]:find(call[2], 1, true)) - 1
+            source = source .. call[1] .. '\n'
+        end
+        nav_write(prefix .. 'Logic/caller.lua', source)
+        local options = { cache_path = nav_root .. '/cache.idx', lister = 'walk' }
+        service.refresh(nav_root, options)
+        local ok, err = pcall(function()
+            local doc = docs.read(nav_root .. '/' .. prefix .. 'Logic/caller.lua')
+            local function jump(session, call)
+                return nav({ method = 'lsp_definition', session = session, uri = doc.uri,
+                    position = { line = call.line, character = call.character } })
+            end
+            for _, call in ipairs(calls) do
+                local found = jump(nil, call)
+                spec.equal(#found, call[4], call[2])
+                if call[4] == 1 then
+                    local target = docs.read(nav_root .. '/' .. prefix .. call[3])
+                    local at = assert(target.source:find('function Config.' .. call[2], 1, true)) + #'function Config.' - 1
+                    spec.equal(found[1].uri, target.uri, call[2])
+                    spec.equal(found[1].range.start.line, target:position(at).line, call[2])
+                    spec.equal(range_text(prefix .. call[3], found[1].range), call[2])
+                end
+            end
+            for _, method in ipairs({ 'lsp_references', 'lsp_prepare_calls', 'lsp_implementation' }) do
+                local strict = nav({ method = method, uri = doc.uri,
+                    position = { line = calls[1].line, character = calls[1].character } })
+                spec.truthy(strict == false or #strict == 0, method .. ' must not use navigation candidates')
+            end
+            local session, config_uri = 'lua-initializer-draft', nav_uri(prefix .. 'Data/Config.lua')
+            navigation.sync({ session = session, open = { [doc.uri] = 1 }, changed = {
+                [doc.uri] = { source = source, version = 1 } } })
+            spec.equal(#jump(session, calls[1]), 1, 'an unsaved caller keeps the initializer member')
+            navigation.sync({ session = session, open = { [doc.uri] = 1, [config_uri] = 1 }, changed = {
+                [config_uri] = { source = 'Config = {}\nfunction Config.Load(isHotfix)\n    local Config = {}\n'
+                    .. '    function Config.GetConfigInfo(key)\n        return key\n    end\nend\n', version = 1 } } })
+            spec.equal(#jump(session, calls[1]), 0, 'an unsaved local receiver shadows the initializer member')
+            navigation.close(session)
+            spec.equal(#jump(nil, calls[1]), 1, 'closing the draft restores the disk definition')
+        end)
+        navigation.close('lua-initializer-draft')
+        assert(xutils.rmtree(nav_root .. '/' .. prefix))
+        service.refresh(nav_root, options); assert(ok, err)
+    end)
     spec.it('keeps inferred language across unknown-suffix bindings, tokens, positions and drafts', function()
         local source = '#include "util.h"\nint UnknownSuffixUse() { return helper(1); }\n'
         nav_write('unknown.fragment', source)

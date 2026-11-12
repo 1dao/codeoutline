@@ -126,6 +126,8 @@ function M.collect(r, T, bm)
         if details then
             local local_decl = T:text(token - 1) == 'local'
             local next = T:text(token + 1)
+            binding.local_declaration = local_decl or params[token] ~= nil
+                or T:text(token - 1) == 'function' and T:text(token - 2) == 'local'
             binding.nil_local = local_decl and (next == '=' and T:text(token + 2) == 'nil' and value_end(T, token + 3)
                 or next ~= '=' and next ~= ',' and (T.k[token + 1] ~= 'op' or next == ';'))
             binding.assignment = not local_decl and not params[token] and next == '='
@@ -580,6 +582,14 @@ function M.modules(G, imp, ctx)
 end
 function M.native_modules(G, name, ctx)
     return require('codeoutline.analysis.foreign').modules(G, 'lua', name, ctx)
+end
+
+function M.has_local_receiver(T, name, offset)
+    for _, binding in ipairs((T.lua_bindings or EMPTY)[name] or EMPTY) do
+        if binding.local_declaration and T.s[binding.token] - 1 <= offset
+            and (binding.a == 0 or offset < T.e[binding.b]) then return true end
+    end
+    return false
 end
 
 -- Shared query-time receiver resolution for completion and navigation. Reuse

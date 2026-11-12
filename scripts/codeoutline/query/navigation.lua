@@ -1194,7 +1194,7 @@ end
 
 local function definition_tags(V, f, c)
     local self_fallback = lua_self_member(V, f, c) and c.evidence and c.evidence:match('^lua%-self:%d+$')
-    local ids, info = require('codeoutline.query.definition_candidates').find(V, f, c, V.js_context, self_fallback)
+    local ids, info = require('codeoutline.query.definition_candidates').find(V, f, c, V.js_context, self_fallback, true)
     local result, seen, bytes, started, count = {}, {}, 0, os.clock(), 0
     for _, id in ipairs(ids) do
         local g = V.node_file[id]
@@ -1205,6 +1205,10 @@ local function definition_tags(V, f, c)
             seen[g], bytes, count = true, bytes + size, count + 1
         end
         local _, hit = locate(V, id)
+        if hit and hit.parent and V.files[g].language == 'lua' then
+            local _, tokens = M.full(V, g)
+            if not tokens or require('codeoutline.analysis.lua.lua_bindings').has_local_receiver(tokens, c.recv, hit.start_byte) then hit = nil end
+        end
         if hit then result[#result + 1] = id end
     end
     return result, info.truncated

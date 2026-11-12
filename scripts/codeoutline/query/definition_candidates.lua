@@ -29,7 +29,7 @@ function M.allowed(site)
         or site.kind == 'member_call' or site.kind == 'member_symbol'
 end
 
-function M.find(G, f, site, ctx, lua_self)
+function M.find(G, f, site, ctx, lua_self, lua_initializers)
     local info = { truncated = site and site.macro_state == 'limited' or false,
         scanned = 0, reason = 'exact name; binding unconfirmed' }
     if not lua_self and not M.allowed(site) then return {}, info end
@@ -85,9 +85,12 @@ function M.find(G, f, site, ctx, lua_self)
         -- can offer method definition tags even without a receiver binding.
         local lua_method = lua_self and rec.language == 'lua' and node.name == site.name and not parent
             and not graph.is_decl(node) and (node.kind == 'method' or node.kind == 'function' and graph.owner(node.qualified))
+        local initialized_member = lua_initializers and language == 'lua' and rec.language == 'lua' and site.recv and parent
+            and callable[parent.kind] and (node.kind == 'function' or node.kind == 'method')
+            and graph.owner(parent.qualified) == site.recv and normalized(node.qualified) == qualified
         if lua_method or not lua_self and kind and name_matches and graph.family(rec.language) == graph.family(language)
             and (not node['local'] or published) and not (node.static and g ~= f)
-            and (not parent or parent.kind == 'namespace' or qualified and (types[parent.kind]))
+            and (not parent or parent.kind == 'namespace' or qualified and types[parent.kind] or initialized_member)
             and (qualified or node.kind ~= 'method' and node.kind ~= 'constructor') then
             local score = g == f and 100 or (rec.path:match('^(.*)/') or '') == source_dir and 20 or 0
             if node.kind ~= 'prototype' and not node.decl then score = score + 1 end

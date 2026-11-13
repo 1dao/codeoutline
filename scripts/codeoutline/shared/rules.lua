@@ -61,6 +61,14 @@ local function definition(r, label)
     result.targetKind = r.targetKind or 'call'
     assert(result.targetKind == 'call' or result.targetKind == 'declaration' or result.targetKind == 'key',
         "invalid " .. label .. '.targetKind')
+    if r.targetPath ~= nil then
+        assert(result.targetKind == 'key' and type(r.targetPath) == 'string' and r.targetPath ~= ''
+            and not r.targetPath:find('[\\:%z\r\n]') and not r.targetPath:match('^/'),
+            label .. '.targetPath must be a project-relative key target path')
+        for part in r.targetPath:gmatch('[^/]+') do
+            assert(part ~= '.' and part ~= '..', label .. '.targetPath must stay inside the project')
+        end
+    end
     if result.targetKind == 'call' then
         call(r, 'target', label); position(r, 'targetArgument', label)
     else
@@ -83,7 +91,7 @@ function M.normalize(config)
     local seen = { definitions = {}, dispatch = {} }
     local function add(consumer, r)
         local fields = consumer == 'dispatch' and { 'kind', 'language', 'call', 'argument', 'register', 'keyArgument', 'handlerArgument', 'serviceArgument' }
-            or { 'language', 'call', 'argument', 'targetKind', 'target', 'targetArgument', 'serviceArgument' }
+            or { 'language', 'call', 'argument', 'targetKind', 'target', 'targetArgument', 'serviceArgument', 'targetPath' }
         local key = {}
         for _, f in ipairs(fields) do key[#key + 1] = tostring(r[f]) end
         if r.qualifiers then

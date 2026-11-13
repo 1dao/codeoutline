@@ -3000,6 +3000,36 @@ int luaopen_example_empty(lua_State *L) { return 0; }
         os.remove(config)
         if not ok then error(err, 0) end
     end)
+    spec.it('limits a configured Lua key to its exact table file and sees draft edits', function()
+        local config = nav_root .. '/.codeoutline.json'
+        local caller, selected, other = 'key_scope_call.lua', 'key_scope_selected.lua', 'key_scope_other.lua'
+        nav_write(caller, 'Settings.get("first_award")\n')
+        nav_write(selected, 'return { ["first_award"] = 1 }\n')
+        nav_write(other, 'return { ["first_award"] = 2 }\n')
+        local rule = '{"kind":"definition","language":"lua","call":"Settings.get","argument":1,"targetKind":"key"'
+        write(config, '{"rules":[' .. rule .. ',"targetPath":"' .. selected .. '"}]}')
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local uri, session = nav_uri(selected), 'scoped-key-draft'
+        local ok, err = pcall(function()
+            local req = { method = 'lsp_definition', session = session, uri = nav_uri(caller), position = { line = 0, character = 16 } }
+            local found = nav(req)
+            spec.equal(#found, 1); spec.equal(found[1].uri, uri)
+            spec.equal(range_text(selected, found[1].range), '"first_award"')
+            navigation.sync({ session = session, open = { [uri] = 1 }, changed = {
+                [uri] = { version = 1, language = 'lua', source = 'return { ["other_award"] = 1 }\n' },
+            } })
+            spec.equal(#nav(req), 0)
+            write(config, '{"rules":[' .. rule .. ',"targetPath":"' .. selected .. '"},'
+                .. rule .. ',"targetPath":"' .. other .. '"}]}')
+            local remaining = nav(req)
+            spec.equal(#remaining, 1); spec.equal(remaining[1].uri, nav_uri(other))
+            write(config, '{"rules":[' .. rule .. ',"targetPath":"../' .. selected .. '"}]}')
+            local valid, failure = pcall(nav, req)
+            spec.equal(valid, false); spec.contains(tostring(failure), 'targetPath must stay inside the project')
+        end)
+        navigation.close(session); os.remove(config)
+        if not ok then error(err, 0) end
+    end)
     spec.it('matches decoded keys and restricts qualifiers to plain table names', function()
         local config = nav_root .. '/.codeoutline.json'
         nav_write('decoded_call.lua', 'lookup("foo")\n')
@@ -3105,6 +3135,49 @@ int luaopen_example_empty(lua_State *L) { return 0; }
         for _, dir in ipairs({ 'candidateLua', 'candidateCpp', 'candidateCaller' }) do assert(xutils.rmtree(nav_root .. '/' .. dir)) end
         service.refresh(nav_root, options); assert(ok, err)
     end)
+    spec.it('offers both member tags when the receiver is unknown and resolves a typed receiver', function()
+        local near, far = 'memberTagsNear/', 'memberTagsFar/'
+        assert(xutils.mkdir_p(nav_root .. '/' .. near)); assert(xutils.mkdir_p(nav_root .. '/' .. far))
+        local cases = {
+            { 'cpp', 'struct %s { void memberTagStamp() {} };',
+                '#include "../memberTagsFar/Clock.cpp"\nvoid run(Clock &known) { clock.memberTagStamp(); known.memberTagStamp(); }' },
+            { 'java', 'class %s { void memberTagStamp() {} }',
+                'class Use { void run(Clock known) { clock.memberTagStamp(); known.memberTagStamp(); } }' },
+            { 'rs', 'struct %s; impl %s { fn memberTagStamp(&self) {} }',
+                'fn run() { clock.memberTagStamp(); }' },
+        }
+        local options = { cache_path = nav_root .. '/cache.idx', lister = 'walk' }
+        for _, case in ipairs(cases) do
+            local ext, declaration, use = table.unpack(case)
+            nav_write(near .. 'Player.' .. ext, declaration:format('Player', 'Player'))
+            nav_write(far .. 'Clock.' .. ext, declaration:format('Clock', 'Clock'))
+            nav_write(near .. 'Use.' .. ext, use)
+        end
+        service.refresh(nav_root, options)
+        local ok, err = pcall(function()
+            for _, case in ipairs(cases) do
+                local ext = case[1]
+                local doc = docs.read(nav_root .. '/' .. near .. 'Use.' .. ext)
+                local function jump(expression)
+                    local at = assert(doc.source:find(expression, 1, true)) + #expression - 1
+                    return nav({ method = 'lsp_definition', uri = doc.uri, position = doc:position(at) })
+                end
+                local found = jump('clock.')
+                local uris = {}
+                for _, item in ipairs(found) do uris[item.uri] = true end
+                spec.equal(#found, 2, ext)
+                spec.truthy(uris[nav_uri(near .. 'Player.' .. ext)])
+                spec.truthy(uris[nav_uri(far .. 'Clock.' .. ext)])
+                if ext ~= 'rs' then
+                    found = jump('known.')
+                    spec.equal(#found, 1, ext)
+                    spec.equal(found[1].uri, nav_uri(far .. 'Clock.' .. ext))
+                end
+            end
+        end)
+        assert(xutils.rmtree(nav_root .. '/' .. near)); assert(xutils.rmtree(nav_root .. '/' .. far))
+        service.refresh(nav_root, options); assert(ok, err)
+    end)
     spec.it('offers bare-name definition candidates when a Lua receiver binding fails', function()
         local prefix = 'luaFallback/'
         for _, dir in ipairs({ prefix .. 'Logic', prefix .. 'Other' }) do assert(xutils.mkdir_p(nav_root .. '/' .. dir)) end
@@ -3113,11 +3186,14 @@ int luaopen_example_empty(lua_State *L) { return 0; }
         nav_write(prefix .. 'Logic/Role.lua', 'local Role = {}\nfunction Role:checkClientVersion(a, b) end\nreturn Role\n')
         nav_write(prefix .. 'Other/loader.lua', 'local L = {}\nfunction L:load(x) end\nreturn L\n')
         nav_write(prefix .. 'Logic/private.lua', 'local function hiddenLoad() end\n')
+        nav_write(prefix .. 'Logic/Player.lua', 'function Player:stamp() end\n')
+        nav_write(prefix .. 'Other/util.lua', 'clockUtil = {}\nfunction clockUtil.stamp() end\n')
         local calls = {
             { 'player:load(1)', 'load', 'Logic/NetPlayer.lua' },
             { 'player:setChannel(1, 2, 3)', 'setChannel', 'Logic/NetPlayer.lua' },
             { 'player:checkClientVersion("a", "b")', 'checkClientVersion', 'Logic/Role.lua' },
             { 'hiddenLoad()', 'hiddenLoad' },
+            { 'clockUtil.stamp()', 'stamp', 'Other/util.lua' },
         }
         local source = 'local player = data.player\n'
         for i, call in ipairs(calls) do
@@ -3135,6 +3211,9 @@ int luaopen_example_empty(lua_State *L) { return 0; }
                 local found = nav(req)
                 if not call[3] then
                     spec.equal(#found, 0, call[2] .. ' stays private')
+                elseif call[2] == 'stamp' then
+                    spec.equal(#found, 1)
+                    spec.equal(found[1].uri, nav_uri(prefix .. call[3]))
                 else
                     spec.truthy(#found >= 1, call[2])
                     local target = docs.read(nav_root .. '/' .. prefix .. call[3])

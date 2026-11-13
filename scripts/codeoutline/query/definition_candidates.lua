@@ -29,18 +29,20 @@ function M.find(G, f, site, ctx, lua_self, lua_initializers)
     local language = G.files[f].language
     -- These languages have package/project visibility that a name-only search
     -- cannot establish. Their existing resolvers retain authority.
-    if language == 'go' or language == 'rust' or language == 'csharp' then return {}, info end
+    local unresolved_receiver = site.reason == 'receiver binding unresolved'
+    if not unresolved_receiver and (language == 'go' or language == 'rust' or language == 'csharp') then return {}, info end
+    if unresolved_receiver then info.reason = 'matching member name; receiver binding unconfirmed' end
     local configured = (language == 'c' or language == 'cpp')
         and require('codeoutline.analysis.cpp.cpp_includes').policy(G, f, ctx).configured
     local qualified
-    if site.evidence and site.evidence ~= '' then qualified = site.evidence:match('^cpp:name:(.-)%z') end
+    if type(site.evidence) == 'string' then qualified = site.evidence:match('^cpp:name:(.-)%z%d+$') end
     qualified = qualified and normalized(qualified)
     if qualified and not qualified:find('.', 1, true) then qualified = nil end
     if not lua_self then
         if site.recv then
             if site.recv == 'self' or site.recv == 'this' or site.recv == 'cls' then return {}, info end
             qualified = qualified or normalized(site.recv .. '.' .. site.name)
-        elseif site.kind == 'member_call' or site.kind == 'member_symbol' then return {}, info end
+        elseif not unresolved_receiver and (site.kind == 'member_call' or site.kind == 'member_symbol') then return {}, info end
     end
     local list = G.by_name[site.name] or {}
     -- A Lua member alias is only reachable through its dotted name; its bare
@@ -82,9 +84,9 @@ function M.find(G, f, site, ctx, lua_self, lua_initializers)
             if not bare then name_matches = name_matches and (normalized(node.qualified) == site.name or published) end
             local aliased = language == 'lua' and require('codeoutline.analysis.lua.lua_bindings').member_alias(node, qualifier)
             if qualifier then name_matches = normalized(node.qualified) == qualifier or aliased end
-            -- No call sites, private locals, nested functions or unrelated class
-            -- methods. A class-nested member stays excluded even in the bare
-            -- pass, so an unbound C++ receiver cannot reach another class.
+            if bare and unresolved_receiver then name_matches = name_matches and graph.owner(node.qualified) ~= nil end
+            -- Restrict receiver candidates to members and exclude nested
+            -- functions unless they are recognized Lua initializer members.
             -- A lexical self can inherit through runtime metatables. The editor
             -- can offer method definition tags even without a receiver binding.
             local lua_method = lua_self and rec.language == 'lua' and node.name == site.name and not parent
@@ -94,7 +96,9 @@ function M.find(G, f, site, ctx, lua_self, lua_initializers)
                 and graph.owner(parent.qualified) == site.recv and normalized(node.qualified) == qualifier
             if lua_method or not lua_self and kind and name_matches and graph.family(rec.language) == graph.family(language)
                 and (not node['local'] or published or aliased) and not (node.static and g ~= f)
-                and (not parent or parent.kind == 'namespace' or qualifier and types[parent.kind] or initialized_member)
+                and (not parent or parent.kind == 'namespace'
+                    or (qualifier or unresolved_receiver) and (types[parent.kind] or parent.kind == 'impl')
+                    or initialized_member)
                 and (qualifier or bare or node.kind ~= 'method' and node.kind ~= 'constructor') then
                 local score = g == f and 100 or (rec.path:match('^(.*)/') or '') == source_dir and 20 or 0
                 if node.kind ~= 'prototype' and not node.decl then score = score + 1 end
@@ -107,7 +111,7 @@ function M.find(G, f, site, ctx, lua_self, lua_initializers)
     local hits, macro_hits, scanned = scan(qualified, false)
     -- An unbound receiver still names a member. Offer the bare name instead of
     -- an empty answer, keeping the qualified match authoritative when it hits.
-    if #hits == 0 and #macro_hits == 0 and qualified and not lua_self then
+    if #hits == 0 and #macro_hits == 0 and (qualified or unresolved_receiver) and not lua_self then
         hits, macro_hits, scanned = scan(nil, true)
     end
     info.scanned = scanned

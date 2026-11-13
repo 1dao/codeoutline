@@ -294,7 +294,7 @@ end
 
 -- owner: the innermost class of src_id, passed in by resolve_ref when the
 -- ref kind needs it (computed once per ref, not per candidate).
-local function score(G, f, src_id, ref_kind, recv, cid, deps, paired, owner)
+local function score(G, f, ref_kind, cid, deps, paired, owner)
     local c = G.nodes[cid]
     local cf = G.node_file[cid]
     if family(G.files[cf].language) ~= family(G.files[f].language) then return nil end
@@ -302,14 +302,9 @@ local function score(G, f, src_id, ref_kind, recv, cid, deps, paired, owner)
     if not s then return nil end
     local kind = c.kind
     if kind == 'prototype' then s = s - 3 end
-    if ref_kind == 'member_call' and s <= 0 then
-        -- obj.name() on an unknown receiver: binding it to any same-named
-        -- method project-wide (str.format -> some format()) is mostly wrong,
-        -- so only local candidates qualify.
-        return nil
-    elseif ref_kind == 'call' and (G.files[f].language == 'java' or G.files[f].language == 'kotlin') and src_id then
+    if ref_kind == 'call' and owner then
         -- unqualified call inside a class: implicit this
-        if owner and c.parent and G.id_of[cf][c.parent] == owner then s = s + 30 end
+        if c.parent and G.id_of[cf][c.parent] == owner then s = s + 30 end
     end
     return s
 end
@@ -385,8 +380,8 @@ local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired, accept,
         for _, id in ipairs(exact) do if accept[G.nodes[id].kind] then result[#result + 1] = id end end
         return result, #result == 0 and (binding_reason or 'binding target unresolved') or strategy, macro_state
     end
-    if function_value and recv then
-        return {}, 'unresolved function-value receiver'
+    if kind == 'member_call' then
+        return {}, 'receiver binding unresolved', macro_state
     end
     local cands = G.by_name[name]
     if G.files[f].language == 'kotlin' and not recv then
@@ -410,18 +405,14 @@ local function resolve_ref(G, f, src_id, name, kind, recv, deps, paired, accept,
     -- `work`, after which the Python def was filtered out too.)
     local owner = (kind == 'call' and src_id and (G.files[f].language == 'java' or G.files[f].language == 'kotlin'))
         and owner_class(G, src_id) or nil
-    -- score() rejects an unknown-receiver member call to an unrelated file;
-    -- checking placement first skips most candidates of common method names.
-    local local_only = kind == 'member_call'
     local n, has_def, has_name = 0, false, false
     for i = 1, math.min(#cands, M.MAX_CANDIDATES) do
         local cid = cands[i]
         local node = G.nodes[cid]
         if cid ~= src_id and accept[node.kind]
             and (G.files[f].language ~= 'lua' or not node['local'] or G.node_file[cid] == f
-                or lua_bindings.exported(node, name, G.lua_global_export_tables))
-            and (not local_only or (locality(G, f, G.node_file[cid], node, deps, paired) or 0) > 0) then
-            local s = score(G, f, src_id, kind, recv, cid, deps, paired, owner)
+                or lua_bindings.exported(node, name, G.lua_global_export_tables)) then
+            local s = score(G, f, kind, cid, deps, paired, owner)
             if s then
                 n = n + 1
                 scored_ids[n], scored_vals[n] = cid, s

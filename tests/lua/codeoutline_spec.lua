@@ -735,7 +735,7 @@ spec.describe('review regressions', function()
     local graph_mod = require('codeoutline.analysis.graph')
     local function build(files)
         local idx = { files = {}, generation = 1 }
-        for p, s in pairs(files) do idx.files[p] = ci.parse(p, s) end
+        for p, s in pairs(files) do idx.files[p] = ci.parse(p, s, { ordinary_bindings = true }) end
         return graph_mod.build(idx)
     end
     local function all_edges(G)
@@ -5238,6 +5238,21 @@ spec.describe('unconfirmed exploration candidates', function()
         return graph.build({ files = records }), { root = tmp_root,
             query_source = function(_, path) return assert(files[path]), false end }
     end
+    spec.it('reports unknown member receivers as candidates without creating call edges', function()
+        local G, idx = project({
+            ['use/start.cpp'] = 'void AgentMemberStart() { clock.stamp(); }\n',
+            ['use/player.cpp'] = 'struct Player { void stamp() {} };\n',
+            ['util/clock.cpp'] = 'struct Clock { void stamp() {} };\n',
+        })
+        local _, info = explore.run(G, idx, 'AgentMemberStart')
+        local group = assert(info.unresolved_candidates[1])
+        spec.equal(group.resolution_reason, 'receiver binding unresolved')
+        spec.equal(#group.candidates, 2)
+        spec.equal(group.candidates[1].qualified, 'Player::stamp')
+        spec.equal(group.candidates[2].qualified, 'Clock::stamp')
+        spec.equal(group.candidates[1].status, 'unconfirmed')
+        spec.equal(#graph.query(G).out[G.by_name.AgentMemberStart[1]], 0)
+    end)
     spec.it('shows distant candidate sources without adding seeds, paths or execution edges', function()
         local G, idx = project({
             ['use/start.cpp'] = 'void AgentFallbackStart() { AgentFallbackTarget(); }\n',

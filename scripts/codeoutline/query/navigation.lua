@@ -224,7 +224,9 @@ local function resolve_site(V, f, from, name, kind, recv, evidence, offset, inde
     end
     -- The resolver never binds a ref to its enclosing node, which hides recursion.
     local receiver_bound = recv and evidence and evidence ~= '' or reason and reason:match('^receiver:')
-    if #targets == 0 and not receiver_bound and reason ~= 'unknown or unsupported macro visibility' and src and V.nodes[src].name == name and (kind == 'call' or recursive(V.nodes[src], recv)) then
+    if #targets == 0 and not receiver_bound and reason ~= 'unknown or unsupported macro visibility'
+        and reason ~= 'receiver binding unresolved' and src and V.nodes[src].name == name
+        and (kind == 'call' or recursive(V.nodes[src], recv)) then
         targets = { src }
     end
     -- Definitions too far apart to choose between: a visible prototype still
@@ -1099,16 +1101,31 @@ local function legacy_definition(V, doc, offset, rules)
         end
     end
     if #calls == 0 and #keys == 0 then return result, false end
-    for _, f in ipairs(V.file_order) do files[#files + 1] = f end
-    for _, f in ipairs(V.new_files) do files[#files + 1] = f end
+    local scoped = #calls == 0
+    local seen_files = {}
+    for _, match in ipairs(keys) do
+        local path = match[1].targetPath
+        if not path then scoped = false; break end
+        local f = V.file_index[path]
+        if f and not seen_files[f] then files[#files + 1] = f; seen_files[f] = true end
+    end
+    if not scoped then
+        files = {}
+        for _, f in ipairs(V.file_order) do files[#files + 1] = f end
+        for _, f in ipairs(V.new_files) do files[#files + 1] = f end
+    end
     table.sort(files, function(a, b) return V.files[a].path < V.files[b].path end)
     for _, f in ipairs(files) do
         control.check()
         if os.clock() > deadline then return result, true end
         if V.files[f].language == 'lua' then
+            local file_keys = {}
+            for _, match in ipairs(keys) do
+                if not match[1].targetPath or match[1].targetPath == V.files[f].path then file_keys[#file_keys + 1] = match end
+            end
             local target = source_doc(V, f)
             if target then
-                local candidate = #keys > 0
+                local candidate = #file_keys > 0
                 for _, match in ipairs(calls) do
                     local tail = match[1].target:match('([%w_]+)$')
                     if target.source:find(tail, 1, true) then candidate = true; break end
@@ -1120,7 +1137,7 @@ local function legacy_definition(V, doc, offset, rules)
                             control.check()
                             if os.clock() > deadline then return result, true end
                         end
-                        local name = call_name(T, i)
+                        local name = #calls > 0 and call_name(T, i)
                         for _, match in ipairs(calls) do
                             if call_matches(name, match[1].target) then
                                 local value, first, last = literal_argument(T, i, match[1].targetArgument)
@@ -1131,10 +1148,10 @@ local function legacy_definition(V, doc, offset, rules)
                                 end
                             end
                         end
-                        if #keys > 0 then
+                        if #file_keys > 0 then
                             local value, owner = key_literal(T, i)
                             if value then
-                                for _, match in ipairs(keys) do
+                                for _, match in ipairs(file_keys) do
                                     if value == match[2] and qualifier_matches(match[1], owner)
                                         and add({ uri = target.uri, range = target:range(T.s[i] - 1, T.e[i]) }) then
                                         return result, true

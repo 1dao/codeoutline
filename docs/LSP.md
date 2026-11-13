@@ -382,7 +382,8 @@ rules must not set `target` or `targetArgument`.
 For key rules `qualifiers` restricts assignments to the named table (`t` in
 `t["name"] = ...`). Only plain table identifiers bind qualifiers;
 `other.t["name"]` does not bind the qualifier `t`. Constructor keys have no owner and only match when
-`qualifiers` is absent.
+`qualifiers` is absent. Set `targetPath` to an exact, project-relative Lua file
+path to search for keys in that file only.
 
 For `kind: "definition"` and legacy `definitionRules`, argument numbers start
 at 1 and count explicit arguments in the source, including

@@ -19,6 +19,10 @@ codeoutline --version
 codeoutline --help
 ```
 
+全局安装后，如需完整卸载，请运行 `codeoutline remove`。它会停止共享服务、
+清理集成和默认用户数据，再卸载 npm 包。npm 默认隐藏安装脚本的输出，
+加上 `--foreground-scripts` 即可在安装时看到卸载提示。
+
 如需在全局安装时对检测到的每个 AI 工具和 Zed、VS Code、Cursor 逐项确认，
 请使用 npm 的前台模式。每项默认安装，随后自动启动共享服务，无需再次执行安装命令：
 

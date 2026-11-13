@@ -23,6 +23,11 @@ codeoutline --version
 codeoutline --help
 ```
 
+To fully uninstall a global npm installation, run `codeoutline remove`. It stops
+the shared service, removes integrations and default user data, and then
+uninstalls the npm package. npm hides the install script's output by default.
+Use `--foreground-scripts` to see the uninstall reminder during setup.
+
 To choose each detected AI tool and Zed, VS Code or Cursor editor during global
 installation, use npm's foreground mode. Each prompt defaults to installation.
 The shared service then starts automatically, without another install command:

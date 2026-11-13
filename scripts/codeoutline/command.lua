@@ -97,9 +97,9 @@ install starts the background service and registers it at login. uninstall
 stops it, removes its login entry, user-level MCP registrations and editor clients.
 --project also removes MCP entries from that project; --service-only keeps integrations.
 --purge additionally removes ~/.codeoutline data after cleanup succeeds.
-Run uninstall before npm uninstall -g codeoutline; npm has no uninstall hooks.
-For npm global installations, remove performs full cleanup with --purge, then
-removes the npm package after the runtime exits. Cleanup failures keep the package.
+To fully uninstall a global npm installation, run codeoutline remove.
+It deletes default user data and removes the npm package after cleanup succeeds.
+To keep user data, run codeoutline uninstall, then npm uninstall -g codeoutline.
 daemon is the service itself.
 editors detects VS Code, Cursor and Zed and offers optional LSP client installation.
 Use --editors or CODEOUTLINE_EDITORS to select clients without a prompt.

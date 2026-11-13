@@ -215,9 +215,24 @@ overlay never writes to the resident tables.
   exhausted source/candidate/time limits report incomplete results.
 - When ordinary definition lookup has insufficient evidence, F12 can suggest
   exact-name symbols in the same language family elsewhere in the project.
-  Explicit qualifications must match; known import/local/receiver barriers,
-  C/C++ include policies and Go/Rust/C# package or project binding remain strict.
-  Suggestions exclude call sites, unrelated private locals and source-file statics.
+  A failed binding is not a barrier: an unresolved import or receiver still
+  gets suggestions, because an empty answer leaves the editor and the agent
+  nothing to inspect. A table literal declared in the same file remains a
+  barrier because its whole contents are visible; a module binding does not,
+  because members can be attached to it from other files. An explicit
+  qualification is matched first, and C/C++ include policies remain
+  authoritative. Rust/C# package or project binding stays strict except for an
+  unresolved receiver; Go keeps its own method-set and package authority.
+  Suggestions exclude call sites, unrelated private locals and source-file
+  statics.
+  An unknown-receiver member call no longer binds a same-named method by
+  locality; it reports an unresolved receiver and offers member-name
+  candidates, including for Rust and C#. The full member name is matched
+  first, and only an empty result retries the member name alone, restricted to
+  nodes with an owner so a free function is never offered for a member call.
+  Class, struct, union, interface, record, enum, typedef and Rust `impl`
+  members qualify. Same-file hits rank first, then same-directory hits. A
+  typed receiver still resolves strictly and returns a single target.
   If no macro declaration is visible and there is no explicit undef or uncertain
   macro state, definition lookup may suggest same-name macro definitions elsewhere
   in the project. If uncertain or exhausted macro analysis yields no macro
@@ -230,8 +245,9 @@ overlay never writes to the resident tables.
   declarations remain available when no implementation is indexed.
   Lookup checks at most 256 same-name entries and selects at most eight targets;
   exact source positions are limited to four files, 2 MiB and a 500 ms soft budget.
-  References, rename, hover, implementations and call hierarchy do not use this
-  fallback. Multiple definition results are candidates for inspection, not proof
+  References, rename, implementations and call hierarchy do not use this
+  fallback; hover and Lua signature help surface the same unconfirmed tags.
+  Multiple definition results are candidates for inspection, not proof
   of a runtime binding.
 - Unresolved bare C/C++ function calls can also navigate to declarations in
   reachable external headers. Lookup follows selected include paths and literal
@@ -241,8 +257,9 @@ overlay never writes to the resident tables.
   External headers are read only when queried; their declarations never enter
   the project index or create call/reference edges. The source-validated FIFO
   holds at most 32 headers/about 8 MiB. Each lookup admits at most 64 external
-  headers, 128 project headers, 4 MiB and a 500ms cooperative budget; known
-  local/receiver binding barriers remain authoritative. Repeated requests check
+  headers, 128 project headers, 4 MiB and a 500ms cooperative budget. Lookup
+  still requires a bare call with no receiver, but a failed binding no longer
+  hides a reachable declaration. Repeated requests check
   source size/checksum before reusing declarations, including same-size edits.
   Microsoft SAL groups and CRT deprecation decorators are parsed as declaration
   annotations, including nested groups before APIs such as `memset` and `memcpy`.

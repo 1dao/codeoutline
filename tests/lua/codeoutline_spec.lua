@@ -1331,6 +1331,89 @@ spec.describe('agent exploration contract', function()
         return graph.build({ files = records }), { root = tmp_root,
             query_source = function(_, path) return assert(files[path]), false end }
     end
+    spec.it('counts named files independently of starting symbols and labels generated outlines', function()
+        local G, idx = project({ ['view.lua'] = 'local font_size = 16\nfunction resize_ui() end\n',
+            ['theme.lua'] = 'local theme_color = 1\n' })
+        local output, info = explore.run(G, idx, 'view.lua')
+        spec.contains(output, 'Matched 0 symbols in 1 files')
+        spec.contains(output, 'Explicitly named files: 1 (top-level outlines).')
+        spec.contains(output, 'Outlines are generated declaration summaries, not source bodies.')
+        spec.contains(output, '## view.lua (outline)')
+        spec.equal(coverage.summarize(info).partial, false)
+        output = explore.run(G, idx, 'view.lua view.lua theme.lua resize_ui')
+        spec.contains(output, 'Matched 1 symbols in 2 files')
+        spec.contains(output, 'Explicitly named files: 2 (top-level outlines).')
+    end)
+    spec.it('shows complete outlines beyond the former sixty-entry limit', function()
+        local lines = {}
+        for i = 1, 61 do lines[i] = 'local outline_value_' .. i .. ' = ' .. i end
+        for _, count in ipairs({ 59, 60, 61 }) do
+            local G, idx = project({ ['view.lua'] = table.concat(lines, '\n', 1, count) .. '\n' })
+            local output, info = explore.run(G, idx, 'view.lua', { budget = 16000 })
+            spec.contains(output, 'outline_value_' .. count)
+            spec.contains(output, string.format('Shown %d/%d top-level declarations.', count, count))
+            local status = coverage.summarize(info)
+            spec.equal(status.output_truncated, false)
+            spec.equal(status.partial, false)
+        end
+    end)
+    spec.it('uses the byte budget for ordered outlines and reports exact omissions', function()
+        local lines = {}
+        for i = 1, 180 do lines[i] = 'local outline_value_' .. i .. ' = ' .. i end
+        local G, idx = project({ ['view.lua'] = table.concat(lines, '\n') .. '\n' })
+        local previous = 0
+        for _, budget in ipairs({ 1400, 4000, 16000 }) do
+            local output, info = explore.run(G, idx, 'view.lua', { budget = budget })
+            local count, total = output:match('Shown (%d+)/(%d+) top%-level declarations%.')
+            count = tonumber(count)
+            spec.equal(tonumber(total), 180)
+            spec.truthy(count > previous); previous = count
+            spec.truthy(#output <= budget)
+            local last, seen = 0, 0
+            for value in output:gmatch('\n%d+\tvariable outline_value_(%d+)') do
+                spec.equal(tonumber(value), last + 1)
+                last, seen = tonumber(value), seen + 1
+            end
+            spec.equal(seen, count)
+            spec.equal(coverage.summarize(info).output_truncated, count < 180)
+            if count < 180 then
+                spec.contains(output, 'Outline entries omitted; refine path:/name: filters')
+            end
+        end
+        spec.equal(previous, 180)
+    end)
+    spec.it('shares outline space across files and retains requested source bodies', function()
+        local lines = {}
+        for i = 1, 180 do lines[i] = 'local outline_value_' .. i .. ' = ' .. i end
+        local source = table.concat(lines, '\n') .. '\nfunction resize_ui() return 42 end\n'
+        local G, idx = project({ ['first.lua'] = source, ['second.lua'] = source })
+        local output, info = explore.run(G, idx, 'first.lua second.lua', { budget = 2400 })
+        local counts = {}
+        for count, total in output:gmatch('Shown (%d+)/(%d+) top%-level declarations%.') do
+            spec.equal(tonumber(total), 181)
+            counts[#counts + 1] = tonumber(count)
+        end
+        spec.equal(#counts, 2)
+        spec.truthy(counts[1] > 0 and counts[2] > 0)
+        spec.truthy(math.abs(counts[1] - counts[2]) <= 1)
+        spec.truthy(#output <= 2400)
+        spec.equal(coverage.summarize(info).output_truncated, true)
+        output = explore.run(G, idx, 'first.lua second.lua resize_ui', { budget = 8000 })
+        spec.contains(output, '## first.lua (outline)')
+        spec.contains(output, '## second.lua (outline)')
+        spec.contains(output, '181\tfunction resize_ui() return 42 end')
+        spec.truthy(#output <= 8000)
+    end)
+    spec.it('bounds very large outlines even with a generous byte budget', function()
+        local lines = {}
+        for i = 1, 1025 do lines[i] = 'local outline_value_' .. i .. ' = ' .. i end
+        local G, idx = project({ ['view.lua'] = table.concat(lines, '\n') .. '\n' })
+        local output, info = explore.run(G, idx, 'view.lua', { budget = 262144 })
+        spec.contains(output, 'Shown 1024/1025 top-level declarations.')
+        spec.equal(output:find('outline_value_1025', 1, true), nil)
+        spec.equal(coverage.summarize(info).output_truncated, true)
+        spec.contains(output, 'Outline entries omitted; refine path:/name: filters')
+    end)
     spec.it('rejects cross-file private Lua names in explore, callers and impact after reload', function()
         local root = tmp_root .. '/private_agent'
         write(root .. '/use.lua', 'function AgentPrivateEntry() AgentPrivateTarget() end\n')

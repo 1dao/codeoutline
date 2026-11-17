@@ -534,10 +534,12 @@ local function run(G, idx, query, opts)
     local nfiles = {}
     for _, id in ipairs(seeds) do nfiles[G.node_file[id]] = true end
     for _, id in ipairs(spine) do nfiles[G.node_file[id]] = true end
+    for _, f in ipairs(named_files) do nfiles[f] = true end
     local nf = 0
     for _ in pairs(nfiles) do nf = nf + 1 end
-    emit(string.format('Matched %d symbols in %d files, %d more on %s between them; short ones bring %s. Source below is verbatim with line numbers; treat it as already Read.',
+    emit(string.format('Matched %d symbols in %d files, %d more on %s between them; short ones bring %s. Source blocks are verbatim with line numbers; treat them as already Read. Outlines are generated declaration summaries, not source bodies.',
         #seeds, nf, #spine, non_call_paths and 'relationship paths' or 'call paths', non_call_paths and 'related functions' or 'their callees'))
+    if #named_files > 0 then emit(string.format('Explicitly named files: %d (top-level outlines).', #named_files)) end
     if #flows > 0 then
         emit(non_call_paths and '\n## Relationship paths' or '\n## Call paths')
         if non_call_paths then emit('ref retains a function value; implementation, event and callback hops are static possibilities, not proof of execution.') end
@@ -626,31 +628,78 @@ local function run(G, idx, query, opts)
             focus[hop.source][#focus[hop.source] + 1] = hop.line
         end
     end
-    local reserve = math.floor(budget * 0.15)     -- keep room for sections 3-4
+    local reserve = #order > 0 and math.floor(budget * 0.15) or 128
+    -- Share outline space a row at a time, so a large first file cannot hide
+    -- the others. Mixed queries also keep space for the requested source bodies.
+    local outline_budget = math.max(0, budget - reserve - used)
+    if #order > 0 then outline_budget = math.floor(outline_budget / 2) end
+    local outlines, outline_order, outline_bytes = {}, {}, 0
+    local outline_hint = 'Outline entries omitted; refine path:/name: filters to inspect specific declarations.'
+    local function outline_status(count, total)
+        return string.format('Shown %d/%d top-level declarations.', count, total)
+    end
+    for _, f in ipairs(file_order) do
+        if by_file[f].outline then
+            local rec, nodes = G.files[f], {}
+            for _, node in ipairs(rec.nodes) do
+                if not node.parent and node.kind ~= 'macro' and require('codeoutline.query.query_filters').node(filters, rec, node) then
+                    nodes[#nodes + 1] = node
+                end
+            end
+            local header = '\n## ' .. rec.path .. ' (outline)\n'
+            local overhead = #header + #outline_status(#nodes, #nodes) + #outline_hint + 3
+            if overhead <= outline_budget then
+                checked_source(idx, rec.path)
+                outlines[f] = { nodes = nodes, rows = {}, header = header }
+                outline_order[#outline_order + 1] = f
+                outline_budget = outline_budget - overhead
+            else omitted = true end
+        end
+    end
+    local progress = true
+    while progress do
+        progress = false
+        for _, f in ipairs(outline_order) do
+            local outline = outlines[f]
+            local node = outline.nodes[#outline.rows + 1]
+            if node and not outline.full then
+                control.check()
+                local row = text.valid(string.format('%d\t%s %s', node.line, node.kind,
+                    require('codeoutline.query.navigation').detail(G, f, node).sig or node.name))
+                if #outline.rows < 1024 and #row + 1 <= outline_budget then
+                    outline.rows[#outline.rows + 1] = row
+                    outline_budget = outline_budget - #row - 1
+                    progress = true
+                else outline.full = true end
+            end
+        end
+    end
+    for _, f in ipairs(outline_order) do
+        local outline = outlines[f]
+        local cut = #outline.rows < #outline.nodes
+        outline.block = outline.header .. outline_status(#outline.rows, #outline.nodes)
+            .. (#outline.rows > 0 and '\n' .. table.concat(outline.rows, '\n') or '')
+            .. (cut and '\n' .. outline_hint or '')
+        omitted = omitted or cut
+        outline_bytes = outline_bytes + #outline.block + 1
+    end
     for _, f in ipairs(file_order) do
         local rec = G.files[f]
         local header = '\n## ' .. rec.path
         local items = by_file[f]
         table.sort(items, function(a, b) return G.nodes[a.id].line < G.nodes[b.id].line end)
         local wrote_header = false
-        if items.outline and used + #header + 16 < budget - reserve then
-            checked_source(idx, rec.path)
-            local ol = {}
-            for _, node in ipairs(rec.nodes) do
-                if not node.parent and node.kind ~= 'macro' and require('codeoutline.query.query_filters').node(filters, rec, node) then
-                    ol[#ol + 1] = string.format('%d\t%s %s', node.line, node.kind, require('codeoutline.query.navigation').detail(G, f, node).sig or node.name)
-                end
-                if #ol >= 60 then ol[#ol + 1] = '\t...'; break end
-            end
-            local block = header .. ' (outline)\n' .. table.concat(ol, '\n')
-            if used + #block < budget - reserve then emit(block, location_refs({ f })); wrote_header = true else omitted = true end
-        elseif items.outline then omitted = true end
+        if outlines[f] then
+            local block = outlines[f].block
+            outline_bytes = outline_bytes - #block - 1
+            emit(block, location_refs({ f })); wrote_header = true
+        end
         for _, item in ipairs(items) do
-            if not shown[item.id] and used + #header + 16 < budget - reserve then
+            if not shown[item.id] and used + #header + 16 < budget - reserve - outline_bytes then
                 local block, source_cut = node_block(G, idx, item.id, item.full, focus[item.id])
                 omitted = omitted or source_cut
                 local need = #block + (wrote_header and 0 or #header + 1) + 1
-                if used + need < budget - reserve then
+                if used + need < budget - reserve - outline_bytes then
                     if not wrote_header then emit(header, location_refs({ f })); wrote_header = true end
                     emit(block, location_refs({ f }))
                     shown[item.id] = true

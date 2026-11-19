@@ -7703,6 +7703,40 @@ spec.describe('disk BM25', function()
         idx:close()
         assert(os.remove(file)); assert(os.remove(cache_file))
     end)
+
+    spec.it('ranks complete text and same-field gaps before truncating the result', function()
+        local indexing = require('codeoutline.indexing.index')
+        local bm25 = require('codeoutline.bm25.index')
+        local root = tmp_root .. '/bm25-distance'
+        local file, cache = tmp_root .. '.bm25-distance', tmp_root .. '.bm25-distance-base'
+        write(root .. '/passages.lua', [[
+function distant() emit('quartz filler and filler lantern') end
+function nearby() emit('quartz lantern filler and filler') end
+function literal() emit('quartz_lantern') end
+function quartzLantern() emit('lantern filler quartz') end
+]])
+        write(root .. '/quartz/remote.lua', "function crossfield() emit('lantern') end\n")
+        local idx = indexing.open(root, {cache_path = cache, lister = 'walk'})
+        idx:refresh_all()
+        bm25.build(idx, file)
+        local query = 'quartz_lantern'
+        local hits = bm25.search(idx, file, query, {match = 'all'})
+        spec.equal(#hits, 5)
+        spec.equal(hits[1].symbol, 'literal')
+        spec.equal(bm25.search(idx, file, query, {match = 'all', limit = 1})[1].symbol, 'literal')
+        spec.equal(bm25.search(idx, file, 'quartz lantern', {match = 'all', limit = 1})[1].symbol, 'nearby')
+        local scores = {}
+        for _, hit in ipairs(hits) do scores[hit.symbol] = hit.score end
+        spec.truthy(scores.quartzLantern > scores.literal)
+        spec.truthy(scores.nearby > scores.distant)
+        local remote = {path = 'quartz'}
+        local quartz = bm25.search(idx, file, 'quartz', remote)[1].score
+        local lantern = bm25.search(idx, file, 'lantern', remote)[1].score
+        spec.truthy(math.abs(scores.crossfield - (quartz + lantern)) < 1e-9)
+        spec.truthy(idx:save())
+        idx:close()
+        assert(os.remove(file)); assert(os.remove(cache))
+    end)
 end)
 
 return {

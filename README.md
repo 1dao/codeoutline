@@ -555,6 +555,9 @@ in the structured MCP result.
 The BM25 fallback matches any query term by default. Pass `bm25Match: "all"`
 to require all tokenized terms in the same function. This option applies
 only to the fallback. The equivalent Lua search option is `match = 'all'`.
+Before taking the top results, the search prioritizes complete literal
+matches and boosts terms separated by fewer words within the same indexed
+field. Queries can still match terms spread across fields.
 
 The editor's F12 uses the regular LSP definition lookup first. On a miss,
 it searches the entire project's BM25 snapshot for the identifier or string

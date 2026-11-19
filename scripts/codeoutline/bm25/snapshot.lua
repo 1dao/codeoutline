@@ -2,8 +2,11 @@
 local indexing = require('codeoutline.indexing.index')
 local paths = require('codeoutline.shared.path')
 local control = require('codeoutline.shared.control')
-local M = {magic = 'CODEOUTLINE-BM25\n'}
-M.prefix = M.magic .. '2\n'
+local M = {magic = 'CODEOUTLINE-BM25\n', version = 3}
+
+function M.prefix(version)
+    return M.magic .. version .. '\n'
+end
 local cache = setmetatable({}, {__mode = 'k'})
 
 function M.stamp(index)
@@ -25,9 +28,10 @@ end
 function M.current(path, stamp)
     local file = io.open(path, 'rb')
     if not file then return false end
-    local prefix = file:read(#M.prefix + #stamp)
+    local expected = M.prefix(M.version) .. stamp
+    local prefix = file:read(#expected)
     file:close()
-    return prefix == M.prefix .. stamp
+    return prefix == expected
 end
 
 -- The background reader validates the disk snapshot against the foreground

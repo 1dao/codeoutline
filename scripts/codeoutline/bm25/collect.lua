@@ -11,27 +11,59 @@ who will with would you your
     stop_words[word] = true
 end
 
-function M.tokenize(text)
+local function scan_words(text, visit)
     text = text:gsub('([A-Z])([A-Z][a-z])', '%1 %2')
     text = text:gsub('([a-z0-9])([A-Z])', '%1 %2'):lower()
-    local counts, length = {}, 0
+    local ordinal = 0
     for group in text:gmatch('[a-z0-9]+') do
         local pos = 1
         while pos <= #group do
             local token = group:match('^[a-z]+', pos) or group:match('^[0-9]+', pos)
             pos = pos + #token
+            ordinal = ordinal + 1
             if not stop_words[token] then
                 local ending = token:sub(-2)
                 if #token > 4 and token:sub(-1) == 's'
                     and ending ~= 'ss' and ending ~= 'us' and ending ~= 'is' then
                     token = token:sub(1, -2)
                 end
-                counts[token] = (counts[token] or 0) + 1
-                length = length + 1
+                if visit(token, ordinal) == false then return end
             end
         end
     end
+end
+
+function M.tokenize(text)
+    local counts, length = {}, 0
+    scan_words(text, function(word)
+        counts[word] = (counts[word] or 0) + 1
+        length = length + 1
+    end)
     return counts, length
+end
+
+-- Smallest window containing every query term, regardless of order.
+-- Positions count stop words so that skipping them does not shrink a gap.
+function M.gap(text, query, needed)
+    local words, positions, counts = {}, {}, {}
+    local left, distinct, best = 1, 0, nil
+    scan_words(text, function(word, position)
+        if not query[word] then return end
+        local right = #words + 1
+        words[right], positions[right] = word, position
+        if not counts[word] or counts[word] == 0 then distinct = distinct + 1 end
+        counts[word] = (counts[word] or 0) + 1
+        while distinct == needed do
+            local gap = position - positions[left] + 1 - needed
+            if not best or gap < best then best = gap end
+            if best == 0 then return false end
+            local first = words[left]
+            counts[first] = counts[first] - 1
+            if counts[first] == 0 then distinct = distinct - 1 end
+            left = left + 1
+        end
+    end)
+    return best
 end
 
 local function line_offsets(source)
@@ -102,12 +134,13 @@ function M.file(abs, rel, size, crc, language, documents)
             if doc:find('%S') then comment_count = comment_count + 1 end
         end
         local fields = {}
-        for field, value in ipairs({name, rel, source:sub(first, last), doc}) do
+        local body = source:sub(first, last)
+        for field, value in ipairs({name, rel, body, doc}) do
             local terms, length = M.tokenize(value)
             fields[field] = {terms, length}
             totals[field] = totals[field] + length
         end
-        encoded[i] = {id, fields}
+        encoded[i] = {id, fields, body, doc}
     end
     return {status = 'parsed', terms = cmsgpack.pack(encoded), totals = totals, comments = comment_count}
 end

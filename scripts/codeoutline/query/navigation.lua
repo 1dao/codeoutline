@@ -1213,9 +1213,9 @@ local function lua_self_member(V, f, c)
         and (c.kind == 'member_call' or c.kind == 'member_symbol')
 end
 
-local function definition_tags(V, f, c)
+local function definition_tags(V, f, c, candidates)
     local self_fallback = lua_self_member(V, f, c) and c.evidence and c.evidence:match('^lua%-self:%d+$')
-    local ids, info = require('codeoutline.query.definition_candidates').find(V, f, c, V.js_context, self_fallback, true)
+    local ids, info = require('codeoutline.query.definition_candidates').find(V, f, c, V.js_context, self_fallback, true, candidates)
     local result, seen, bytes, started, count = {}, {}, 0, os.clock(), 0
     for _, id in ipairs(ids) do
         local g = V.node_file[id]
@@ -1290,9 +1290,7 @@ function handlers.lsp_implementation(req)
     return result, relationships.incomplete
 end
 
-function handlers.lsp_definition(req)
-    local V, doc, c, targets, f, offset = at(req)
-    if not V then return false end
+local function resolved_definition(V, doc, c, targets, f, offset)
     if not c and (V.files[f].language == 'javascript' or V.files[f].language == 'typescript') then
         local events = require('codeoutline.analysis.shared_events').context(V, V.js_context)
         local found, recognized = events.definition(f, offset, doc:position(offset).line + 1)
@@ -1348,7 +1346,7 @@ function handlers.lsp_definition(req)
         local result = {}
         for _, id in ipairs(ids) do result[#result + 1] = (location(V, id)) end
         return result, truncated or V.js_context.include_incomplete or V.js_context.workspace_incomplete
-            or V.js_context.go_incomplete or V.js_context.go_methods_incomplete or V.js_context.cpp_receivers_incomplete or V.js_context.rust_incomplete or V.js_context.receiver_incomplete
+            or V.js_context.go_incomplete or V.js_context.go_methods_incomplete or V.js_context.cpp_receivers_incomplete or V.js_context.rust_incomplete or V.js_context.receiver_incomplete, true
     end
     if c.decl and is_decl(V.nodes[targets[1]]) then
         -- From a declaration, go to its definitions.
@@ -1361,6 +1359,184 @@ function handlers.lsp_definition(req)
     local result = {}
     for _, id in ipairs(targets) do result[#result + 1] = (location(V, id)) end
     return result, V.js_context.include_incomplete or V.js_context.workspace_incomplete or V.js_context.go_incomplete or V.js_context.go_methods_incomplete or V.js_context.cpp_receivers_incomplete or V.js_context.rust_incomplete or V.js_context.receiver_incomplete
+end
+
+local function token_after(T, offset)
+    local low, high = 1, T.n + 1
+    while low < high do
+        local middle = math.floor((low + high) / 2)
+        if T.e[middle] <= offset then low = middle + 1 else high = middle end
+    end
+    return low
+end
+
+local function lexical_literal(T, token, language)
+    if T.k[token] ~= 'str' or T.e[token] - T.s[token] > 1024 then return nil end
+    local value = T:text(token)
+    if language == 'lua' then return string_value(value) end
+    local quote = value:sub(1, 1)
+    if #value >= 2 and (quote == '"' or quote == "'" or quote == '`') and value:sub(-1) == quote then
+        return value:sub(2, -2)
+    end
+    return value
+end
+
+local function thread_post_argument(T, token)
+    for call = token - 1, math.max(1, token - 128), -1 do
+        local close = T.m[call + 1]
+        if close and close > token and call_name(T, call) == 'xthread.post' then
+            local _, first, last = literal_argument(T, call, 2)
+            if first == T.s[token] - 1 and last == T.e[token] then return true end
+        end
+    end
+    return false
+end
+
+local function thread_operation(T, first, last)
+    for i = first, last do
+        if T.k[i] == 'kw' and T:text(i) == 'function' then
+            local open = i + 1
+            while open < last and T:text(open) ~= '(' do open = open + 1 end
+            if T.m[open] and T.k[open + 1] == 'id' and T:text(open + 2) == ','
+                and T.k[open + 3] == 'id' then
+                return T:text(open + 3), T.m[open] + 1
+            end
+            return nil
+        end
+    end
+end
+
+local function lexical_ids(V, hits)
+    local ids, seen = {}, {}
+    for _, hit in ipairs(hits) do
+        control.check()
+        local file = V.file_index[hit.path]
+        for i, id in ipairs(V.id_of[file] or {}) do
+            if i % 128 == 0 then control.check() end
+            local node = V.nodes[id]
+            if not seen[id] and node.kind == hit.kind and node.qualified == hit.symbol
+                and (V.drafts[file] or node.line == hit.start_line) then
+                ids[#ids + 1], seen[id] = id, true
+            end
+        end
+    end
+    return ids
+end
+
+local function lexical_locations(V, ids, query, origin, offset, receivers)
+    local comparisons, other, seen = {}, {}, {}
+    local truncated = false
+    for _, id in ipairs(ids) do
+        control.check()
+        local file = V.node_file[id]
+        local record, draft = V.files[file], V.drafts[file]
+        if receivers and record.language ~= 'lua' then goto next_candidate end
+        if (draft and #draft.source or record.size or 0) > M.MAX_FILE_BYTES then
+            truncated = true
+        else
+            local doc, node = locate(V, id)
+            local _, T
+            if node and node.start_byte and node.end_byte then _, T = M.full(V, file) end
+            if T then
+                local start, stop = token_after(T, node.start_byte), token_after(T, node.end_byte) - 1
+                local operation, in_condition
+                if receivers then
+                    operation, start = thread_operation(T, start, stop)
+                    if not operation then goto next_candidate end
+                end
+                local offsets = seen[file] or {}
+                seen[file] = offsets
+                for i = start, stop do
+                    if i % 128 == 0 then control.check() end
+                    if operation and T.k[i] == 'kw' then
+                        local word = T:text(i)
+                        if word == 'if' or word == 'elseif' then in_condition = true
+                        elseif word == 'then' then in_condition = false end
+                    end
+                    local first, last = T.s[i] - 1, T.e[i]
+                    local comparison
+                    if T.k[i] == 'str' then
+                        comparison = (T:text(i - 1) == '==' and (not operation or T:text(i - 2) == operation))
+                            or (T:text(i + 1) == '==' and (not operation or T:text(i + 2) == operation))
+                    end
+                    if (not operation or in_condition and comparison)
+                        and not offsets[first] and (file ~= origin or offset < first or offset >= last)
+                        and lexical_literal(T, i, record.language) == query then
+                        offsets[first] = true
+                        local matches = comparison and comparisons or other
+                        if #matches < 20 then
+                            matches[#matches + 1] = {uri = doc.uri, range = doc:range(first, last)}
+                        else truncated = true end
+                    end
+                end
+            end
+        end
+        ::next_candidate::
+    end
+    for _, result in ipairs(other) do
+        if #comparisons >= 20 then truncated = true; break end
+        comparisons[#comparisons + 1] = result
+    end
+    return comparisons, truncated
+end
+
+local function lexical_definition(req, V, c, f, offset, deadline, allow_tags)
+    local query = c and c.name
+    local post
+    if not query then
+        local _, T = M.full(V, f)
+        if T then
+            local token = token_after(T, offset)
+            if token <= T.n and T.s[token] - 1 <= offset then
+                local language = V.files[f].language
+                query = lexical_literal(T, token, language)
+                post = query and language == 'lua' and thread_post_argument(T, token)
+            end
+        end
+    end
+    if not query or #query > 256 or not query:find('[%w_]') then return nil end
+    local hits, incomplete = req.bm25_definition(V.idx, query, deadline)
+    if not hits then return {}, incomplete end
+    if post then
+        -- A verified receiver can sit beyond the BM25 result limit. Check the
+        -- existing symbol index for handler declarations anywhere in the project.
+        local receivers, truncated = lexical_locations(V, V.by_name.__thread_handle, query, f, offset, true)
+        if #receivers > 0 then return receivers, incomplete or truncated end
+        incomplete = incomplete or truncated
+    end
+    if #hits == 0 then return {}, incomplete end
+    if c and not allow_tags then return {}, incomplete end
+    local ids = lexical_ids(V, hits)
+    if not c then
+        local locations, truncated = lexical_locations(V, ids, query, f, offset)
+        return locations, incomplete or truncated
+    end
+    local found, truncated = definition_tags(V, f, c, ids)
+    local locations = {}
+    for _, id in ipairs(found) do locations[#locations + 1] = (location(V, id)) end
+    return locations, incomplete or truncated
+end
+
+function handlers.lsp_definition(req)
+    local started = xtimer.now_ms()
+    local V, doc, c, targets, f, offset = at(req)
+    if not V then return false end
+    local primary, incomplete, allow_tags = resolved_definition(V, doc, c, targets, f, offset)
+    if #primary > 0 or not req.bm25_definition then return primary, incomplete end
+    local deadline = math.min(started + 900, xtimer.now_ms() + 250)
+    if xtimer.now_ms() >= deadline then return primary, incomplete end
+    local previous, expired = control.callback, {}
+    control.callback = function()
+        if previous then previous() end
+        if xtimer.now_ms() >= deadline then error(expired, 0) end
+    end
+    local ok, result, limited = pcall(lexical_definition, req, V, c, f, offset, deadline, allow_tags)
+    control.callback = previous
+    if not ok then
+        if result == expired or tostring(result):find('source changed during query', 1, true) then return primary, true end
+        error(result, 0)
+    end
+    return result or primary, incomplete or not not limited, limited == 'bm25_building'
 end
 
 -- Display tags may be truncated before a heavily annotated SDK declaration's
@@ -1752,9 +1928,9 @@ function M.handles(method) return handlers[method] ~= nil end
 
 -- Returns { result = value (false for null), incomplete = bool } or { error = message }.
 function M.execute(req)
-    local result, incomplete = handlers[req.method](req)
+    local result, incomplete, bm25_building = handlers[req.method](req)
     if type(result) == 'table' and result.error then return result end
-    return { result = result, incomplete = incomplete or false }
+    return { result = result, incomplete = incomplete or false, bm25_building = bm25_building or nil }
 end
 
 return M

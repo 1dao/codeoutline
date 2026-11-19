@@ -213,6 +213,30 @@ steps[#steps + 1] = { 'preserves serial mode when parse threads are disabled', f
     idx:close()
 end }
 
+steps[#steps + 1] = { 'builds equivalent BM25 snapshots with and without parse workers', function()
+    local bm25 = require('codeoutline.bm25.index')
+    local serial_file, parallel_file = root .. '/serial.bm25', root .. '/parallel.bm25'
+    local serial_stats = bm25.build(serial, serial_file)
+    spec.equal(alive(), 0)
+    pool.configure('scripts/codeoutline/runtime/parse_worker.lua', 4)
+    local before = delivered
+    local parallel_stats = bm25.build(serial, parallel_file)
+    spec.equal(alive(), 4); spec.truthy(delivered > before)
+    for _, key in ipairs({'files', 'functions', 'comments', 'postings'}) do
+        spec.equal(parallel_stats[key], serial_stats[key])
+    end
+    for _, query in ipairs({'function', 'f101_2', 'main helper'}) do
+        local a, b = bm25.search(serial, serial_file, query), bm25.search(serial, parallel_file, query)
+        spec.equal(#a, #b)
+        for i = 1, #a do
+            for _, field in ipairs({'path', 'symbol', 'start_line', 'end_line', 'score'}) do
+                spec.equal(a[i][field], b[i][field])
+            end
+        end
+    end
+    assert(os.remove(serial_file)); assert(os.remove(parallel_file))
+end }
+
 return {
     __init = function()
         assert(xnet.init())

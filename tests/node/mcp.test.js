@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import { setTimeout as delay } from 'node:timers/promises';
 import http from 'node:http';
 import { pathToFileURL } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -21,6 +22,64 @@ async function fixture() {
     await writeFile(join(project, 'sample.lua'), 'function greet() return "你好世界" end\n');
     return { root, project, cleanup: () => rm(root, { recursive: true, force: true }) };
 }
+
+test('Explore builds a BM25 snapshot in the background and falls back only after a miss', { timeout: 30000 }, async () => {
+    const f = await fixture();
+    const target = join(f.project, 'server', 'entry.lua');
+    const cache = join(f.root, 'base.idx');
+    await mkdir(join(f.project, 'server'));
+    await writeFile(target, '-- amberlantern fogsignal\nfunction deliver_reward() return 42 end\n');
+    await Promise.all(Array.from({ length: 35 }, (_, i) => writeFile(join(f.project, `decoy_${i}.lua`),
+        `function amberlantern_${i}() return "amberlantern" end\n`)));
+    const c = client();
+    const transport = new StdioClientTransport({
+        command: defaultRuntime, args: [main, 'STDIO=1', `PROJECT=${f.project}`], cwd: tmpdir(), stderr: 'pipe',
+        env: { ...process.env, CODEOUTLINE_MEMORY_CACHE: cache },
+    });
+    const query = (text, bm25Match) => c.callTool({ name: 'codeoutline_explore', arguments: { query: text, bm25Match } });
+    async function awaitSnapshot(text) {
+        for (let i = 0; i < 60; i++) {
+            const result = await query(text);
+            assert.equal(result.isError, false, result.content[0].text);
+            if (result.structuredContent.bm25?.state === 'searched') return result;
+            await delay(50);
+        }
+        assert.fail('BM25 snapshot did not become searchable');
+    }
+    try {
+        await c.connect(transport);
+        const phrase = 'path:server lang:lua kind:function amberlantern';
+        const cold = await query(phrase);
+        assert.equal(cold.structuredContent.bm25.state, 'building');
+        assert.ok(cold.structuredContent.coverage.reasons.includes('bm25_building'));
+        assert.match(cold.content[0].text, /BM25 index is being built/);
+        const ordinary = await query('deliver_reward');
+        assert.equal(ordinary.structuredContent.bm25, undefined);
+        assert.match(ordinary.content[0].text, /return 42/);
+        const explicitFile = await query('entry.lua');
+        assert.equal(explicitFile.structuredContent.bm25, undefined);
+        const found = await awaitSnapshot(phrase);
+        assert.equal(found.structuredContent.bm25.matches, 1);
+        assert.match(found.content[0].text, /BM25 fallback matched/);
+        assert.match(found.content[0].text, /function deliver_reward\(\) return 42/);
+        const broad = await query('amberlantern fogsignal');
+        assert.equal(broad.structuredContent.bm25.matches, 20);
+        const strict = await query('amberlantern fogsignal', 'all');
+        assert.deepEqual(strict.structuredContent.bm25, {state: 'searched', matches: 1, match: 'all'});
+        assert.match(strict.content[0].text, /function deliver_reward\(\) return 42/);
+        assert.equal((await query('amberlantern wordnotinfixture', 'all')).structuredContent.bm25.matches, 0);
+        await assert.rejects(query('amberlantern fogsignal', 'unsupported'), /bm25Match/);
+        const excluded = await query('path:server lang:lua kind:method amberlantern');
+        assert.deepEqual(excluded.structuredContent.bm25, { state: 'searched', matches: 0 });
+        await writeFile(target, '-- freshlexicaltoken\nfunction deliver_reward() return 4200 end\n');
+        const next = await query('path:server freshlexicaltoken');
+        assert.equal(next.structuredContent.bm25.state, 'building');
+        const updated = await awaitSnapshot('path:server freshlexicaltoken');
+        assert.match(updated.content[0].text, /return 4200/);
+        const staleTerm = await query('path:server amberlantern');
+        assert.deepEqual(staleTerm.structuredContent.bm25, { state: 'searched', matches: 0 });
+    } finally { await c.close(); await f.cleanup(); }
+});
 
 test('official SDK stdio: discovery, source, incremental refresh, rebuild and errors', { timeout: 30000 }, async () => {
     const f = await fixture();
@@ -408,7 +467,9 @@ test('official SDK Kotlin: kt/kts discovery, aliased call paths and incremental 
         await writeFile(join(f.project, 'Service.kt'), 'package demo\nfun kotlinUpdated() = 17\n');
         const edited = await query('kotlinUpdated');
         assert.match(edited.content[0].text, /return|= 17/);
-        assert.match((await query('kotlinLeaf')).content[0].text, /No symbols matched/);
+        const retired = await query('kotlinLeaf');
+        assert.match(retired.content[0].text, /No symbols matched/);
+        assert.doesNotMatch(retired.content[0].text, /fun kotlinLeaf\(\)/);
     } finally { await c.close(); await f.cleanup(); }
 });
 

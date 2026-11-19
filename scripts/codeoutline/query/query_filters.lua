@@ -54,8 +54,12 @@ function M.file(filters, rec)
     return matches(filters.languages, rec.language, true) and matches(filters.paths, (rec.path:gsub('\\', '/')))
 end
 
+function M.node_fields(filters, rec, kind, qualified)
+    return M.file(filters, rec) and matches(filters.kinds, kind, true) and matches(filters.names, qualified)
+end
+
 function M.node(filters, rec, node)
-    return M.file(filters, rec) and matches(filters.kinds, node.kind, true) and matches(filters.names, node.qualified)
+    return M.node_fields(filters, rec, node.kind, node.qualified)
 end
 
 function M.id(filters, G, id)

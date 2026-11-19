@@ -45,6 +45,8 @@ M.tools = array({
     { name = 'codeoutline_explore', description = 'Query symbols, line-numbered source, call paths and neighbors. Explicit unknown-suffix project file paths are parsed on demand using supported syntax or a lang: hint. Unresolved calls and string commands may include explicitly unconfirmed candidates; these are not call edges and require source inspection. Long bodies preserve relevant call-site windows within the output budget. Optional lang:/kind:/path:/name: filters select starting symbols only; dependencies may cross languages and files. Refreshes automatically.',
         inputSchema = { type = 'object', properties = { projectPath = project,
             query = { type = 'string', minLength = 1, maxLength = 4096 },
+            bm25Match = {type = 'string', enum = array({'any', 'all'}), default = 'any',
+                description = 'When the normal lookup misses, require any or all tokenized query terms in the BM25 fallback.'},
             budget = { type = 'integer', minimum = 256, maximum = 262144, default = 16000 } },
             required = array({ 'query' }), additionalProperties = false } },
     { name = 'codeoutline_status', description = 'Refresh and report project index, cache, scanner and parser statistics.',
@@ -185,7 +187,7 @@ function M.new(config, submit, cancel)
             codeoutline_type_hierarchy = type_hierarchy, codeoutline_type_references = type_references, codeoutline_affected = affected })[tool.name]
         if engine then
             local ok, err = pcall(engine.validate, tool.name == 'codeoutline_affected' and args.files or args.query, { budget = args.budget, depth = args.depth,
-                max_nodes = args.max_nodes, direction = args.direction })
+                max_nodes = args.max_nodes, direction = args.direction, bm25_match = args.bm25Match })
             if not ok then error_result(-32602, tostring(err)); return end
         end
         local token = object(params._meta) and params._meta.progressToken or nil
@@ -205,7 +207,7 @@ function M.new(config, submit, cancel)
             end
             local job, submit_error = submit({ method = tool.name:sub(#'codeoutline_' + 1), projectPath = root,
                 allowedRoots = config.roots, query = args.query, files = args.files, budget = args.budget, depth = args.depth,
-                max_nodes = args.max_nodes, direction = args.direction }, function(ok, value)
+                max_nodes = args.max_nodes, direction = args.direction, bm25_match = args.bm25Match }, function(ok, value)
                 if self.pending[id] ~= p then return end
                 self.pending[id] = nil
                 local output = ok and (engine and value.text or xutils.json_pack(value)) or tostring(value)
@@ -218,6 +220,7 @@ function M.new(config, submit, cancel)
                         metadata.state = metadata.coverage.partial and 'partial' or 'ok'
                         metadata.generation = value.generation
                         metadata.resolution = value.resolution
+                        metadata.bm25 = value.bm25
                     else metadata.error = coverage.error(output) end
                 end
                 result({ content = array({ { type = 'text', text = text.valid(output) } }), isError = not ok,

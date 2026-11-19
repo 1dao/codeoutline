@@ -601,7 +601,9 @@ function M.new(config, emit, submit, cancel, stop, await_worker)
         if value.incomplete then
             if trace then trace:record('limit', { id = id, method = req.method, uri = req.uri,
                 position = req.position, epoch = navigation_epoch }) end
-            local message = req.method == 'lsp_definition'
+            local message = value.bm25_building
+                and 'CodeOutline: building the BM25 definition index in the background; retry shortly'
+                or req.method == 'lsp_definition'
                 and 'CodeOutline: definition lookup reached a candidate, source or visibility limit; some definitions may be omitted'
                 or req.method == 'lsp_references'
                 and 'CodeOutline: results were truncated; too many matching references'

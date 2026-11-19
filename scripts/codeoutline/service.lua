@@ -182,6 +182,12 @@ end
 local function execute_query(engine, root, query, opts)
     engine.validate(query, opts)
     local idx, _, stats = refresh(root, opts, true)
+    if engine == explore and opts and opts.prepare_bm25 then
+        local query_opts = {}
+        for key, value in pairs(opts) do query_opts[key] = value end
+        query_opts.bm25_fallback = opts.prepare_bm25(idx)
+        opts = query_opts
+    end
     idx.query_sources = {}
     local ok, result = pcall(function()
         while true do

@@ -8,13 +8,20 @@ local shared = assert(xshared.dict('codeoutline_control'))
 
 return {
     __thread_handle = function(_, op, owner, token, max_bytes, files)
-        if op ~= 'parse' then return end
+        if op ~= 'parse' and op ~= 'bm25_collect' then return end
         local results = {}
+        local abort_key = 'parse_abort:' .. owner
         local ok, err = pcall(function()
+            local load = op == 'parse' and index.load_file or require('codeoutline.bm25.collect').file
             for i, f in ipairs(files) do
                 -- An abandoned pass (cancelled, failed, shutting down) skips its rest.
-                if shared:get('shutdown') or (shared:get('parse_abort') or 0) >= token then return end
-                local res = index.load_file(f[2], f[1], max_bytes, f[3] or nil, f[4] or nil, f[5] or nil)
+                if shared:get('shutdown') or (shared:get(abort_key) or 0) >= token then return end
+                local res
+                if op == 'parse' then
+                    res = load(f[2], f[1], max_bytes, f[3] or nil, f[4] or nil, f[5] or nil)
+                else
+                    res = load(f[2], f[1], f[3], f[4], f[5], f[6])
+                end
                 res.rel = f[1]
                 results[i] = res
             end

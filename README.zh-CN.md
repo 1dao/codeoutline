@@ -342,6 +342,33 @@ local text, info = service.explore('C:/src/project', 'Session.save', { budget = 
 
 `get`、`explore`、`status` 自动刷新；`forget` 只清除内存索引，`rebuild` 绕过磁盘缓存完整重建；`service.configure` 可调整驻留项目数与空闲时间。嵌入 Android 时，宿主须在启动工作线程前调用一次 `xutils_android_init(JavaVM*)`，否则 GBK 转换会明确报错。
 
+### 磁盘 BM25 搜索
+
+MCP 的 `codeoutline_explore` 在刷新项目基础索引后，会在后台生成缺失或过期的 BM25
+快照。原来的符号和文件查找均无命中时，Explore 用 BM25 补充候选，沿用查询过滤条件，
+并照常返回源码和调用关系。构建期间遇到零命中，结构化结果会报告
+`bm25.state = "building"`，可以稍后重试。
+
+BM25 回退默认允许命中任意查询词。传入 `bm25Match: "all"` 时，只保留同一函数里
+命中全部分词的候选。这个选项只作用于 BM25 回退，对应 Lua 查询选项 `match = 'all'`。
+
+编辑器 F12 优先使用原有的 LSP 定义查找。零命中时，将光标下的标识符或字符串交给
+整个项目的 BM25 快照做分词交集，再用当前源码或编辑器草稿验证声明候选和字符串位置。
+对 Lua `xthread.post` 的事件名，F12 还会核对已索引的接收分支，并优先返回验证过的接收位置。
+快照缺失或过期时，零命中会触发后台构建，构建完成后可再次按 F12。
+
+```lua
+local bm25 = require('codeoutline.bm25.index')
+local idx = service.refresh(project_path)
+bm25.build(idx, bm25_path)
+local hits = bm25.search(idx, bm25_path, 'load cache', { path = 'src', limit = 20 })
+```
+
+索引生成后可重复查询。两个接口都接收刷新过的基础索引。基础记录变化后，查询会提示
+快照过期，直到重新生成。结果返回 `symbol`、`path`、`start_line`、`end_line` 和
+`score`。可用 `path` 按目录或文件过滤，`limit` 默认是 20。生成时复用已配置并
+绑定的索引线程池，独立 Lua 调用可以串行生成。
+
 ## 来源与许可
 
 代码提取自 Codua，命名空间为 `codeoutline.*`。项目采用 [BSD-2-Clause](LICENSE)，第三方依赖声明见 [第三方说明](docs/THIRD_PARTY.md)。

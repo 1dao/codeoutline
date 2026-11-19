@@ -22,7 +22,7 @@ function M.allowed(site)
         or site.kind == 'member_call' or site.kind == 'member_symbol'
 end
 
-function M.find(G, f, site, ctx, lua_self, lua_initializers)
+function M.find(G, f, site, ctx, lua_self, lua_initializers, candidates)
     local info = { truncated = site and site.macro_state == 'limited' or false,
         scanned = 0, reason = 'exact name; binding unconfirmed' }
     if not lua_self and not M.allowed(site) then return {}, info end
@@ -44,10 +44,10 @@ function M.find(G, f, site, ctx, lua_self, lua_initializers)
             qualified = qualified or normalized(site.recv .. '.' .. site.name)
         elseif not unresolved_receiver and (site.kind == 'member_call' or site.kind == 'member_symbol') then return {}, info end
     end
-    local list = G.by_name[site.name] or {}
+    local list = candidates or G.by_name[site.name] or {}
     -- A Lua member alias is only reachable through its dotted name; its bare
     -- key stays unpublished unless the owner is a configured export table.
-    local dotted = language == 'lua' and qualified and G.by_name[qualified]
+    local dotted = not candidates and language == 'lua' and qualified and G.by_name[qualified]
     if dotted and dotted ~= list then
         local merged, seen = {}, {}
         for _, id in ipairs(list) do merged[#merged + 1], seen[id] = id, true end

@@ -11,9 +11,13 @@ local pool = require('codeoutline.indexing.parse_pool')
 require('codeoutline.query.completion') -- registers lsp_completion
 service.configure({ watch = true })
 local shared = assert(xshared.dict('codeoutline_control'))
+local bm25 = shared:get('bm25_worker') and require('codeoutline.bm25.automatic')
 
 local function execute(req)
-    if navigation.handles(req.method) then return navigation.execute(req) end
+    if navigation.handles(req.method) then
+        if bm25 and req.method == 'lsp_definition' then req.bm25_definition = bm25.definition end
+        return navigation.execute(req)
+    end
     if req.method == 'lsp_close' then navigation.close(req.session); return true end
     if req.method == 'lsp_symbols' then
         local result = {}
@@ -62,9 +66,10 @@ local function execute(req)
         return true
     elseif req.method == 'explore' or req.method == 'callers' or req.method == 'type_hierarchy' or req.method == 'type_references' or req.method == 'affected' then
         local text, info = service[req.method](root, req.method == 'affected' and req.files or req.query, { budget = req.budget, depth = req.depth,
-            max_nodes = req.max_nodes, direction = req.direction })
+            max_nodes = req.max_nodes, direction = req.direction, bm25_match = req.bm25_match,
+            prepare_bm25 = req.method == 'explore' and bm25 and bm25.prepare or nil })
         return { text = text, truncated = info.truncated or false, coverage = info.coverage,
-            resolution = info.resolution, generation = info.generation, refresh = info.refresh }
+            resolution = info.resolution, generation = info.generation, refresh = info.refresh, bm25 = info.bm25 }
     elseif req.method == 'status' then return service.status(root)
     elseif req.method == 'rebuild' then return service.rebuild(root)
     else error('unknown operation') end
@@ -140,15 +145,16 @@ return {
     __init = function()
         assert(xnet.init())
         xtimer.init()
-        local threads = tonumber(os.getenv('CODEOUTLINE_INDEX_THREADS') or '') or pool.THREADS
-        pool.configure(scripts .. '/codeoutline/runtime/parse_worker.lua', math.max(0, math.floor(threads)))
+        pool.configure(scripts .. '/codeoutline/runtime/parse_worker.lua', pool.configured_threads())
         assert(xthread.post(1, 'worker_ready'))
     end,
     -- A suspended job still holds its project: sweeping waits for it. Idle
     -- ticks also collect garbage, a step at a time (see service.collect).
     __update = function()
+        if bm25 and bm25.expire_lookup() and active then resume(false); pump() end
         pool.sweep()
         if not active and #queue == 0 then
+            if bm25 then bm25.pump() end
             service.sweep()
             -- Timer callbacks own pending cycles. Retain idle collection for
             -- allocations/dropped projects that happen after a timer finishes.
@@ -170,7 +176,14 @@ return {
         elseif op == 'parsed' then
             -- (token, results, failure); stale tokens are dropped by the pool.
             if pool.receive(id) and active and pool.waiting() then resume(id, req, failure); pump() end
+        elseif op == 'bm25_done' and bm25 then
+            bm25.finish(id, req, failure)
+        elseif op == 'bm25_lookup_done' and bm25 then
+            if bm25.receive_lookup(id) and active then resume(req, failure); pump() end
         end
+        -- Dispatch after foreground processing, even when a project is queried
+        -- by name and will never consult the lexical index in this request.
+        if bm25 and not active and #queue == 0 then bm25.pump() end
     end,
     __uninit = function()
         timer_gc.close()

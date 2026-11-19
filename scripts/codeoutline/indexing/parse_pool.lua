@@ -22,7 +22,7 @@ M.CHUNK_FILES = 32
 M.CHUNK_BYTES = 1048576
 M.IDLE_MS = 60000
 
-local threads, owner, shared = {}, nil, nil
+local threads, owner, shared, abort_key = {}, nil, nil, nil
 local job, waiting, token = nil, false, 0
 local script_path, thread_count
 local outstanding, running, idle_since = {}, false, nil
@@ -36,9 +36,15 @@ function M.configure(script, count)
     script_path, thread_count = script, count or M.THREADS
 end
 
+function M.configured_threads()
+    local count = tonumber(os.getenv('CODEOUTLINE_INDEX_THREADS') or '') or M.THREADS
+    return math.max(0, math.floor(count))
+end
+
 local function start_threads()
     shared = assert(xshared.dict('codeoutline_control'))
     owner = xthread.current_id()
+    abort_key = 'parse_abort:' .. owner
     for i = 1, thread_count do
         local id = M.FIRST_ID + i - 1
         local ok, err = xthread.create_thread(id, 'PARSE' .. i, script_path)
@@ -51,7 +57,7 @@ end
 
 local function stop_threads(reason)
     local started, count, stopped = xtimer.now_ms(), #threads, 0
-    if shared then shared:set('parse_abort', token) end
+    if shared then shared:set(abort_key, token) end
     for _, id in ipairs(threads) do
         local ok, err = xthread.shutdown_thread(id)
         if ok then stopped = stopped + 1
@@ -129,7 +135,7 @@ M.partition = partition
 
 -- jobs: { rel, abs, weight, size?, crc? }; on_result(rel, load_file result)
 -- runs in this thread, in arrival order. Must be called from the bound job.
-function M.run(jobs, max_bytes, on_result)
+function M.run(jobs, max_bytes, on_result, operation)
     assert(M.ready(), 'parse pool is not available here')
     token = token + 1
     local current, pending = token, 0
@@ -142,14 +148,14 @@ function M.run(jobs, max_bytes, on_result)
             local chunk, bytes = {}, 0
             local function flush()
                 if #chunk == 0 then return end
-                local posted, why = xthread.post(threads[i], 'parse', owner, current, max_bytes, chunk)
+                local posted, why = xthread.post(threads[i], operation or 'parse', owner, current, max_bytes, chunk)
                 assert(posted, 'cannot post to parse thread: ' .. tostring(why))
                 pending = pending + 1
                 outstanding[current] = (outstanding[current] or 0) + 1
                 chunk, bytes = {}, 0
             end
             for _, j in ipairs(bucket) do
-                chunk[#chunk + 1] = { j.rel, j.abs, j.size or false, j.crc or false, j.language or false }
+                chunk[#chunk + 1] = { j.rel, j.abs, j.size or false, j.crc or false, j.language or false, j.documents }
                 bytes = bytes + j.weight
                 if #chunk >= M.CHUNK_FILES or bytes >= M.CHUNK_BYTES then flush() end
             end
@@ -181,7 +187,7 @@ function M.run(jobs, max_bytes, on_result)
         xtimer.now_ms() - started)
     if not ok then
         -- Workers skip the rest of this pass; late results carry a stale token.
-        shared:set('parse_abort', current)
+        shared:set(abort_key, current)
         error(err, 0)
     end
 end

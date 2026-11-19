@@ -29,6 +29,8 @@ function M.validate(query, opts)
     assert(text.valid(query) == query, 'query must be valid UTF-8')
     require('codeoutline.query.query_filters').parse(query)
     assert(opts == nil or type(opts) == 'table', 'options must be a table')
+    local match = opts and opts.bm25_match
+    assert(match == nil or match == 'any' or match == 'all', 'bm25Match must be any or all')
     local budget = M.DEFAULT_BUDGET
     if opts and opts.budget ~= nil then budget = opts.budget end
     assert(type(budget) == 'number' and budget >= M.MIN_BUDGET and budget <= M.MAX_BUDGET and budget % 1 == 0,
@@ -431,6 +433,34 @@ end
 
 -- Run a query over symbol tables (graph.build). Returns the text and a table
 -- with what was selected; relationships resolve per query.
+local function bm25_seeds(G, idx, filters, lookup, match)
+    local predicate = require('codeoutline.query.query_filters')
+    local accept
+    if filters.count > 0 then
+        accept = function(path, name, kind)
+            local record = idx.files[path]
+            return record and predicate.node_fields(filters, record, kind, name)
+        end
+    end
+    local hits, state = lookup(filters.text, accept, match)
+    local ranked, seen = {}, {}
+    for _, hit in ipairs(hits or {}) do
+        local file = G.file_index[hit.path]
+        for i, id in ipairs(file and G.id_of[file] or {}) do
+            if i % 128 == 0 then control.check() end
+            local node = G.nodes[id]
+            if not seen[id] and node.line == hit.start_line and node.kind == hit.kind
+                and (node.end_line or node.line) == hit.end_line and text.valid(node.qualified) == hit.symbol
+                and predicate.id(filters, G, id) then
+                ranked[#ranked + 1] = {id = id, s = hit.score}
+                seen[id] = true
+                break
+            end
+        end
+    end
+    return ranked, {state = state, matches = #ranked, match = match}
+end
+
 local function run(G, idx, query, opts)
     control.check()
     opts = opts or {}
@@ -444,6 +474,10 @@ local function run(G, idx, query, opts)
     file_cache, source_cache = {}, {}
     local filters = require('codeoutline.query.query_filters').parse(query)
     local ranked, named_files = find_seeds(G, filters.text, filters, ranking)
+    local bm25
+    if #ranked == 0 and #named_files == 0 and filters.text ~= '' and opts.bm25_fallback then
+        ranked, bm25 = bm25_seeds(G, idx, filters, opts.bm25_fallback, opts.bm25_match)
+    end
 
     -- Seeds: top-ranked, but at most 3 definitions per name so one generic
     -- name can't crowd out the others the query mentions.
@@ -527,7 +561,15 @@ local function run(G, idx, query, opts)
     local shown, files_shown, file_order = {}, {}, {}
 
     if #seeds == 0 and #named_files == 0 then
-        return 'No symbols matched. Name functions, classes, or files (e.g. "xtimer_poll", "Session.save", "xpoll.c").', { seeds = {} }
+        local notice = ''
+        if bm25 and bm25.state == 'building' then
+            notice = ' The BM25 index is being built; retry this query shortly.'
+        elseif bm25 and bm25.state == 'unavailable' then
+            notice = ' The BM25 fallback is temporarily unavailable.'
+        end
+        local message, truncated = text.limit('No symbols matched. Name functions, classes, or files (e.g. "xtimer_poll", "Session.save", "xpoll.c").'
+            .. notice, budget)
+        return message, {seeds = {}, bm25 = bm25, truncated = truncated}
     end
 
     -- Section 1: summary + flows.
@@ -539,6 +581,7 @@ local function run(G, idx, query, opts)
     for _ in pairs(nfiles) do nf = nf + 1 end
     emit(string.format('Matched %d symbols in %d files, %d more on %s between them; short ones bring %s. Source blocks are verbatim with line numbers; treat them as already Read. Outlines are generated declaration summaries, not source bodies.',
         #seeds, nf, #spine, non_call_paths and 'relationship paths' or 'call paths', non_call_paths and 'related functions' or 'their callees'))
+    if bm25 then emit('No symbols matched the original lookup. BM25 fallback matched functions by keywords.') end
     if #named_files > 0 then emit(string.format('Explicitly named files: %d (top-level outlines).', #named_files)) end
     if #flows > 0 then
         emit(non_call_paths and '\n## Relationship paths' or '\n## Call paths')
@@ -809,7 +852,7 @@ local function run(G, idx, query, opts)
         evidence = G.report.entries, evidence_truncated = evidence_cut or G.report.truncated,
         unresolved_candidates = candidates.entries, unresolved_candidates_truncated = candidate_cut or false,
         path_search_limited = path_limited, evidence_scope = G.report.scope,
-        path_breakpoints = breakpoints.entries, path_breakpoints_truncated = breakpoint_cut }
+        path_breakpoints = breakpoints.entries, path_breakpoints_truncated = breakpoint_cut, bm25 = bm25 }
 end
 
 function M.run(...)

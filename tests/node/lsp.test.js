@@ -13,7 +13,7 @@ const frame = (message) => {
     return Buffer.concat([Buffer.from(`Content-Length: ${body.length}\r\n\r\n`), body]);
 };
 
-async function start(t) {
+async function start(t, { isolatedCache = false } = {}) {
     // Exercise the tilde found in Windows CI's RUNNER~1 temporary directory.
     const temp = await mkdtemp(join(tmpdir(), 'codeoutline-lsp~-'));
     const project = join(temp, 'workspace');
@@ -21,7 +21,8 @@ async function start(t) {
     await writeFile(join(project, 'sample.lua'), 'function saved() end\n');
     const child = spawn(defaultRuntime, [join(root, 'scripts/codeoutline/command.lua'),
         'LOG_STDERR=1', 'LOG_FILE=0', 'lsp', '--stdio'], { cwd: tmpdir(), windowsHide: true,
-        stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, CODEOUTLINE_AUTO_UPDATE: '1' } });
+        stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, CODEOUTLINE_AUTO_UPDATE: '1',
+            ...(isolatedCache && { CODEOUTLINE_MEMORY_CACHE: join(temp, 'index') }) } });
     const pending = new Map(), notifications = [];
     let buffer = Buffer.alloc(0), nextId = 0, logs = '', failure;
     child.stderr.on('data', (chunk) => { logs += chunk; });
@@ -112,6 +113,128 @@ const indexed = async (client) => {
     }
     assert.ok(client.notifications.some((msg) => msg.params?.value?.kind === 'end'), client.logs());
 };
+
+test('LSP definition falls back to a source-verified xthread event after BM25 builds', { timeout: 30000 }, async (t) => {
+    const client = await start(t, { isolatedCache: true });
+    const send = "xthread.post(1, 'update_result', nil)";
+    const branch = "        elseif op == 'update_result' then return 42 end";
+    const receiver = [
+        'return {', '    __thread_handle = function(_, op)',
+        "        if op == 'update' then return 'result'", branch, '    end,', '}', '',
+    ].join('\n');
+    const senderPath = join(client.project, 'sender.lua');
+    const receiverPath = join(client.project, 'receiver.lua');
+    const senderUri = pathToFileURL(senderPath).href;
+    const receiverUri = pathToFileURL(receiverPath).href;
+    await writeFile(senderPath, `${send}\nprint('update_result')\nsaved()\n`);
+    await writeFile(receiverPath, receiver);
+    await writeFile(join(client.project, 'unrelated.lua'), receiver.replace("op == 'update_result'", "op == 'result_update'"));
+    await initialize(client, [client.project]); await indexed(client);
+    const definition = (line, character) => client.request('textDocument/definition', {
+        textDocument: { uri: senderUri }, position: { line, character },
+    });
+    const lookup = () => definition(0, send.indexOf('update_result') + 2);
+    assert.deepEqual(await lookup(), []);
+    assert.ok(client.notifications.some((msg) => msg.method === 'window/showMessage'
+        && msg.params.message.includes('building the BM25 definition index')));
+    const primary = await definition(2, 2);
+    assert.equal(fileURLToPath(primary[0].uri), join(client.project, 'sample.lua'));
+    let targets = [];
+    const deadline = Date.now() + 7500;
+    while (!targets.length && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        targets = await lookup();
+    }
+    const event = "'update_result'";
+    const first = branch.indexOf(event);
+    const expected = (line) => ({ start: { line, character: first }, end: { line, character: first + event.length } });
+    assert.equal(targets.length, 1, client.logs());
+    assert.equal(fileURLToPath(targets[0].uri), receiverPath);
+    assert.deepEqual(targets[0].range, expected(3));
+    assert.deepEqual((await definition(1, 9))[0]?.range, expected(3));
+    client.notify('textDocument/didOpen', { textDocument: {
+        uri: receiverUri, languageId: 'lua', version: 1, text: `\n\n${receiver}`,
+    } });
+    assert.deepEqual((await lookup())[0]?.range, expected(5));
+    client.notify('textDocument/didChange', { textDocument: { uri: receiverUri, version: 2 },
+        contentChanges: [{ text: receiver.replace('update_result', 'different_event') }] });
+    assert.deepEqual(await lookup(), []);
+});
+
+test('LSP BM25 searches the project for an unresolved RPC reply literal', { timeout: 30000 }, async (t) => {
+    const client = await start(t, { isolatedCache: true });
+    const reply = "    assert(_thread_replys[reply.router](reply.co, reply.sk, 'run_rpc', ok, result))";
+    const branch = "    if type(router) == 'string' and req == 'run_rpc' then return true end";
+    const worker = join(client.project, 'worker.lua');
+    const request = join(client.project, 'request.js');
+    const requestLine = 'export function send(rpc) { return rpc("run_rpc"); }';
+    const missing = 'local value = unresolved_identifier';
+    await writeFile(worker, [
+        'local function run(reply, ok, result)', reply, 'end',
+        'function dispatch(router, req)', branch, 'end',
+        "function unrelated(req) if req == 'rpc_run' then return true end end", missing, '',
+    ].join('\n'));
+    await writeFile(request, requestLine + '\n');
+    await initialize(client, [client.project]); await indexed(client);
+    const textDocument = { uri: pathToFileURL(worker).href };
+    assert.deepEqual(await client.request('textDocument/definition', {
+        textDocument, position: { line: 7, character: missing.indexOf('unresolved_identifier') + 2 },
+    }), []);
+    assert.ok(client.notifications.some((msg) => msg.method === 'window/showMessage'
+        && msg.params.message.includes('building the BM25 definition index')));
+    const lookup = () => client.request('textDocument/definition', {
+        textDocument,
+        position: { line: 1, character: reply.indexOf('run_rpc') + 2 },
+    });
+    let targets = await lookup();
+    const deadline = Date.now() + 7500;
+    while (!targets.length && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        targets = await lookup();
+    }
+    assert.deepEqual(targets.map((target) => ({
+        file: fileURLToPath(target.uri),
+        start: target.range.start,
+    })), [
+        { file: worker, start: { line: 4, character: branch.indexOf("'run_rpc'") } },
+        { file: request, start: { line: 0, character: requestLine.indexOf('"run_rpc"') } },
+    ], client.logs());
+});
+
+test('LSP finds the xthread receiver beyond the BM25 body excerpt', { timeout: 30000 }, async (t) => {
+    const client = await start(t, { isolatedCache: true });
+    const sender = join(client.project, 'sender.lua');
+    const receiver = join(client.project, 'receiver.lua');
+    const post = "    assert(xthread.post(1, 'worker_result', id, ok, result))";
+    const branch = "        elseif op == 'worker_result' then return id end";
+    const body = [
+        'return {', '    __thread_handle = function(_, op, id)',
+        "        if op == 'worker_ready' then",
+        ...Array(42).fill('            id = id + 1'),
+        branch, '    end,', '}', '',
+    ];
+    await writeFile(sender, ['function run(id, ok, result)', post, 'end', ''].join('\n'));
+    await writeFile(receiver, body.join('\n'));
+    await writeFile(join(client.project, 'mock.lua'), [
+        'function xthread.post(thread, op)',
+        "    spec.equal(thread, 1); spec.equal(op, 'worker_result')",
+        'end', '',
+    ].join('\n'));
+    await initialize(client, [client.project]); await indexed(client);
+    const lookup = () => client.request('textDocument/definition', {
+        textDocument: { uri: pathToFileURL(sender).href },
+        position: { line: 1, character: post.indexOf('worker_result') + 2 },
+    });
+    let targets = await lookup();
+    const deadline = Date.now() + 7500;
+    while (!targets.length && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        targets = await lookup();
+    }
+    assert.equal(targets.length, 1, client.logs());
+    assert.equal(fileURLToPath(targets[0].uri), receiver);
+    assert.deepEqual(targets[0].range.start, { line: body.indexOf(branch), character: branch.indexOf("'worker_result'") });
+});
 
 test('LSP type references use exact UTF-16 ranges and invalidate draft uses', { timeout: 30000 }, async (t) => {
     const client = await start(t);

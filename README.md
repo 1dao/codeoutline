@@ -543,6 +543,42 @@ local text, info = service.explore('C:/src/project', 'Session.save', { budget = 
 
 `get`, `explore`, and `status` refresh automatically; `forget` clears only the in-memory index, and `rebuild` reindexes without the disk cache. `service.configure` adjusts the resident project count and idle timeout. When embedding on Android, the host must call `xutils_android_init(JavaVM*)` once before starting worker threads; otherwise GBK conversion reports an error.
 
+### Disk BM25 search
+
+MCP `codeoutline_explore` automatically queues a BM25 snapshot for the
+refreshed project when the snapshot is missing or stale. When the usual
+symbol and file lookup finds nothing, Explore uses BM25 candidates with the
+same filters and returns its usual source and relationship context. While
+a snapshot is being built, a miss reports `bm25.state = "building"`
+in the structured MCP result.
+
+The BM25 fallback matches any query term by default. Pass `bm25Match: "all"`
+to require all tokenized terms in the same function. This option applies
+only to the fallback. The equivalent Lua search option is `match = 'all'`.
+
+The editor's F12 uses the regular LSP definition lookup first. On a miss,
+it searches the entire project's BM25 snapshot for the identifier or string
+at the cursor, with all terms required. CodeOutline verifies declaration
+candidates and exact string matches against the source or editor draft.
+For Lua `xthread.post` event names, F12 also checks indexed dispatch handlers
+and prefers verified receiving branches.
+If the snapshot is missing or stale, the miss starts a background build.
+Retry F12 after the build finishes.
+
+```lua
+local bm25 = require('codeoutline.bm25.index')
+local idx = service.refresh(project_path)
+bm25.build(idx, bm25_path)
+local hits = bm25.search(idx, bm25_path, 'load cache', { path = 'src', limit = 20 })
+```
+
+Build the snapshot once and reuse it for searches. Pass the refreshed base
+index to both functions. After the base records change, searches report a
+stale snapshot until it is rebuilt. Results contain `symbol`, `path`,
+`start_line`, `end_line`, and `score`. The optional `path` filters by file or
+directory and `limit` defaults to 20. Builds reuse a configured and bound
+index worker pool, with a serial fallback for standalone Lua callers.
+
 ## Origin and license
 
 The code was extracted from Codua and uses the `codeoutline.*` namespace. CodeOutline is licensed under [BSD-2-Clause](LICENSE); third-party notices are in [THIRD_PARTY.md](docs/THIRD_PARTY.md).

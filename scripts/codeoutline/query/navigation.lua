@@ -909,6 +909,7 @@ end
 local function shared_definition(V, doc, offset, rules)
     local record = doc:parse()
     local language = record.language
+    local indirect = require('codeoutline.analysis.indirect')
     local names, applicable, literals = {}, {}, {}
     local function literal_position(name, argument)
         literals[name] = literals[name] or {}
@@ -916,7 +917,7 @@ local function shared_definition(V, doc, offset, rules)
     end
     for _, rule in ipairs(rules) do
         if rule.shared and (not rule.language or rule.language == language)
-            and require('codeoutline.analysis.indirect').candidate(record, rule.call) then
+            and indirect.candidate(record, rule.call) then
             applicable[#applicable + 1] = rule
             names[rule.call] = true
             if rule.register then names[rule.register] = true end
@@ -976,7 +977,7 @@ local function shared_definition(V, doc, offset, rules)
         end
     end
     if #matched == 0 then return nil end
-    local result, seen, events = {}, {}, {}
+    local result, seen, events, event_keys = {}, {}, {}, {}
     local deadline = os.clock() + M.SCAN_SECONDS
     local function add(loc)
         local key = loc.uri .. ':' .. loc.range.start.line .. ':' .. loc.range.start.character
@@ -987,7 +988,9 @@ local function shared_definition(V, doc, offset, rules)
     local resolver
     for _, match in ipairs(matched) do
         local rule = match.rule
-        if rule.kind == 'event' then events[#events + 1] = match
+        if rule.kind == 'event' then
+            events[#events + 1] = match
+            event_keys[match.arg.literal] = true
         elseif rule.kind == 'target' then
             local name = match.arg.literal
             local services = language == 'lua' and service_files(V, match.site, rule)
@@ -1006,7 +1009,7 @@ local function shared_definition(V, doc, offset, rules)
                 end
             end
         else
-            resolver = resolver or require('codeoutline.analysis.indirect').query(V, { rule }).resolve_targets
+            resolver = resolver or indirect.query(V, { rule }).resolve_targets
             for _, id in ipairs(resolver(f, match.site, match.arg, rule.kind == 'target')) do
                 control.check()
                 if os.clock() > deadline then return result, true end
@@ -1025,12 +1028,12 @@ local function shared_definition(V, doc, offset, rules)
         local candidate = false
         if V.files[file].language == language then
             for _, match in ipairs(events) do
-                if require('codeoutline.analysis.indirect').candidate(V.files[file], match.rule.register) then candidate = true; break end
+                if indirect.candidate(V.files[file], match.rule.register) then candidate = true; break end
             end
         end
         if candidate then
             local source = source_doc(V, file)
-            if source then
+            if source and (language ~= 'lua' or indirect.has_lua_literal(source.source, event_keys)) then
                 for _, site in ipairs(sites(source)) do
                     for _, match in ipairs(events) do
                         local rule = match.rule
@@ -1381,31 +1384,6 @@ local function lexical_literal(T, token, language)
     return value
 end
 
-local function thread_post_argument(T, token)
-    for call = token - 1, math.max(1, token - 128), -1 do
-        local close = T.m[call + 1]
-        if close and close > token and call_name(T, call) == 'xthread.post' then
-            local _, first, last = literal_argument(T, call, 2)
-            if first == T.s[token] - 1 and last == T.e[token] then return true end
-        end
-    end
-    return false
-end
-
-local function thread_operation(T, first, last)
-    for i = first, last do
-        if T.k[i] == 'kw' and T:text(i) == 'function' then
-            local open = i + 1
-            while open < last and T:text(open) ~= '(' do open = open + 1 end
-            if T.m[open] and T.k[open + 1] == 'id' and T:text(open + 2) == ','
-                and T.k[open + 3] == 'id' then
-                return T:text(open + 3), T.m[open] + 1
-            end
-            return nil
-        end
-    end
-end
-
 local function lexical_ids(V, hits)
     local ids, seen = {}, {}
     for _, hit in ipairs(hits) do
@@ -1423,55 +1401,47 @@ local function lexical_ids(V, hits)
     return ids
 end
 
-local function lexical_locations(V, ids, query, origin, offset, receivers)
+local function lexical_locations(V, ids, query, origin, offset)
     local comparisons, other, seen = {}, {}, {}
+    local literals = { [query] = true }
+    local has_lua_literal = require('codeoutline.analysis.indirect').has_lua_literal
     local truncated = false
     for _, id in ipairs(ids) do
         control.check()
         local file = V.node_file[id]
         local record, draft = V.files[file], V.drafts[file]
-        if receivers and record.language ~= 'lua' then goto next_candidate end
         if (draft and #draft.source or record.size or 0) > M.MAX_FILE_BYTES then
             truncated = true
         else
-            local doc, node = locate(V, id)
-            local _, T
-            if node and node.start_byte and node.end_byte then _, T = M.full(V, file) end
-            if T then
-                local start, stop = token_after(T, node.start_byte), token_after(T, node.end_byte) - 1
-                local operation, in_condition
-                if receivers then
-                    operation, start = thread_operation(T, start, stop)
-                    if not operation then goto next_candidate end
-                end
-                local offsets = seen[file] or {}
+            local offsets = seen[file]
+            if offsets == nil then
+                local doc = source_doc(V, file)
+                local relevant = doc and (record.language == 'lua' and has_lua_literal(doc.source, literals)
+                    or doc.source:find(query, 1, true))
+                offsets = relevant and {} or false
                 seen[file] = offsets
-                for i = start, stop do
-                    if i % 128 == 0 then control.check() end
-                    if operation and T.k[i] == 'kw' then
-                        local word = T:text(i)
-                        if word == 'if' or word == 'elseif' then in_condition = true
-                        elseif word == 'then' then in_condition = false end
-                    end
-                    local first, last = T.s[i] - 1, T.e[i]
-                    local comparison
-                    if T.k[i] == 'str' then
-                        comparison = (T:text(i - 1) == '==' and (not operation or T:text(i - 2) == operation))
-                            or (T:text(i + 1) == '==' and (not operation or T:text(i + 2) == operation))
-                    end
-                    if (not operation or in_condition and comparison)
-                        and not offsets[first] and (file ~= origin or offset < first or offset >= last)
-                        and lexical_literal(T, i, record.language) == query then
-                        offsets[first] = true
-                        local matches = comparison and comparisons or other
-                        if #matches < 20 then
-                            matches[#matches + 1] = {uri = doc.uri, range = doc:range(first, last)}
-                        else truncated = true end
+            end
+            if offsets then
+                -- Populate the shared position cache before locating the node.
+                local _, T = M.full(V, file)
+                local doc, node = locate(V, id)
+                if T and node and node.start_byte and node.end_byte then
+                    local start, stop = token_after(T, node.start_byte), token_after(T, node.end_byte) - 1
+                    for i = start, stop do
+                        if i % 128 == 0 then control.check() end
+                        local first, last = T.s[i] - 1, T.e[i]
+                        if not offsets[first] and (file ~= origin or offset < first or offset >= last)
+                            and lexical_literal(T, i, record.language) == query then
+                            offsets[first] = true
+                            local matches = (T:text(i - 1) == '==' or T:text(i + 1) == '==') and comparisons or other
+                            if #matches < 20 then
+                                matches[#matches + 1] = {uri = doc.uri, range = doc:range(first, last)}
+                            else truncated = true end
+                        end
                     end
                 end
             end
         end
-        ::next_candidate::
     end
     for _, result in ipairs(other) do
         if #comparisons >= 20 then truncated = true; break end
@@ -1482,29 +1452,18 @@ end
 
 local function lexical_definition(req, V, c, f, offset, deadline, allow_tags)
     local query = c and c.name
-    local post
     if not query then
         local _, T = M.full(V, f)
         if T then
             local token = token_after(T, offset)
             if token <= T.n and T.s[token] - 1 <= offset then
-                local language = V.files[f].language
-                query = lexical_literal(T, token, language)
-                post = query and language == 'lua' and thread_post_argument(T, token)
+                query = lexical_literal(T, token, V.files[f].language)
             end
         end
     end
     if not query or #query > 256 or not query:find('[%w_]') then return nil end
     local hits, incomplete = req.bm25_definition(V.idx, query, deadline)
-    if not hits then return {}, incomplete end
-    if post then
-        -- A verified receiver can sit beyond the BM25 result limit. Check the
-        -- existing symbol index for handler declarations anywhere in the project.
-        local receivers, truncated = lexical_locations(V, V.by_name.__thread_handle, query, f, offset, true)
-        if #receivers > 0 then return receivers, incomplete or truncated end
-        incomplete = incomplete or truncated
-    end
-    if #hits == 0 then return {}, incomplete end
+    if not hits or #hits == 0 then return {}, incomplete end
     if c and not allow_tags then return {}, incomplete end
     local ids = lexical_ids(V, hits)
     if not c then

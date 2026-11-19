@@ -100,6 +100,22 @@ function M.candidate(rec, call)
     return false
 end
 
+-- A resolved Lua literal, including one assigned to a local alias, must
+-- occur in the file. Scan tokens only if escapes can hide its spelling.
+function M.has_lua_literal(source, literals)
+    for name in pairs(literals) do
+        if source:find(name, 1, true) then return true end
+    end
+    if not source:find('\\', 1, true) then return false end
+    local T = require('codeoutline.lang.lua').lang:tokenize(source)
+    local decode = require('codeoutline.analysis.lua.lua_literal').decode
+    for i = 1, T.n do
+        if i % 4096 == 0 then control.check() end
+        if T.k[i] == 'str' and literals[decode(T:text(i))] then return true end
+    end
+    return false
+end
+
 function M.query(G, rules, report)
     rules = rules_for(G, rules)
     if #rules == 0 then return { outgoing = function() return {} end, incoming = function() return {} end } end
@@ -124,20 +140,10 @@ function M.query(G, rules, report)
         -- Target rules can only obtain a literal command from this file. Reject
         -- broad module hints before scope/registry analysis, but decode escaped
         -- Lua literals so aliases and alternate spellings remain candidates.
-        if literals and rec.language == 'lua' then
-            local relevant = false
-            for name in pairs(literals) do if source:find(name, 1, true) then relevant = true; break end end
-            if not relevant and source:find('\\', 1, true) then
-                local T = require('codeoutline.lang.lua').lang:tokenize(source)
-                local decode = require('codeoutline.analysis.lua.lua_literal').decode
-                for i = 1, T.n do
-                    if i % 4096 == 0 then control.check() end
-                    if T.k[i] == 'str' and literals[decode(T:text(i))] then relevant = true; break end
-                end
-            end
+        if literals and rec.language == 'lua' and not M.has_lua_literal(source, literals) then
             -- Do not cache negatives: later incoming calls can request other
             -- targets within this same query, and outgoing needs all sites.
-            if not relevant then return {} end
+            return {}
         end
         local parsed = assert(require('codeoutline.parsing.parse').parse(rec.path, source,
             { ranges = false, dispatch = names, dispatch_only = true, language = rec.language }))

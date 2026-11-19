@@ -114,12 +114,12 @@ const indexed = async (client) => {
     assert.ok(client.notifications.some((msg) => msg.params?.value?.kind === 'end'), client.logs());
 };
 
-test('LSP definition falls back to a source-verified xthread event after BM25 builds', { timeout: 30000 }, async (t) => {
+test('LSP definition checks string candidates against source and drafts after BM25 builds', { timeout: 30000 }, async (t) => {
     const client = await start(t, { isolatedCache: true });
-    const send = "xthread.post(1, 'update_result', nil)";
+    const send = "publish('update_result')";
     const branch = "        elseif op == 'update_result' then return 42 end";
     const receiver = [
-        'return {', '    __thread_handle = function(_, op)',
+        'return {', '    dispatch = function(_, op)',
         "        if op == 'update' then return 'result'", branch, '    end,', '}', '',
     ].join('\n');
     const senderPath = join(client.project, 'sender.lua');
@@ -201,25 +201,23 @@ test('LSP BM25 searches the project for an unresolved RPC reply literal', { time
     ], client.logs());
 });
 
-test('LSP finds the xthread receiver beyond the BM25 body excerpt', { timeout: 30000 }, async (t) => {
+test('LSP ranks exact comparisons first without requiring a named dispatcher', { timeout: 30000 }, async (t) => {
     const client = await start(t, { isolatedCache: true });
     const sender = join(client.project, 'sender.lua');
     const receiver = join(client.project, 'receiver.lua');
+    const mock = join(client.project, 'mock.lua');
     const post = "    assert(xthread.post(1, 'worker_result', id, ok, result))";
     const branch = "        elseif op == 'worker_result' then return id end";
+    const assertion = "    spec.equal(thread, 1); spec.equal(op, 'worker_result')";
     const body = [
-        'return {', '    __thread_handle = function(_, op, id)',
+        'return {', '    accept_worker_result = function(_, op, id)',
         "        if op == 'worker_ready' then",
         ...Array(42).fill('            id = id + 1'),
         branch, '    end,', '}', '',
     ];
     await writeFile(sender, ['function run(id, ok, result)', post, 'end', ''].join('\n'));
     await writeFile(receiver, body.join('\n'));
-    await writeFile(join(client.project, 'mock.lua'), [
-        'function xthread.post(thread, op)',
-        "    spec.equal(thread, 1); spec.equal(op, 'worker_result')",
-        'end', '',
-    ].join('\n'));
+    await writeFile(mock, ['function xthread.post(thread, op)', assertion, 'end', ''].join('\n'));
     await initialize(client, [client.project]); await indexed(client);
     const lookup = () => client.request('textDocument/definition', {
         textDocument: { uri: pathToFileURL(sender).href },
@@ -231,9 +229,12 @@ test('LSP finds the xthread receiver beyond the BM25 body excerpt', { timeout: 3
         await new Promise((resolve) => setTimeout(resolve, 30));
         targets = await lookup();
     }
-    assert.equal(targets.length, 1, client.logs());
-    assert.equal(fileURLToPath(targets[0].uri), receiver);
-    assert.deepEqual(targets[0].range.start, { line: body.indexOf(branch), character: branch.indexOf("'worker_result'") });
+    assert.deepEqual(targets.map((target) => ({
+        file: fileURLToPath(target.uri), ...target.range.start,
+    })), [
+        { file: receiver, line: body.indexOf(branch), character: branch.indexOf("'worker_result'") },
+        { file: mock, line: 1, character: assertion.indexOf("'worker_result'") },
+    ], client.logs());
 });
 
 test('LSP type references use exact UTF-16 ranges and invalidate draft uses', { timeout: 30000 }, async (t) => {

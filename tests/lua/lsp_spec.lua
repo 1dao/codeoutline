@@ -2636,16 +2636,25 @@ int luaopen_example_empty(lua_State *L) { return 0; }
             .. '"register":"draft_bus.on","keyArgument":1,"handlerArgument":2}]}')
         local source = 'function draft_send() draft_bus.emit("draft_rule_tick") end'
         nav_write('shared_draft_send.lua', source)
+        nav_write('shared_unrelated_registration.lua', 'draft_bus.on("other_tick", function() end)')
         service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
         local target = nav_uri('shared_unsaved_registration.lua')
         navigation.sync({ session = 'shared-rules', open = { [target] = 1 }, changed = {
-            [target] = { version = 1, language = 'lua', source = 'local api = draft_bus\napi.on("draft_rule_tick", function() end)' } } })
+            [target] = { version = 1, language = 'lua',
+                source = 'local api = draft_bus\nlocal key = "draft_rule_\\116ick"\napi.on(key, function() end)' } } })
+        local doc = docs.read(nav_root .. '/shared_draft_send.lua')
+        local methods = getmetatable(doc)
+        local original = methods.dispatch
+        methods.dispatch = function(source, ...)
+            spec.truthy(source.uri ~= nav_uri('shared_unrelated_registration.lua'), 'unrelated event needs no dispatch parse')
+            return original(source, ...)
+        end
         local ok, err = pcall(function()
-            local doc = docs.read(nav_root .. '/shared_draft_send.lua')
             local found = nav({ method = 'lsp_definition', session = 'shared-rules', uri = doc.uri,
                 position = doc:position(assert(source:find('draft_rule_tick', 1, true))) })
-            spec.equal(#found, 1); spec.equal(found[1].uri, target); spec.equal(found[1].range.start.line, 1)
+            spec.equal(#found, 1); spec.equal(found[1].uri, target); spec.equal(found[1].range.start.line, 2)
         end)
+        methods.dispatch = original
         navigation.close('shared-rules'); os.remove(config); if not ok then error(err, 0) end
     end)
     spec.it('does not collect shared dispatch sites for unrelated definition requests', function()

@@ -12,7 +12,22 @@ local snapshot = require('codeoutline.bm25.snapshot')
 local M = {}
 local TRAILER_SIZE = 80
 local PASSAGE_BLOCK = 32
+local GC_BATCH_BYTES = 512 * 1024
+local GC_STEP_KB = 512
 local cached_digest, cached_header
+
+-- Drive GC by completed work so temporary batches can be reclaimed while the
+-- live postings grow. Keep the collector settings of the calling Lua state.
+local function build_gc()
+    local processed = 0
+    return function(bytes)
+        processed = processed + bytes
+        if processed >= GC_BATCH_BYTES then
+            processed = 0
+            collectgarbage('step', GC_STEP_KB)
+        end
+    end
+end
 
 local function plan(index, source_paths)
     local jobs, files, locations = {}, {}, {}
@@ -46,7 +61,7 @@ local function plan(index, source_paths)
     return jobs, files, locations
 end
 
-local function collect_terms(index, jobs, spool)
+local function collect_terms(index, jobs, spool, gc_step)
     local totals, lengths, comments = {0, 0, 0, 0}, {}, 0
     local function accept(_, result)
         local encoded = result.terms
@@ -54,6 +69,7 @@ local function collect_terms(index, jobs, spool)
         lengths[#lengths + 1] = #encoded
         comments = comments + result.comments
         for i, length in ipairs(result.totals) do totals[i] = totals[i] + length end
+        gc_step(#encoded)
     end
     if #jobs >= indexing.PARALLEL_MIN_FILES and pool.ready() then
         pool.run(jobs, index.max_bytes, accept, 'bm25_collect')
@@ -73,12 +89,13 @@ local function read_at(file, offset, length)
     return data
 end
 
-local function merge_terms(spool, totals, lengths, count, write_passages)
+local function merge_terms(spool, totals, lengths, count, write_passages, gc_step)
     local postings, averages = {}, {}
     for i, total in ipairs(totals) do averages[i] = count > 0 and total / count or 0 end
     assert(spool:seek('set', 0) == 0)
     for _, length in ipairs(lengths) do
         control.check()
+        gc_step(length)
         local data = assert(spool:read(length), 'truncated BM25 staging file')
         assert(#data == length, 'truncated BM25 staging file')
         local batch = cmsgpack.unpack(data)
@@ -118,7 +135,7 @@ local function exact_keys(files, locations)
     return exact
 end
 
-local function write_index(output, spool, totals, lengths, header)
+local function write_index(output, spool, totals, lengths, header, gc_step)
     local prefix = snapshot.prefix(header.version) .. header.stamp
     assert(output:write(prefix))
     local offset, count = #prefix, #header.locations
@@ -148,7 +165,7 @@ local function write_index(output, spool, totals, lengths, header)
             blocks[#blocks + 1] = entry
         end
     end
-    local postings = merge_terms(spool, totals, lengths, count, write_passages)
+    local postings = merge_terms(spool, totals, lengths, count, write_passages, gc_step)
     compressor:close()
     local records = 0
     for word, matches in pairs(postings) do
@@ -160,11 +177,20 @@ local function write_index(output, spool, totals, lengths, header)
         header.words[word] = entry
         records = records + frequency
         postings[word] = nil
+        matches = nil
+        gc_step(entry[2])
     end
-    for key, matches in pairs(exact_keys(header.files, header.locations)) do
+    postings = nil
+    local exact = exact_keys(header.files, header.locations)
+    for key, matches in pairs(exact) do
         control.check()
-        header.exact[key] = write_block(matches)
+        local entry = write_block(matches)
+        header.exact[key] = entry
+        exact[key] = nil
+        matches = nil
+        gc_step(entry[2])
     end
+    exact = nil
     local encoded = cmsgpack.pack(header)
     assert(output:write(encoded, xutils.sha256_hex(encoded), string.format('%016d', #encoded)))
     return records, offset + #encoded + TRAILER_SIZE
@@ -198,11 +224,13 @@ function M.build(index, file)
     local ok, result = pcall(function()
         spool_name = assert(xutils.temp_file(parent))
         spool = assert(io.open(spool_name, 'w+b'))
-        local totals, lengths, comments = collect_terms(index, jobs, spool)
+        local gc_step = build_gc()
+        local totals, lengths, comments = collect_terms(index, jobs, spool, gc_step)
+        jobs = nil
         staged = assert(xutils.temp_file(parent))
         output = assert(io.open(staged, 'wb'))
         local records, bytes = write_index(output, spool, totals, lengths, {version = snapshot.version,
-            stamp = stamp, files = files, locations = locations, words = {}, exact = {}, passages = {}})
+            stamp = stamp, files = files, locations = locations, words = {}, exact = {}, passages = {}}, gc_step)
         assert(spool:close()); spool = nil
         assert(output:close()); output = nil
         control.check()

@@ -201,23 +201,29 @@ test('LSP BM25 searches the project for an unresolved RPC reply literal', { time
     ], client.logs());
 });
 
-test('LSP ranks exact comparisons first without requiring a named dispatcher', { timeout: 30000 }, async (t) => {
+test('LSP skips repeated send calls and ranks exact comparisons first', { timeout: 30000 }, async (t) => {
     const client = await start(t, { isolatedCache: true });
     const sender = join(client.project, 'sender.lua');
     const receiver = join(client.project, 'receiver.lua');
     const mock = join(client.project, 'mock.lua');
+    const repeat = join(client.project, 'repeat.js');
     const post = "    assert(xthread.post(1, 'worker_result', id, ok, result))";
     const branch = "        elseif op == 'worker_result' then return id end";
     const assertion = "    spec.equal(thread, 1); spec.equal(op, 'worker_result')";
+    const registration = "function subscribe() xthread.register('worker_result', listener) end";
     const body = [
         'return {', '    accept_worker_result = function(_, op, id)',
         "        if op == 'worker_ready' then",
         ...Array(42).fill('            id = id + 1'),
         branch, '    end,', '}', '',
     ];
-    await writeFile(sender, ['function run(id, ok, result)', post, 'end', ''].join('\n'));
+    await writeFile(sender, [
+        'function run(id, ok, result)', post,
+        "    xthread.post(route(id, ok), 'worker_result', result)", 'end', '',
+    ].join('\n'));
     await writeFile(receiver, body.join('\n'));
-    await writeFile(mock, ['function xthread.post(thread, op)', assertion, 'end', ''].join('\n'));
+    await writeFile(mock, ['function xthread.post(thread, op)', assertion, 'end', registration, ''].join('\n'));
+    await writeFile(repeat, "export function resend() { xthread.post(3, 'worker_result'); }\n");
     await initialize(client, [client.project]); await indexed(client);
     const lookup = () => client.request('textDocument/definition', {
         textDocument: { uri: pathToFileURL(sender).href },
@@ -229,11 +235,15 @@ test('LSP ranks exact comparisons first without requiring a named dispatcher', {
         await new Promise((resolve) => setTimeout(resolve, 30));
         targets = await lookup();
     }
-    assert.deepEqual(targets.map((target) => ({
+    const matches = targets.map((target) => ({
         file: fileURLToPath(target.uri), ...target.range.start,
-    })), [
-        { file: receiver, line: body.indexOf(branch), character: branch.indexOf("'worker_result'") },
+    }));
+    assert.deepEqual(matches[0], {
+        file: receiver, line: body.indexOf(branch), character: branch.indexOf("'worker_result'"),
+    }, client.logs());
+    assert.deepEqual(matches.slice(1).sort((a, b) => a.line - b.line), [
         { file: mock, line: 1, character: assertion.indexOf("'worker_result'") },
+        { file: mock, line: 3, character: registration.indexOf("'worker_result'") },
     ], client.logs());
 });
 

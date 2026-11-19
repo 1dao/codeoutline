@@ -563,8 +563,9 @@ The editor's F12 uses the regular LSP definition lookup first. On a miss,
 it searches the entire project's BM25 snapshot for the identifier or string
 at the cursor, with all terms required. CodeOutline verifies declaration
 candidates and exact string matches against the source or editor draft.
-For strings, F12 skips the occurrence at the cursor and lists equality
-comparisons before other exact matches.
+For strings, F12 skips the occurrence at the cursor and other direct string
+arguments to the same named call. It lists equality comparisons before other
+exact matches.
 If the snapshot is missing or stale, the miss starts a background build.
 Retry F12 after the build finishes.
 

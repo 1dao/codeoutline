@@ -807,27 +807,30 @@ end
 -- Decode literals without running source code. Lua long strings and quoted escapes.
 local string_value = require('codeoutline.analysis.lua.lua_literal').decode
 
-local function call_name(T, i)
+local function call_name(T, i, qualified_separators)
     if T.k[i] ~= 'id' or T:text(i + 1) ~= '(' then return nil end
+    local separators = qualified_separators or LUA_MEMBER
     local name, first = T:text(i), i
-    while T.k[first - 2] == 'id' and (T:text(first - 1) == '.' or T:text(first - 1) == ':') do
+    while T.k[first - 2] == 'id' and separators[T:text(first - 1)] do
         name = T:text(first - 2) .. T:text(first - 1) .. name
         first = first - 2
     end
-    if T:text(first - 1) == 'function' then return nil end
+    local previous = T:text(first - 1)
+    if previous == 'function' or qualified_separators and qualified_separators[previous] then return nil end
     return name
 end
 
 -- Find a single literal argument, skipping nested brackets and anonymous functions.
-local function literal_argument(T, call, argument)
+local function literal_argument(T, call, argument, selected)
     local open, number, first = call + 1, 1, call + 2
     local close = T.m[open]
     if not close then return nil end
     local i = first
     while i <= close do
+        if selected and i > selected + 1 then return nil end
         local token = T:text(i)
         if i == close or token == ',' then
-            if number == argument then
+            if number == argument or first == selected then
                 if i == first + 1 and T.k[first] == 'str' then
                     return string_value(T:text(first)), T.s[first] - 1, T.e[first]
                 end
@@ -1384,6 +1387,34 @@ local function lexical_literal(T, token, language)
     return value
 end
 
+-- A direct string argument belongs to its innermost call. Skip balanced
+-- expressions in earlier arguments when looking for the opening parenthesis.
+local function literal_call(T, token, language)
+    local i, after = token - 1, token + 1
+    while T.k[i] == 'nl' do i = i - 1 end
+    while T.k[after] == 'nl' do after = after + 1 end
+    local first, last = T:text(i), T:text(after)
+    if (first ~= '(' and first ~= ',') or (last ~= ')' and last ~= ',') then return nil end
+    local scanned = 0
+    while i > 0 do
+        scanned = scanned + 1
+        if scanned % 128 == 0 then control.check() end
+        local word, pair = T:text(i), T.m[i]
+        if pair and pair < i then
+            i = pair
+        elseif word == '(' then
+            if not pair or pair <= token then return nil end
+            local lua = language == 'lua'
+            local name = call_name(T, i - 1, lua and LUA_MEMBER or MEMBER)
+            if name and (not lua or literal_argument(T, i - 1, nil, token)) then return name end
+            return nil
+        elseif word == '[' or word == '{' then
+            return nil
+        end
+        i = i - 1
+    end
+end
+
 local function lexical_ids(V, hits)
     local ids, seen = {}, {}
     for _, hit in ipairs(hits) do
@@ -1401,7 +1432,7 @@ local function lexical_ids(V, hits)
     return ids
 end
 
-local function lexical_locations(V, ids, query, origin, offset)
+local function lexical_locations(V, ids, query, origin, offset, origin_call)
     local comparisons, other, seen = {}, {}, {}
     local literals = { [query] = true }
     local has_lua_literal = require('codeoutline.analysis.indirect').has_lua_literal
@@ -1431,7 +1462,8 @@ local function lexical_locations(V, ids, query, origin, offset)
                         if i % 128 == 0 then control.check() end
                         local first, last = T.s[i] - 1, T.e[i]
                         if not offsets[first] and (file ~= origin or offset < first or offset >= last)
-                            and lexical_literal(T, i, record.language) == query then
+                            and lexical_literal(T, i, record.language) == query
+                            and (not origin_call or literal_call(T, i, record.language) ~= origin_call) then
                             offsets[first] = true
                             local matches = (T:text(i - 1) == '==' or T:text(i + 1) == '==') and comparisons or other
                             if #matches < 20 then
@@ -1452,12 +1484,15 @@ end
 
 local function lexical_definition(req, V, c, f, offset, deadline, allow_tags)
     local query = c and c.name
+    local origin_call
     if not query then
         local _, T = M.full(V, f)
         if T then
             local token = token_after(T, offset)
             if token <= T.n and T.s[token] - 1 <= offset then
-                query = lexical_literal(T, token, V.files[f].language)
+                local language = V.files[f].language
+                query = lexical_literal(T, token, language)
+                if query then origin_call = literal_call(T, token, language) end
             end
         end
     end
@@ -1467,7 +1502,7 @@ local function lexical_definition(req, V, c, f, offset, deadline, allow_tags)
     if c and not allow_tags then return {}, incomplete end
     local ids = lexical_ids(V, hits)
     if not c then
-        local locations, truncated = lexical_locations(V, ids, query, f, offset)
+        local locations, truncated = lexical_locations(V, ids, query, f, offset, origin_call)
         return locations, incomplete or truncated
     end
     local found, truncated = definition_tags(V, f, c, ids)

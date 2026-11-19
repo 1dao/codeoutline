@@ -558,6 +558,10 @@ only to the fallback. The equivalent Lua search option is `match = 'all'`.
 Before taking the top results, the search prioritizes complete literal
 matches and boosts terms separated by fewer words within the same indexed
 field. Queries can still match terms spread across fields.
+Terms from names such as `cache_finish` can also match the file path or
+filename. Pass `prefix = 'cache'` to the Lua search API to boost matching
+qualifiers, filenames, and directory components before the result limit.
+F12 supplies the receiver of a member lookup as this optional hint.
 
 The editor's F12 uses the regular LSP definition lookup first. On a miss,
 it searches the entire project's BM25 snapshot for the identifier or string

@@ -42,7 +42,7 @@ function M.prepare(index)
     end
 end
 
-function M.definition(index, query, deadline)
+function M.definition(index, query, deadline, prefix)
     local file = index.cache_path .. '.bm25'
     local stamp = snapshot.stamp(index)
     if not snapshot.current(file, stamp) then
@@ -54,7 +54,7 @@ function M.definition(index, query, deadline)
     -- Let a cold header warm in the background after F12 returns.
     local work_until = now + 2000
     local posted = xthread.post(M.worker_id, 'bm25_lookup', xthread.current_id(), next_lookup,
-        {root = index.root, stamp = stamp, file = file, query = query, deadline = work_until})
+        {root = index.root, stamp = stamp, file = file, query = query, deadline = work_until, prefix = prefix})
     if not posted then return nil, true end
     lookup = {token = next_lookup, wait_until = math.min(now + 180, deadline), work_until = work_until}
     local ok, result = coroutine.yield()

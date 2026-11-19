@@ -816,6 +816,38 @@ test('LSP ranks Lua member candidates by imports, receiver file and directory', 
     assert.deepEqual(await definition(), [imported, fileMatch, dirMatch, other]);
 });
 
+test('LSP carries the Lua receiver prefix into BM25 before the shortlist is cut', { timeout: 30000 }, async (t) => {
+    const client = await start(t, { isolatedCache: true });
+    const decoys = Array.from({ length: 260 }, (_, i) => `class Decoy${i} { finish() {} }`).join('\n');
+    await writeFile(join(client.project, 'finish.js'), decoys);
+    const directory = join(client.project, 'z', 'cache');
+    await mkdir(directory, { recursive: true });
+    const target = join(directory, 'automatic.lua');
+    await writeFile(target, 'local M = {}\nfunction M.finish() end\nreturn M\n');
+    const source = 'function run() cache.finish() end';
+    const origin = join(client.project, 'worker.lua');
+    await writeFile(origin, source);
+    await initialize(client, [client.project]); await indexed(client);
+    const uri = pathToFileURL(origin).href;
+    const lookup = () => client.request('textDocument/definition', {
+        textDocument: { uri }, position: { line: 0, character: source.indexOf('finish') + 2 },
+    });
+    assert.deepEqual(await lookup(), []);
+    assert.ok(client.notifications.some((msg) => msg.method === 'window/showMessage'
+        && msg.params.message.includes('building the BM25 definition index')));
+    let hits = [];
+    const deadline = Date.now() + 7500;
+    while (!hits.length && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        hits = await lookup();
+    }
+    assert.deepEqual(hits.map((hit) => fileURLToPath(hit.uri)), [target], client.logs());
+    client.notify('textDocument/didOpen', { textDocument: {
+        uri, languageId: 'lua', version: 1, text: source.replace('cache.finish', 'other.finish'),
+    } });
+    assert.deepEqual(await lookup(), []);
+});
+
 test('LSP navigates ambiguous proxy macros and respects include path changes and drafts', { timeout: 30000 }, async (t) => {
     const client = await start(t);
     const header = '#ifndef PROXY_H\n#define PROXY_H\n#define api_rawgeti proxy->api_rawgeti\n#endif\n';

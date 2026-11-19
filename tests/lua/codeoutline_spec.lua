@@ -7737,6 +7737,48 @@ function quartzLantern() emit('lantern filler quartz') end
         idx:close()
         assert(os.remove(file)); assert(os.remove(cache))
     end)
+
+    spec.it('boosts receiver hints before Top 20 without changing which documents match', function()
+        local indexing = require('codeoutline.indexing.index')
+        local bm25 = require('codeoutline.bm25.index')
+        local root = tmp_root .. '/bm25-prefix'
+        local file, cache = tmp_root .. '.bm25-prefix', tmp_root .. '.bm25-prefix-base'
+        local body = 'function M.finish() end\n'
+        for i = 1, 22 do write(root .. ('/a%02d.lua'):format(i), body) end
+        write(root .. '/z/cache/automatic.lua', body)
+        write(root .. '/z/cache.lua', body)
+        write(root .. '/z/cache_worker.lua', body)
+        write(root .. '/z/cache2/automatic.lua', body)
+        write(root .. '/z/object.lua', 'function cache.finish() end\n')
+        write(root .. '/z/cache/other.lua', 'function M.run() end\n')
+        local idx = indexing.open(root, {cache_path = cache, lister = 'walk'})
+        idx:refresh_all()
+        bm25.build(idx, file)
+        local plain = bm25.search(idx, file, 'finish', {match = 'all', limit = 30})
+        local hinted = bm25.search(idx, file, 'finish', {match = 'all', limit = 30, prefix = 'CACHE'})
+        spec.equal(#plain, 27); spec.equal(#hinted, #plain)
+        local scores, ranks = {}, {}
+        for i, hit in ipairs(plain) do scores[hit.path], ranks[hit.path] = hit.score, i end
+        spec.truthy(ranks['z/cache/automatic.lua'] > 20)
+        local top = bm25.search(idx, file, 'finish', {match = 'all', limit = 20, prefix = 'cache'})
+        spec.equal(top[1].path, 'z/object.lua')
+        spec.equal(top[2].path, 'z/cache.lua')
+        spec.equal(top[3].path, 'z/cache/automatic.lua')
+        spec.equal(top[4].path, 'z/cache_worker.lua')
+        for _, hit in ipairs(hinted) do
+            spec.truthy(ranks[hit.path])
+            if hit.path == 'z/cache2/automatic.lua' or hit.path:sub(1, 1) == 'a' then
+                spec.equal(hit.score, scores[hit.path])
+            end
+        end
+        local split = bm25.search(idx, file, 'cache_finish', {match = 'all'})
+        local found
+        for _, hit in ipairs(split) do if hit.path == 'z/cache/automatic.lua' then found = true end end
+        spec.truthy(found, 'explicit underscore query matches terms in the path')
+        spec.truthy(idx:save())
+        idx:close()
+        assert(os.remove(file)); assert(os.remove(cache))
+    end)
 end)
 
 return {

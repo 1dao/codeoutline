@@ -1497,7 +1497,7 @@ local function lexical_definition(req, V, c, f, offset, deadline, allow_tags)
         end
     end
     if not query or #query > 256 or not query:find('[%w_]') then return nil end
-    local hits, incomplete = req.bm25_definition(V.idx, query, deadline)
+    local hits, incomplete = req.bm25_definition(V.idx, query, deadline, c and c.recv)
     if not hits or #hits == 0 then return {}, incomplete end
     if c and not allow_tags then return {}, incomplete end
     local ids = lexical_ids(V, hits)

@@ -41,7 +41,7 @@ local function lookup(request)
     local ok, result = pcall(function()
         control.check()
         local hits = bm25.search(snapshot.reader(request.root, request.stamp), request.file, request.query, {
-            match = 'all', limit = 20,
+            match = 'all', limit = 20, prefix = request.prefix,
         })
         control.check()
         return hits

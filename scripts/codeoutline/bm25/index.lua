@@ -421,6 +421,40 @@ local function boost_candidates(file, header, first, boundary, scores, counts, w
     return exact
 end
 
+-- Use the existing symbol and path tables. Prefix hints change ranking only.
+local function boost_prefix(header, scores, words, prefix)
+    if not prefix or prefix == '' then return end
+    prefix = prefix:lower()
+    local strength = 0
+    for _, word in ipairs(words) do
+        local entry = header.words[word]
+        if entry then strength = strength + entry[4] end
+    end
+    strength = math.max(strength, 1)
+    local path_scores, scanned = {}, 0
+    local directory = '/' .. prefix .. '/'
+    for id, score in pairs(scores) do
+        scanned = scanned + 1
+        if scanned % 128 == 0 then control.check() end
+        local location = header.locations[id]
+        local file_id = location[1]
+        local weight = path_scores[file_id]
+        if not weight then
+            local path = header.files[file_id]:lower()
+            local stem = path:match('[^/]+$'):gsub('%.[^%.]+$', '')
+            if stem == prefix then weight = 4
+            elseif ('/' .. path):find(directory, 1, true) then weight = 3
+            elseif stem:sub(1, #prefix) == prefix and stem:sub(#prefix + 1, #prefix + 1):match('[_%.%-]') then
+                weight = 1
+            else weight = 0 end
+            path_scores[file_id] = weight
+        end
+        local owner = location[2]:match('([^.:]+)[.:]+[^.:]+$')
+        if owner and owner:lower() == prefix then weight = 5 end
+        if weight > 0 then scores[id] = score + weight * strength end
+    end
+end
+
 local function search_file(index, file, query, options, limit)
     local header, first, boundary = open_header(file)
     assert(header.stamp == snapshot.stamp(index), 'BM25 index is stale; rebuild it')
@@ -456,6 +490,7 @@ local function search_file(index, file, query, options, limit)
     if options.match ~= 'all' or #words == 0 then
         for id in pairs(exact) do if accepts(id) then scores[id] = scores[id] or 0 end end
     end
+    boost_prefix(header, scores, words, options.prefix)
     local results = {}
     for rank_number, id in ipairs(rank(scores, exact, literal_matches, limit)) do
         local location = header.locations[id]
@@ -470,6 +505,7 @@ function M.search(index, file, query, options)
     options = options or {}
     assert(options.match == nil or options.match == 'any' or options.match == 'all',
         'BM25 match must be any or all')
+    assert(options.prefix == nil or type(options.prefix) == 'string', 'BM25 prefix hint must be a string')
     local limit = options.limit == nil and 20 or options.limit
     assert(type(limit) == 'number' and limit >= 0 and limit < math.huge and limit % 1 == 0,
         'BM25 limit must be a nonnegative integer')

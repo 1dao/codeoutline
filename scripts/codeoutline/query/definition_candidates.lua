@@ -121,7 +121,7 @@ function M.find(G, f, site, ctx, lua_self, lua_initializers, candidates)
                 end
                 if node.kind ~= 'prototype' and not node.decl then score = score + 1 end
                 local bucket = node.kind == 'macro' and macro_hits or hits
-                bucket[#bucket + 1] = { id = id, score = score }
+                bucket[#bucket + 1] = { id = id, score = score, order = i }
             end
         end
         return hits, macro_hits, scanned
@@ -152,6 +152,8 @@ function M.find(G, f, site, ctx, lua_self, lua_initializers, candidates)
     hits = kept
     table.sort(hits, function(a, b)
         if a.score ~= b.score then return a.score > b.score end
+        -- Keep the lexical shortlist's order when semantic hints tie.
+        if candidates and site.recv then return a.order < b.order end
         return graph.before(G, a.id, b.id)
     end)
     local ids = {}

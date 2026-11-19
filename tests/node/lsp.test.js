@@ -783,6 +783,39 @@ test('LSP suggests distant definitions only after strict lookup fails', { timeou
     assert.deepEqual(await client.request('textDocument/definition', params), []);
 });
 
+test('LSP ranks Lua member candidates by imports, receiver file and directory', { timeout: 30000 }, async (t) => {
+    const client = await start(t);
+    const files = [
+        'a/other.lua', 'a/queue.lua', 'queue/other.lua', 'z/pkg/queue/automatic.lua',
+    ];
+    for (const file of files) {
+        await mkdir(join(client.project, file.slice(0, file.lastIndexOf('/'))), { recursive: true });
+        await writeFile(join(client.project, file), 'local M = {}\nfunction M.finish() end\nreturn M\n');
+    }
+    const call = 'function run() queue.finish() end';
+    const guard = "local queue = ready() and require('pkg.queue.automatic')";
+    const source = `${guard} or pick_queue()\n${call}\n`;
+    const entry = join(client.project, 'worker.lua');
+    await writeFile(entry, source);
+    await initialize(client, [client.project]); await indexed(client);
+    const uri = pathToFileURL(entry).href;
+    const definition = async () => (await client.request('textDocument/definition', {
+        textDocument: { uri }, position: { line: 1, character: call.indexOf('finish') + 2 },
+    })).map((target) => fileURLToPath(target.uri));
+    const [other, fileMatch, dirMatch, imported] = files.map((file) => join(client.project, file));
+    assert.deepEqual(await definition(), [imported, fileMatch, dirMatch, other]);
+    client.notify('textDocument/didOpen', { textDocument: {
+        uri, languageId: 'lua', version: 1, text: `${guard}\n${call}\n`,
+    } });
+    assert.deepEqual(await definition(), [imported]);
+    client.notify('textDocument/didChange', { textDocument: { uri, version: 2 },
+        contentChanges: [{ text: `local require = custom_loader; ${guard}\n${call}\n` }] });
+    assert.deepEqual(await definition(), [imported, fileMatch, dirMatch, other]);
+    client.notify('textDocument/didChange', { textDocument: { uri, version: 3 },
+        contentChanges: [{ text: `${guard}; queue = pick_queue()\n${call}\n` }] });
+    assert.deepEqual(await definition(), [imported, fileMatch, dirMatch, other]);
+});
+
 test('LSP navigates ambiguous proxy macros and respects include path changes and drafts', { timeout: 30000 }, async (t) => {
     const client = await start(t);
     const header = '#ifndef PROXY_H\n#define PROXY_H\n#define api_rawgeti proxy->api_rawgeti\n#endif\n';

@@ -8,6 +8,16 @@ local types = { class = true, struct = true, union = true, interface = true, rec
 local values = { variable = true, constant = true, field = true, enum_member = true }
 local function normalized(name) return (name:gsub('::', '.'):gsub(':', '.'):gsub('^%.', '')) end
 
+local function lua_receiver_score(receiver, qualified, path)
+    local owner = graph.owner(normalized(qualified))
+    if owner and owner:match('[^.]+$') == receiver then return 350 end
+    path, receiver = path:lower(), receiver:lower()
+    local filename = path:match('[^/]+$')
+    if filename and (filename:gsub('%.lua$', '')) == receiver then return 300 end
+    if ('/' .. path):find('/' .. receiver .. '/', 1, true) then return 200 end
+    return 0
+end
+
 -- An empty answer leaves the editor and the agent nothing to inspect, so a
 -- failed binding still gets name-based suggestions. They remain unconfirmed
 -- candidates: never call edges, references or index data.
@@ -57,6 +67,10 @@ function M.find(G, f, site, ctx, lua_self, lua_initializers, candidates)
         list = merged
     end
     local source_dir = G.files[f].path:match('^(.*)/') or ''
+    local receiver = language == 'lua' and not lua_self and site.recv
+    -- These are hints for unconfirmed candidates. The source can import a
+    -- module conditionally even when the resolver cannot bind its receiver.
+    local imported = receiver and graph.visible_dependencies(G, f, ctx)
     -- `bare` drops the receiver qualifier: the member name alone still names a
     -- definition worth offering, including top-level method definitions.
     local function scan(qualifier, bare)
@@ -101,6 +115,10 @@ function M.find(G, f, site, ctx, lua_self, lua_initializers, candidates)
                     or initialized_member)
                 and (qualifier or bare or node.kind ~= 'method' and node.kind ~= 'constructor') then
                 local score = g == f and 100 or (rec.path:match('^(.*)/') or '') == source_dir and 20 or 0
+                if receiver then
+                    score = score + lua_receiver_score(receiver, node.qualified, rec.path)
+                    if imported[g] then score = score + 150 end
+                end
                 if node.kind ~= 'prototype' and not node.decl then score = score + 1 end
                 local bucket = node.kind == 'macro' and macro_hits or hits
                 bucket[#bucket + 1] = { id = id, score = score }

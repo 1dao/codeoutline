@@ -42,6 +42,29 @@ local function binding_at(bindings, name, token)
     return best
 end
 
+-- If this receiver can be used as a table, a named guard followed by
+-- "and require(...)" can only have produced the module on the right.
+local function guarded_require(T, bindings, first)
+    local last = first
+    if T.k[first] == 'id' then
+        while (T:text(last + 1) == '.' or T:text(last + 1) == ':') and T.k[last + 2] == 'id' do
+            last = last + 2
+        end
+        if T:text(last + 1) == '(' then last = T.m[last + 1] end
+    elseif T:text(first) == '(' then
+        last = T.m[first]
+    else return nil end
+    if not last or T:text(last + 1) ~= 'and' then return nil end
+    local loader = last + 2
+    if T:text(loader) ~= 'require' or binding_at(bindings, 'require', loader - 1) then return nil end
+    local open = loader + 1
+    local parenthesized = T:text(open) == '('
+    local arg = parenthesized and open + 1 or open
+    local close = parenthesized and T.m[open] or arg
+    if parenthesized and close ~= arg + 1 or not value_end(T, close + 1) then return nil end
+    return literal(T, arg)
+end
+
 -- A nil-initialized local can receive a module in a sibling if block. Keep
 -- possible imports at later uses, and stop on a write we cannot model. Only the
 -- last write of each branch survives; sibling branches keep their source order.
@@ -211,6 +234,9 @@ function M.collect(r, T, bm)
                             end
                         end
                     end
+                elseif details and next == '=' then
+                    local path = guarded_require(T, bindings, i + 2)
+                    if path then hint, imported = 'lua-guard:' .. path, true end
                 end
                 -- Keep ordinary local function/table lookup; block unknown imported receivers.
                 add(T:text(i), i, scopes[i], hint, imported, finish)
@@ -658,6 +684,8 @@ local function module_target(G, imp, ctx)
 end
 
 local function imported_target(G, rec, hint, ctx)
+    local guarded = hint:match('^lua%-guard:(.+)$')
+    if guarded then return module_target(G, { kind = 'require', path = guarded }, ctx) end
     local index = tonumber(hint:match('^lua:(%d+)$'))
     if index then
         local imp = (rec.lua_imports or EMPTY)[index]

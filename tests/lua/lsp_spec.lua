@@ -596,6 +596,154 @@ end
 
 spec.describe('LSP navigation', function()
     service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+    spec.it('navigates Lua global calls through native base library registrations', function()
+        nav_write('runtime_base.c', [[
+#define LJLIB_MODULE_base
+#define LJLIB_CF(name) static int lj_cf_##name(void)
+LJLIB_CF(collectgarbage)
+{ return 0; }
+int luaopen_base(void) { return 0; }
+]])
+        nav_write('embedded_base.h', [[
+static int luaB_collectgarbage(void) { return 0; }
+static const luaL_Reg base_funcs[] = {
+    {"collectgarbage", luaB_collectgarbage},
+    {NULL, NULL}
+};
+int luaopen_base(lua_State *L) {
+    lua_pushglobaltable(L);
+    luaL_setfuncs(L, base_funcs, 0);
+    return 1;
+}
+]])
+        nav_write('test_replacement.lua', '_G.collectgarbage = function() end\n')
+        nav_write('global_gc.lua', "collectgarbage('count')\nlocal function collectgarbage() end\ncollectgarbage()\n")
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local function definition(line)
+            return nav({ method = 'lsp_definition', uri = nav_uri('global_gc.lua'),
+                position = { line = line, character = 0 } })
+        end
+        local config = nav_root .. '/.codeoutline.json'
+        local ok, err = pcall(function()
+            local results = definition(0)
+            spec.equal(#results, 2)
+            local by_uri = {}
+            for _, loc in ipairs(results) do by_uri[loc.uri] = loc.range end
+            spec.equal(range_text('runtime_base.c', by_uri[nav_uri('runtime_base.c')]), 'collectgarbage')
+            spec.equal(range_text('embedded_base.h', by_uri[nav_uri('embedded_base.h')]), 'luaB_collectgarbage')
+            nav_write('.codeoutline.json', '{"luaRuntime":"luajit"}')
+            results = definition(0)
+            spec.equal(#results, 1)
+            spec.equal(results[1].uri, nav_uri('runtime_base.c'))
+            nav_write('.codeoutline.json', '{"luaRuntime":"embedded"}')
+            results = definition(0)
+            spec.equal(#results, 1)
+            spec.equal(results[1].uri, nav_uri('embedded_base.h'))
+            results = definition(2)
+            spec.equal(#results, 1)
+            spec.equal(results[1].uri, nav_uri('global_gc.lua'))
+        end)
+        os.remove(config)
+        for _, name in ipairs({ 'runtime_base.c', 'embedded_base.h', 'test_replacement.lua', 'global_gc.lua' }) do
+            os.remove(nav_root .. '/' .. name)
+        end
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        if not ok then error(err, 0) end
+    end)
+    spec.it('navigates explicitly imported Python extension methods to their C implementations', function()
+        nav_write('native_demo.c', [[
+static PyObject *native_ping(PyObject *self, PyObject *args) { return NULL; }
+static PyMethodDef methods[] = {
+    {"ping", native_ping, METH_NOARGS, NULL},
+    {NULL, NULL, 0, NULL}
+};
+static struct PyModuleDef module = {
+    PyModuleDef_HEAD_INIT, "native_demo", NULL, -1, methods
+};
+PyMODINIT_FUNC PyInit_native_demo(void) {
+    return PyModule_Create(&module);
+}
+]])
+        nav_write('native_client.py', 'import native_demo as native\nnative.ping()\n'
+            .. 'from native_demo import ping as run\nrun()\nnative = something\nnative.ping()\n')
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local ok, err = pcall(function()
+            for _, position in ipairs({ { line = 1, character = 7 }, { line = 3, character = 0 } }) do
+                local results = nav({ method = 'lsp_definition', uri = nav_uri('native_client.py'), position = position })
+                spec.equal(#results, 1)
+                spec.equal(results[1].uri, nav_uri('native_demo.c'))
+                spec.equal(range_text('native_demo.c', results[1].range), 'native_ping')
+            end
+            local results = nav({ method = 'lsp_definition', uri = nav_uri('native_client.py'),
+                position = { line = 5, character = 7 } })
+            for _, result in ipairs(results) do spec.equal(result.uri == nav_uri('native_demo.c'), false) end
+        end)
+        os.remove(nav_root .. '/native_demo.c')
+        os.remove(nav_root .. '/native_client.py')
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        if not ok then error(err, 0) end
+    end)
+    spec.it('navigates explicit JNI, P/Invoke, cgo and Node-API bindings', function()
+        local files = {
+            ['Native.java'] = 'package demo;\nclass Native {\n    native int ping();\n    native int registered();\n}\n',
+            ['Native.kt'] = 'package demo\nclass KotlinNative {\n    external fun ping(): Int\n}\n',
+            ['Native.cs'] = 'class Native {\n    [DllImport("bridge", EntryPoint = "native_ping")]\n'
+                .. '    public static extern int Ping();\n}\n',
+            ['native.go'] = 'package demo\n// int cgo_ping(void);\nimport "C"\nfunc run() { C.cgo_ping() }\n',
+            ['bridge.c'] = 'int Java_demo_Native_ping(void) { return 1; }\n'
+                .. 'int Java_demo_KotlinNative_ping(void) { return 1; }\n'
+                .. 'int native_ping(void) { return 1; }\nint cgo_ping(void) { return 1; }\n' .. [[
+static jint registered_ping(JNIEnv *env, jobject obj) { return 1; }
+static JNINativeMethod methods[] = {
+    {"registered", "()I", (void *)registered_ping}
+};
+jint JNI_OnLoad(JavaVM *vm, void *reserved) {
+    jclass cls = (*env)->FindClass(env, "demo/Native");
+    (*env)->RegisterNatives(env, cls, methods, 1);
+    return JNI_VERSION_1_6;
+}
+]],
+            ['addon.js'] = 'const addon = require("./addon.node");\naddon.ping();\n',
+            ['addon.ts'] = 'const addon = require("./addon.node");\naddon.pong();\n',
+            ['addon.c'] = [[
+static napi_value node_ping(napi_env env, napi_callback_info info) { return 0; }
+static napi_value node_pong(napi_env env, napi_callback_info info) { return 0; }
+static napi_value Init(napi_env env, napi_value exports) {
+    napi_value value;
+    napi_property_descriptor props[] = {
+        {"pong", NULL, node_pong, NULL, NULL, NULL, napi_default, NULL}
+    };
+    napi_define_properties(env, exports, 1, props);
+    napi_create_function(env, "ping", NAPI_AUTO_LENGTH, node_ping, NULL, &value);
+    napi_set_named_property(env, exports, "ping", value);
+    return exports;
+}
+NAPI_MODULE(NODE_GYP_MODULE_NAME, Init)
+]],
+        }
+        for name, source in pairs(files) do nav_write(name, source) end
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local ok, err = pcall(function()
+            for _, case in ipairs({
+                { 'Native.java', 2, 15, 'bridge.c', 'Java_demo_Native_ping' },
+                { 'Native.java', 3, 15, 'bridge.c', 'registered_ping' },
+                { 'Native.kt', 2, 17, 'bridge.c', 'Java_demo_KotlinNative_ping' },
+                { 'Native.cs', 2, 29, 'bridge.c', 'native_ping' },
+                { 'native.go', 3, 15, 'bridge.c', 'cgo_ping' },
+                { 'addon.js', 1, 6, 'addon.c', 'node_ping' },
+                { 'addon.ts', 1, 6, 'addon.c', 'node_pong' },
+            }) do
+                local results = nav({ method = 'lsp_definition', uri = nav_uri(case[1]),
+                    position = { line = case[2], character = case[3] } })
+                spec.equal(#results, 1, case[1])
+                spec.equal(results[1].uri, nav_uri(case[4]), case[1])
+                spec.equal(range_text(case[4], results[1].range), case[5])
+            end
+        end)
+        for name in pairs(files) do os.remove(nav_root .. '/' .. name) end
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        if not ok then error(err, 0) end
+    end)
     spec.it('navigates methods on local tables returned by Lua module factories', function()
         nav_write('idle_gc.lua', [[local M = {}
 function M.new(opts)
@@ -4451,7 +4599,7 @@ spec.describe('LSP navigation requests', function()
         jobs[3].done(true, { result = {}, incomplete = false })
         spec.equal(next(session.pending), nil)
     end)
-    spec.it('throttles incomplete popups across shared queries and external document closure', function()
+    spec.it('logs definition limits across shared queries and external document closure', function()
         local clock, now = xtimer.now_ms, 100
         xtimer.now_ms = function() return now end
         local ok, err = pcall(function()
@@ -4477,8 +4625,8 @@ spec.describe('LSP navigation requests', function()
                 for _, msg in ipairs(output) do if msg.method == method then n = n + 1 end end
                 return n
             end
-            spec.equal(count('window/showMessage'), 1)
-            spec.equal(count('window/logMessage'), 3)
+            spec.equal(count('window/showMessage'), 0)
+            spec.equal(count('window/logMessage'), 4)
             local replies = {}
             for _, msg in ipairs(output) do if msg.id then replies[msg.id] = msg end end
             for id = 2, 5 do spec.equal(#replies[id].result, 1) end
@@ -4486,15 +4634,16 @@ spec.describe('LSP navigation requests', function()
                 version = 1, text = 'int printf(const char *, ...);' } })
             send('textDocument/didClose', { textDocument = { uri = 'file:///outside/stdio.h' } })
             definition(6); jobs[2].done(true, limited)
-            spec.equal(count('window/showMessage'), 1)
-            spec.equal(count('window/logMessage'), 4)
+            spec.equal(count('window/showMessage'), 0)
+            spec.equal(count('window/logMessage'), 5)
             spec.contains(output[#output - 1].params.message, uri)
             now = now + lsp.LIMIT_WARNING_MS
             definition(7); jobs[3].done(true, limited)
-            spec.equal(count('window/showMessage'), 2, 'persistent limitations must be reported again')
+            spec.equal(count('window/showMessage'), 0)
+            spec.equal(count('window/logMessage'), 6)
             send('textDocument/references', { textDocument = { uri = uri }, position = { line = 0, character = 1 } }, 8)
             jobs[4].done(true, { result = {}, incomplete = true })
-            spec.equal(count('window/showMessage'), 3, 'different warning types remain independent')
+            spec.equal(count('window/showMessage'), 1, 'reference limits still show a warning')
             session:close()
         end)
         xtimer.now_ms = clock

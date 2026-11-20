@@ -1335,6 +1335,9 @@ local function resolved_definition(V, doc, c, targets, f, offset)
             return files, V.js_context.include_incomplete or V.js_context.workspace_incomplete or V.js_context.go_incomplete or V.js_context.go_methods_incomplete or V.js_context.rust_incomplete or V.js_context.receiver_incomplete
         end
     end
+    local native, native_incomplete = require('codeoutline.analysis.foreign_definition').resolve(
+        V, doc, c, targets, f, offset, deps, source_doc, location, M.MAX_FILE_BYTES)
+    if native then return native, native_incomplete end
     if #targets == 0 then
         if C_FAMILY[V.files[f].language] then
             local entries, info = require('codeoutline.query.external_headers').find(V, f, c, V.js_context, probe_includes)

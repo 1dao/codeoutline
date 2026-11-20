@@ -611,6 +611,10 @@ function M.context(G)
             ctx.directory = normalize(value)
             assert(not ctx.directory:match('^%.%.'), 'luaRuntimeDirectory must stay inside project')
         end
+        local runtime = config.luaRuntime
+        assert(runtime == nil or runtime == 'luajit' or runtime == 'embedded',
+            'luaRuntime must be luajit or embedded')
+        ctx.runtime = runtime
     end
     return ctx
 end

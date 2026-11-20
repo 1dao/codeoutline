@@ -104,8 +104,11 @@ end
 -- The indexed entry alone is sufficient for navigating the require string;
 -- member bindings still require the separately verified registration table.
 function M.lua_entrypoints(G, name)
+    return M.entrypoints(G, 'luaopen_' .. name:gsub('%.', '_'))
+end
+
+function M.entrypoints(G, symbol)
     local result = {}
-    local symbol = 'luaopen_' .. name:gsub('%.', '_')
     for _, id in ipairs(G.by_name[symbol] or {}) do
         local node, f = G.nodes[id], G.node_file[id]
         if node.kind == 'function' and not node.static and (G.files[f].language == 'c' or G.files[f].language == 'cpp') then

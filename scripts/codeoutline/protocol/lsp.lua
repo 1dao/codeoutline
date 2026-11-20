@@ -609,7 +609,8 @@ function M.new(config, emit, submit, cancel, stop, await_worker)
                 and 'CodeOutline: results were truncated; too many matching references'
                 or 'CodeOutline: lookup reached a query limit; some results may be omitted'
             local now, previous = xtimer.now_ms(), limit_warnings[message]
-            local show = not previous or now - previous >= M.LIMIT_WARNING_MS
+            local definition_limit = req.method == 'lsp_definition' and not value.bm25_building
+            local show = not definition_limit and (not previous or now - previous >= M.LIMIT_WARNING_MS)
             if show then limit_warnings[message] = now end
             local detail = message
             if not show then

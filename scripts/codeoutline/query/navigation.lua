@@ -234,16 +234,15 @@ local function resolve_site(V, f, from, name, kind, recv, evidence, offset, inde
     if #targets == 0 and (kind == 'call' or kind == 'ref') then
         targets = graph.resolve(V, f, src, name, kind, recv or nil, direct, paired, PROTOTYPE, evidence, V.js_context, site_line) or {}
     end
-    -- A native object: the local's initializer chain names the metatable whose
-    -- methods the C side registers (`local pool = mod.open()`, then `pool:read()`).
+    -- Resolve methods on objects produced by the local's initializer.
     if #targets == 0 and recv and (kind == 'member_call' or kind == 'member_symbol')
         and V.files[f].language == 'lua' then
         local bindings = require('codeoutline.analysis.lua.lua_bindings')
         local ctx = V.js_context.lua
         local rec, T
-        if offset and require('codeoutline.analysis.foreign').has_candidates(V, ctx) then rec, T = M.full(V, f) end
+        if offset then rec, T = M.full(V, f) end
         if T then
-            local target = bindings.receiver(V, rec, T, recv, offset, V.js_context.lua)
+            local target = bindings.receiver(V, rec, T, recv, offset, ctx)
             for _, entry in ipairs(bindings.member(V, target, name)) do
                 local id = V.id_of[entry.file] and V.id_of[entry.file][entry.index]
                 if id then targets[#targets + 1] = id end

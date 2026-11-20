@@ -596,6 +596,49 @@ end
 
 spec.describe('LSP navigation', function()
     service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+    spec.it('navigates methods on local tables returned by Lua module factories', function()
+        nav_write('idle_gc.lua', [[local M = {}
+function M.new(opts)
+    local self = {}
+    function self.schedule() end
+    return self
+end
+function M.uncertain(flag)
+    local self = {}
+    function self.schedule() end
+    if flag then return {} end
+    return self
+end
+return M
+]])
+        nav_write('timer_worker.lua', [[local timer_gc = require('idle_gc').new({
+    busy = function() return false end,
+})
+local module = require('idle_gc')
+local timer = module.new({})
+local uncertain = module.uncertain(false)
+timer_gc.schedule()
+timer.schedule()
+uncertain.schedule()
+]])
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        local doc = docs.read(nav_root .. '/timer_worker.lua')
+        for _, receiver in ipairs({ 'timer_gc', 'timer', 'uncertain' }) do
+            local first = assert(doc.source:find(receiver .. '.schedule()', 1, true))
+            local found = nav({ method = 'lsp_definition', uri = doc.uri,
+                position = doc:position(first + #receiver) }) or {}
+            spec.equal(#found, receiver == 'uncertain' and 0 or 1)
+            if #found > 0 then
+                spec.equal(found[1].uri, nav_uri('idle_gc.lua'))
+                spec.equal(found[1].range.start.line, 3)
+            end
+        end
+        local first = assert(doc.source:find('timer_gc.schedule()', 1, true))
+        local completed = nav({ method = 'lsp_completion', uri = doc.uri,
+            position = doc:position(first + #'timer_gc.') })
+        spec.equal(#completed.items, 1)
+        spec.equal(completed.items[1].label, 'schedule')
+    end)
     spec.it('navigates indexed include fragments without an editor language hint', function()
         nav_write('IndexedFragment.cpp', '#include "IndexedFragment.piece"\nint IndexedFragmentCall() { return IndexedPiece(); }')
         nav_write('IndexedFragment.piece', '#include "IndexedLeaf.piece"\nstatic int IndexedPiece() { return IndexedLeaf(); }')
@@ -1117,6 +1160,51 @@ Manager* Factory();
             local completion = nav({ method = 'lsp_completion', uri = doc.uri, position = doc:position(offset) })
             local names = {}; for _, item in ipairs(completion.items) do names[item.label] = true end
             spec.truthy(names.only_b, case[1]); spec.nil_value(names.only_a, case[1])
+        end
+    end)
+    spec.it('resolves Python, JavaScript and TypeScript factory results for definition and completion', function()
+        local cases = {
+            { 'py', 'class A:\n    def ping(self): pass\nclass B:\n    def ping(self): pass\ndef make(): return A()\n',
+                'from .factory_result import make as build\na = build()\na.ping()\n' },
+            { 'js', 'class A { ping() {} }\nclass B { ping() {} }\nexport function make() { return new A(); }\n',
+                'import { make as build } from "./factory_result.js";\nconst a = build();\na.ping();\n' },
+            { 'ts', 'class A { ping() {} }\nclass B { ping() {} }\nexport function make(): A { return new A(); }\n',
+                'import { make as build } from "./factory_result";\nconst a = build();\na.ping();\n' },
+        }
+        for _, case in ipairs(cases) do
+            assert(xutils.mkdir_p(nav_root .. '/factory_' .. case[1]))
+            local prefix = 'factory_' .. case[1] .. '/'
+            if case[1] == 'py' then nav_write(prefix .. '__init__.py', '') end
+            nav_write(prefix .. 'factory_result.' .. case[1], case[2])
+            nav_write(prefix .. 'caller.' .. case[1], case[3])
+            local local_call = case[3]:gsub('^[^\n]+\n', ''):gsub('build%(', 'make(')
+            nav_write(prefix .. 'local_factory.' .. case[1], case[2] .. local_call)
+        end
+        service.refresh(nav_root, { cache_path = nav_root .. '/cache.idx', lister = 'walk' })
+        for _, case in ipairs(cases) do
+            local prefix = 'factory_' .. case[1] .. '/'
+            local target = nav_uri(prefix .. 'factory_result.' .. case[1])
+            local doc = docs.read(nav_root .. '/' .. prefix .. 'caller.' .. case[1])
+            local position = doc:position(assert(doc.source:find('a.ping', 1, true)) + 1)
+            local local_doc = docs.read(nav_root .. '/' .. prefix .. 'local_factory.' .. case[1])
+            local local_found = nav({ method = 'lsp_definition', uri = local_doc.uri,
+                position = local_doc:position(assert(local_doc.source:find('a.ping', 1, true)) + 1) }) or {}
+            spec.equal(#local_found, 1, case[1]); spec.equal(local_found[1].uri, local_doc.uri)
+            spec.equal(local_found[1].range.start.line, case[1] == 'py' and 1 or 0)
+            local found = nav({ method = 'lsp_definition', uri = doc.uri, position = position }) or {}
+            spec.equal(#found, 1, case[1]); spec.equal(found[1].uri, target)
+            spec.equal(found[1].range.start.line, case[1] == 'py' and 1 or 0)
+            local completion = nav({ method = 'lsp_completion', uri = doc.uri, position = position })
+            spec.equal(#completion.items, 1, case[1]); spec.equal(completion.items[1].label, 'ping')
+            local session = 'factory-draft-' .. case[1]
+            navigation.sync({ session = session, open = { [target] = 1 }, changed = { [target] = {
+                language = doc:parse().language, version = 1,
+                source = case[2]:gsub(' A%(', ' B('):gsub('%)%: A', '): B'),
+            } } })
+            found = nav({ method = 'lsp_definition', session = session, uri = doc.uri, position = position }) or {}
+            spec.equal(#found, 1, case[1]); spec.equal(found[1].uri, target)
+            spec.equal(found[1].range.start.line, case[1] == 'py' and 3 or 1)
+            navigation.close(session)
         end
     end)
     spec.it('joins conditional Python and JavaScript-family receivers for navigation and completion', function()

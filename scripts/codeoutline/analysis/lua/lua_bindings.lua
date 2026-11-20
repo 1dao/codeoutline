@@ -255,6 +255,43 @@ function M.collect(r, T, bm)
                 end
             end
         end
+        -- Only a single direct return of a local table establishes a factory result.
+        local returns = {}
+        for i = 1, T.n do
+            if T.k[i] == 'kw' and T:text(i) == 'return' then
+                local scope = scopes[i]
+                while scope ~= 0 and T:text(scope) ~= 'function' do scope = scopes[scope] end
+                if scope ~= 0 then
+                    returns[scope] = returns[scope] == nil and scope == scopes[i] and i or false
+                end
+            end
+        end
+        r.lua_factory_members = {}
+        for n, node in ipairs(r.nodes) do
+            local scope = T:text(node.ti) == 'local' and node.ti + 1 or node.ti
+            local ret = returns[scope]
+            if ret and T.k[ret + 1] == 'id'
+                and (ret + 2 == node.tj or T:text(ret + 2) == ';' and ret + 3 == node.tj) then
+                local name = T:text(ret + 1)
+                local b = binding_at(bindings, name, ret)
+                if b and b.a == scope and b.local_declaration and T:text(b.token + 2) == '{' then
+                    local replaced = false
+                    for _, write in ipairs(bindings[name]) do
+                        if write.assignment and write.token > b.token and write.token < ret then replaced = true; break end
+                    end
+                    if not replaced then
+                        local members = M.local_members(r.nodes, scopes, name, b.token, scope, ret - 1)
+                        for i = b.token + 1, ret - 1 do
+                            if T:text(i) == name and T:text(i + 1) == '.' and T:text(i + 3) == '='
+                                and (scopes[i] ~= scope or T:text(i + 4) ~= 'function') then
+                                members[T:text(i + 2)] = nil
+                            end
+                        end
+                        if next(members) then r.lua_factory_members[n] = members end
+                    end
+                end
+            end
+        end
         -- Derive method receivers only in query parses. Closures capture this
         -- binding; a later local or parameter named self hides it normally.
         r.lua_self = {}
@@ -706,6 +743,10 @@ local function imported_target(G, rec, hint, ctx)
 end
 
 function M.member(G, target, name)
+    if target and target.lua_factory_members then
+        local f, n = target.file, target.lua_factory_members[name]
+        return n and { { node = G.files[f].nodes[n], file = f, index = n } } or {}
+    end
     if target and target.alternatives then
         local result, seen = {}, {}
         for _, alternative in ipairs(target.alternatives) do
@@ -725,7 +766,12 @@ function M.member(G, target, name)
     return result
 end
 
-function M.return_target(G, node, ctx)
+function M.return_target(G, node, ctx, file, index)
+    if file and G.files[file].language == 'lua' and ctx and ctx.ordinary then
+        local data = ctx.ordinary.data(file)
+        local members = data.lua_factory_members and data.lua_factory_members[index]
+        if members then return { file = file, lua_factory_members = members } end
+    end
     local name = require('codeoutline.analysis.foreign').returns(node, 'lua')
     local files = name and M.native_modules(G, name, ctx)
     if files and #files > 0 then return { modules = files, module_name = name } end
@@ -755,16 +801,24 @@ function M.receiver(G, rec, T, name, offset, ctx, depth)
     local imported = imported_target(G, rec, hint, ctx)
     if imported then return imported, true end
     local i = best.token + 2
-    if best.imported or T:text(best.token + 1) ~= '=' or T.k[i] ~= 'id' then return nil, true end
-    local target = M.receiver(G, rec, T, T:text(i), T.s[best.token] - 1, ctx, depth + 1)
-    i = i + 1
+    if T:text(best.token + 1) ~= '=' or T.k[i] ~= 'id' then return nil, true end
+    local target
+    local path = T:text(i) == 'require' and T:text(i + 1) == '(' and T.m[i + 1] == i + 3 and literal(T, i + 2)
+    if path and not binding_at(T.lua_bindings, 'require', best.token - 1) then
+        target, i = module_target(G, { kind = 'require', path = path }, ctx), i + 4
+    elseif not best.imported then
+        target = M.receiver(G, rec, T, T:text(i), T.s[best.token] - 1, ctx, depth + 1)
+        i = i + 1
+    end
     while target and (T:text(i) == '.' or T:text(i) == ':') and T.k[i + 1] == 'id' do
         local close = T:text(i + 2) == '(' and T.m[i + 2]
         if not close then return nil, true end
         local next_target
         for _, entry in ipairs(M.member(G, target, T:text(i + 1))) do
-            local value = M.return_target(G, entry.node, ctx)
-            if not value or next_target and next_target.module_name ~= value.module_name then return nil, true end
+            local value = M.return_target(G, entry.node, ctx, entry.file, entry.index)
+            if not value or next_target and (not value.module_name or next_target.module_name ~= value.module_name) then
+                return nil, true
+            end
             next_target = value
         end
         target, i = next_target, close + 1

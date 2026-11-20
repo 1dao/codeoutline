@@ -834,6 +834,14 @@ end
 function Completion:entries(target)
     if not target then return {} end
     if target.receiver then return require('codeoutline.analysis.receivers').entries(self, target.receiver) end
+    if target.lua_factory_members then
+        local out, f = {}, target.file
+        for name, n in pairs(target.lua_factory_members) do
+            local node = self.V.files[f].nodes[n]
+            out[#out + 1] = { name = name, node = node, kind = node.kind, file = f }
+        end
+        return out
+    end
     if target.go_blocked or target.cxx_blocked then return {} end
     if target.go_receiver then return require('codeoutline.analysis.go.go_methods').context(self.V, self.V.js_context).members(target.go_receiver, self.f) end
     if target.cxx_receiver then

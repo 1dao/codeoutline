@@ -189,6 +189,7 @@ function M.context(G, ctx, source, options)
             csharp_scopes = parsed.csharp_scopes, csharp_parameters = parsed.csharp_parameters, csharp_access = parsed.csharp_access }
         data.implementation_evidence = parsed.implementation_evidence
         data.lua_locals = parsed.lua_locals
+        data.lua_factory_members = parsed.lua_factory_members
         data.lua_self = parsed.lua_self
         data.static_dispatch = parsed.static_dispatch
         data.type_sites, data.type_parameters = parsed.type_sites, parsed.type_parameters
@@ -222,6 +223,10 @@ function M.context(G, ctx, source, options)
                 for name in pairs(info.fields) do self_weight = self_weight + #name + 64 end
             end
             self_weight = self_weight + 32
+        end
+        for _, members in pairs(parsed.lua_factory_members or {}) do
+            self_weight = self_weight + 128
+            for name in pairs(members) do self_weight = self_weight + #name + 64 end
         end
         local weight = #raw + #parsed.refs.name * 128 + #(parsed.js_exports or {}) * 256 + self_weight
             + (parsed.receivers and parsed.receivers.weight or 0)

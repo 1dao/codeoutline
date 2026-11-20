@@ -103,8 +103,9 @@ local function join_conditionals(T, language, assignments, meta, add)
                             if not b or b.empty then empty = true end
                             if not b then return end
                             for _, value in ipairs(b.alternatives or { b }) do
-                                if value.type or value.owner then
+                                if value.type or value.owner or value.call then
                                     local key = (value.type or '') .. '\0' .. tostring(value.owner) .. '\0' .. tostring(value.static)
+                                        .. '\0' .. (value.call or '') .. '\0' .. (value.call and tostring(value.call_at) or '')
                                     if not seen[key] then seen[key] = true; values[#values + 1] = value end
                                 elseif not value.empty then unknown = true end
                             end
@@ -133,17 +134,18 @@ end
 function M.collect(r, T)
     local language = r.language
     if language ~= 'python' and language ~= 'kotlin' and not js(language) then return end
-    local meta = { bindings = {}, by_name = {}, statics = {}, fields = {}, weight = 128 }
+    local meta = { bindings = {}, by_name = {}, statics = {}, fields = {}, returns = {}, weight = 128 }
     r.receivers = meta
     local function add(name, token, first, last, value, at)
         if #meta.bindings >= M.MAX_BINDINGS then meta.incomplete = true; return end
         local b = { name = name, at = at or (token > 0 and T.s[token] - 1 or 0), first = first, last = last,
             owner = value and value.owner, type = value and value.type, static = value and value.static,
             super = value and value.super, alternatives = value and value.alternatives,
-            empty = value and value.empty, blocked = value and value.blocked }
+            empty = value and value.empty, blocked = value and value.blocked,
+            call = value and value.call, call_at = value and value.call_at, target = value and value.target }
         local n = #meta.bindings + 1; meta.bindings[n] = b
         meta.by_name[name] = meta.by_name[name] or {}; table.insert(meta.by_name[name], n)
-        meta.weight = meta.weight + 192 + #name + #(b.type or '') + 16 * #(b.alternatives or {})
+        meta.weight = meta.weight + 192 + #name + #(b.type or '') + #(b.call or '') + 16 * #(b.alternatives or {})
         if name == 'this' and js(language) then
             add('super', token, first, last, { owner = b.owner, type = b.type, static = b.static, super = true })
         end
@@ -164,6 +166,46 @@ function M.collect(r, T)
         local parts = { text(i) }; local j = i + 1
         while text(j) == '.' and T.k[j + 1] == 'id' do parts[#parts + 1] = text(j + 1); j = j + 2 end
         return table.concat(parts, '.'), j
+    end
+    local function ends_statement(i)
+        return text(i) == ';' or text(i) == '}' or text(i) == '' or T.k[i] == 'nl' or T.k[i] == 'dedent'
+            or js(language) and (T.k[i] == 'id' or T.k[i] == 'kw') and T.l[i] > T.el[i - 1]
+    end
+    local function simple_call(i)
+        local name, open = written(i)
+        local close = open and text(open) == '(' and T.m[open]
+        if close and ends_statement(close + 1) then return name, close end
+    end
+    local function record_return(n, node, close)
+        local python = language == 'python'
+        local i, result, constructor_at = close + 1
+        if text(i) == (python and '->' or ':') then
+            local name, after = written(i + 1)
+            if name and text(after) == (python and ':' or '{') then result = name end
+        else
+            local finish = node.tj
+            if python and text(i) == ':' then
+                i = i + 1
+                if T.k[i] == 'nl' and T.k[i + 1] == 'indent' then i = i + 2 end
+            elseif not python and text(i) == '{' and T.m[i] == finish then
+                i = i + 1
+            else return end
+            if text(i) == 'return' and (python or text(i + 1) == 'new' and T.l[i] == T.l[i + 1]) then
+                local name, tail = simple_call(i + (python and 1 or 2))
+                if tail then
+                    tail = tail + 1
+                    if text(tail) == ';' then tail = tail + 1 end
+                    while python and (T.k[tail] == 'nl' or T.k[tail] == 'dedent') and tail <= finish do tail = tail + 1 end
+                    if python and tail > finish or not python and tail == finish then
+                        result, constructor_at = name, T.s[i] - 1
+                    end
+                end
+            end
+        end
+        if result then
+            meta.returns[n] = { type = result, constructor_at = constructor_at }
+            meta.weight = meta.weight + 96 + #result
+        end
     end
     local assignments = {}
     if language == 'kotlin' then
@@ -226,6 +268,10 @@ function M.collect(r, T)
                 p = p + 2
                 local close = text(p) == '(' and T.m[p]
                 if close then
+                    if node.kind == 'function' and not node.parent then
+                        record_return(n, node, close)
+                        add(node.name, p - 1, 0, #T.src + 1, { target = n })
+                    end
                     local first, last = bounds(node)
                     local owner = node.parent and classes[r.nodes[node.parent].kind] and node.parent
                     local static, classmethod = false, false
@@ -256,7 +302,7 @@ function M.collect(r, T)
                 if next == '=' or next == ':=' then
                     local name, after = written(i + 2)
                     if text(i + 2) == 'None' and (T.k[i + 3] == 'nl' or text(i + 3) == ';') then value = { empty = true }
-                    elseif name and text(after) == '(' then value = { type = name }
+                    elseif name and text(after) == '(' then value = { call = simple_call(i + 2), call_at = T.s[i] - 2 }
                     elseif name then value = M.at(meta, name, T.s[i] - 1) end
                 end
                 local b = add(text(i), i, first, last, value)
@@ -295,12 +341,14 @@ function M.collect(r, T)
             if callable[node.kind] then
                 local first, last = bounds(node)
                 local owner = node.parent and classes[r.nodes[node.parent].kind] and node.parent
-                local arrow, static = false, false
+                local arrow, static, parameters = false, false, nil
                 for i = node.ti, node.tj do
+                    if not parameters and text(i) == '(' then parameters = T.m[i] end
                     if text(i) == '=>' then arrow = true; break end
                     if text(i) == 'static' then static = true end
                     if text(i) == '{' then break end
                 end
+                if node.kind == 'function' and parameters then record_return(n, node, parameters) end
                 meta.statics[n] = static
                 local value = owner and { owner = owner, static = static } or arrow and M.at(meta, 'this', first)
                 add('this', node.ti, first, last, value)
@@ -326,17 +374,16 @@ function M.collect(r, T)
         local bindings = {}
         for _, list in pairs(T.js_bindings or {}) do for _, b in ipairs(list) do bindings[#bindings + 1] = b end end
         table.sort(bindings, function(a, b) return a.token < b.token end)
-        local function ends_statement(i)
-            return text(i) == ';' or text(i) == '}' or text(i) == ''
-                or (T.k[i] == 'id' or T.k[i] == 'kw') and T.l[i] > T.el[i - 1]
-        end
         for _, b in ipairs(bindings) do
             local first = b.a > 0 and T.s[b.a] - 1 or 0
             local last = b.b > 0 and T.e[b.b] + 1 or #T.src + 1
             local value = b.type ~= '?' and { type = b.type } or nil
             if text(b.token + 1) == '=' and (text(b.token + 2) == 'this' or T.k[b.token + 2] == 'id') then
-                value = value or M.at(meta, text(b.token + 2), T.s[b.token] - 1)
+                local name = simple_call(b.token + 2)
+                value = value or (name and { call = name, call_at = T.s[b.token] - 2 }
+                    or M.at(meta, text(b.token + 2), T.s[b.token] - 1))
             end
+            if b.target then value = { target = b.target } end
             if not value then
                 local tail = b.token + 1
                 local _, after = written(b.token + 2)
@@ -422,6 +469,44 @@ function M.types(G, f, written, ctx, scope)
     return result
 end
 
+local function call_types(G, f, b, ctx)
+    local rec = G.files[f]
+    local meta = detail(G, f, ctx).receivers
+    local head, tail = b.call:match('^([%w_$]+)%.(.+)$')
+    local lexical = M.at(meta, head or b.call, b.call_at)
+    local targets = {}
+    if lexical then
+        if not tail and lexical.target then targets = { G.id_of[f][lexical.target] } end
+    elseif js(rec.language) then
+        for _, imp in ipairs(rec.js_imports or {}) do
+            if imp.local_name == (head or b.call) and (tail ~= nil) == (imp.imported == '*') then
+                targets = require('codeoutline.analysis.js.js_resolution').imported(G, f, imp.path, tail or imp.imported, ctx)
+                break
+            end
+        end
+    else
+        for _, imp in ipairs(detail(G, f, ctx).python_imports or {}) do
+            if imp.name == (head or b.call) and not imp.blocked then
+                targets = require('codeoutline.analysis.python.python_bindings').imported(G, f, imp.path,
+                    imp.imported == '*' and (tail or '') or imp.imported .. (tail and '.' .. tail or ''), ctx)
+                break
+            end
+        end
+        if #targets == 0 then return M.types(G, f, b.call, ctx) end
+    end
+    if #targets ~= 1 then return {} end
+    local id = targets[1]
+    local node, source = G.nodes[id], G.node_file[id]
+    if rec.language == 'python' and classes[node.kind] then return { id } end
+    if node.kind ~= 'function' or G.files[source].language ~= rec.language
+        and not (js(rec.language) and js(G.files[source].language)) then return {} end
+    local evidence = detail(G, source, ctx).receivers
+    local returned = evidence and evidence.returns[id - G.id_of[source][1] + 1]
+    if not returned then return {} end
+    if returned.constructor_at and M.at(evidence, returned.type:match('^[^.]+'), returned.constructor_at) then return {} end
+    return M.types(G, source, returned.type, ctx)
+end
+
 local function from_binding(G, f, b, ctx)
     if not b then return nil end
     if b.alternatives then
@@ -437,7 +522,7 @@ local function from_binding(G, f, b, ctx)
         end
         return { kind = 'types', ids = ids, static = static, language = G.files[f].language, file = f }
     end
-    local ids = b.owner and { G.id_of[f][b.owner] } or M.types(G, f, b.type, ctx)
+    local ids = b.owner and { G.id_of[f][b.owner] } or b.call and call_types(G, f, b, ctx) or M.types(G, f, b.type, ctx)
     if b.super then
         local bases = {}
         for _, id in ipairs(ids) do
@@ -565,7 +650,7 @@ function M.binding(G, f, src, name, ctx, options)
         local index = options.evidence and tonumber(options.evidence:match('^receiver:(%d+)$'))
         local b = index == 0 and { blocked = true } or index and meta and meta.bindings[index]
             or options.offset and M.at(meta, name, options.offset)
-        if b and (index or b.blocked or b.empty or b.owner or b.type or b.alternatives or language == 'python' or name == 'this') then
+        if b and (index or b.blocked or b.empty or b.owner or b.type or b.call or b.alternatives or language == 'python' or name == 'this') then
             return from_binding(G, f, b, ctx)
         end
         if js(language) and (name == 'this' or name == 'super') or language == 'python' and (name == 'self' or name == 'cls') then

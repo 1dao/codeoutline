@@ -12,6 +12,8 @@ local snapshot = require('codeoutline.bm25.snapshot')
 local M = {}
 local TRAILER_SIZE = 80
 local PASSAGE_BLOCK = 32
+local POSTING_RUN_BYTES = 8 * 1024 * 1024
+local POSTING_PARTITIONS = 32
 local GC_BATCH_BYTES = 512 * 1024
 local GC_STEP_KB = 512
 local cached_digest, cached_header
@@ -89,8 +91,37 @@ local function read_at(file, offset, length)
     return data
 end
 
-local function merge_terms(spool, totals, lengths, count, write_passages, gc_step)
+-- Each file contributes a disjoint range of document IDs. Spill between
+-- files so scores for a (term, document) pair are summed before encoding.
+local function spill_postings(spool, runs, postings, gc_step)
+    local buckets = {}
+    for i = 1, POSTING_PARTITIONS do buckets[i] = {} end
+    for word, matches in pairs(postings) do
+        local partition = xcompress.crc32(word) % POSTING_PARTITIONS + 1
+        buckets[partition][word] = matches
+        postings[word] = nil
+    end
+    local resume_offset = assert(spool:seek())
+    local offset = assert(spool:seek('end'))
+    for i, bucket in ipairs(buckets) do
+        if next(bucket) then
+            control.check()
+            local data = cmsgpack.pack(bucket)
+            assert(spool:write(data))
+            local partition = runs[i]
+            if not partition then partition = {}; runs[i] = partition end
+            partition[#partition + 1] = {offset, #data}
+            offset = offset + #data
+            buckets[i] = false
+            gc_step(#data)
+        end
+    end
+    assert(spool:seek('set', resume_offset) == resume_offset)
+end
+
+local function merge_terms(spool, totals, lengths, count, write_passages, write_postings, gc_step)
     local postings, averages = {}, {}
+    local runs, run_bytes = nil, 0
     for i, total in ipairs(totals) do averages[i] = count > 0 and total / count or 0 end
     assert(spool:seek('set', 0) == 0)
     for _, length in ipairs(lengths) do
@@ -116,8 +147,32 @@ local function merge_terms(spool, totals, lengths, count, write_passages, gc_ste
                 end
             end
         end
+        run_bytes = run_bytes + length
+        if run_bytes >= POSTING_RUN_BYTES then
+            runs = runs or {}
+            spill_postings(spool, runs, postings, gc_step)
+            postings, run_bytes = {}, 0
+        end
     end
-    return postings
+    if not runs then write_postings(postings); return end
+    if next(postings) then spill_postings(spool, runs, postings, gc_step) end
+    for _, partition in pairs(runs) do
+        postings = {}
+        for _, run in ipairs(partition) do
+            control.check()
+            local batch = cmsgpack.unpack(read_at(spool, run[1], run[2]))
+            for word, matches in pairs(batch) do
+                local all = postings[word]
+                if not all then
+                    postings[word] = matches
+                else
+                    for id, score in pairs(matches) do all[id] = score end
+                end
+            end
+            gc_step(run[2])
+        end
+        write_postings(postings)
+    end
 end
 
 local function exact_keys(files, locations)
@@ -165,22 +220,23 @@ local function write_index(output, spool, totals, lengths, header, gc_step)
             blocks[#blocks + 1] = entry
         end
     end
-    local postings = merge_terms(spool, totals, lengths, count, write_passages, gc_step)
-    compressor:close()
     local records = 0
-    for word, matches in pairs(postings) do
-        control.check()
-        local frequency = 0
-        for _ in pairs(matches) do frequency = frequency + 1 end
-        local entry = write_block(matches)
-        entry[4] = math.log(1 + (count - frequency + 0.5) / (frequency + 0.5))
-        header.words[word] = entry
-        records = records + frequency
-        postings[word] = nil
-        matches = nil
-        gc_step(entry[2])
+    local function write_postings(postings)
+        for word, matches in pairs(postings) do
+            control.check()
+            local frequency = 0
+            for _ in pairs(matches) do frequency = frequency + 1 end
+            local entry = write_block(matches)
+            entry[4] = math.log(1 + (count - frequency + 0.5) / (frequency + 0.5))
+            header.words[word] = entry
+            records = records + frequency
+            postings[word] = nil
+            matches = nil
+            gc_step(entry[2])
+        end
     end
-    postings = nil
+    merge_terms(spool, totals, lengths, count, write_passages, write_postings, gc_step)
+    compressor:close()
     local exact = exact_keys(header.files, header.locations)
     for key, matches in pairs(exact) do
         control.check()

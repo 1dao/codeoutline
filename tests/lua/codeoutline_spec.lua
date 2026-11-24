@@ -7704,6 +7704,46 @@ spec.describe('disk BM25', function()
         assert(os.remove(file)); assert(os.remove(cache_file))
     end)
 
+    spec.it('preserves scores when postings for a term span multiple build runs', function()
+        local indexing = require('codeoutline.indexing.index')
+        local bm25 = require('codeoutline.bm25.index')
+        local collect = require('codeoutline.bm25.collect')
+        local root = tmp_root .. '/bm25-runs'
+        local file = tmp_root .. '.bm25-runs'
+        write(root .. '/a.lua', 'function quartz_one() return quartz() end\n')
+        write(root .. '/b.lua', 'function quartz_two() return quartz() + quartz() end\n')
+        write(root .. '/c.lua', 'function quartz_three() end\n')
+        local idx = indexing.open(root, {rebuild = true, cache_path = file .. '-base', lister = 'walk'})
+        idx:refresh_all()
+        local expected_stats = bm25.build(idx, file)
+        local expected = bm25.search(idx, file, 'quartz')
+
+        local original = collect.file
+        local padding = string.rep(' ', 9 * 1024 * 1024)
+        collect.file = function(abs, rel, ...)
+            local result = original(abs, rel, ...)
+            if rel ~= 'c.lua' then
+                local documents = cmsgpack.unpack(result.terms)
+                -- Unused staging data forces spills without changing scores or passages.
+                documents[1][5] = padding
+                result.terms = cmsgpack.pack(documents)
+            end
+            return result
+        end
+        local ok, stats = pcall(bm25.build, idx, file)
+        collect.file = original
+        assert(ok, stats)
+        local hits = bm25.search(idx, file, 'quartz')
+        spec.equal(stats.postings, expected_stats.postings)
+        spec.equal(#hits, 3)
+        for i, hit in ipairs(hits) do
+            spec.equal(hit.path, expected[i].path)
+            spec.equal(hit.score, expected[i].score)
+        end
+        idx:close()
+        assert(os.remove(file))
+    end)
+
     spec.it('ranks complete text and same-field gaps before truncating the result', function()
         local indexing = require('codeoutline.indexing.index')
         local bm25 = require('codeoutline.bm25.index')

@@ -1,7 +1,6 @@
 #!/bin/sh
 # Build the release runtime (LuaJIT, xproc, MPSCQ, HTTPS) and copy it to the
-# repository-level bin/. rpmalloc is off: libc indexes as fast, and rpmalloc
-# keeps each exited parse thread's pages committed.
+# repository-level bin/. Unix release builds use libc.
 set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 jobs=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)

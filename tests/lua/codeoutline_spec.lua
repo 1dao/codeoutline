@@ -7668,6 +7668,37 @@ func (*Server) Say(req *Request) (*Reply, error) { Business(); return nil, nil }
 end)
 
 spec.describe('disk BM25', function()
+    spec.it('keeps an ordinary Explore miss when the BM25 budget expires', function()
+        local service = require('codeoutline.service')
+        local control = require('codeoutline.shared.control')
+        local root = tmp_root .. '/bm25-explore-deadline'
+        write(root .. '/visible.lua', 'function visible() end')
+        local now, clock, previous = xtimer.now_ms, 0, control.callback
+        xtimer.now_ms = function() return clock end
+        local ok, err = pcall(function()
+            local opts = { cache_path = root .. '/cache.idx', lister = 'walk', request_deadline = 10000 }
+            opts.search_bm25 = function()
+                clock = 5000
+                control.check()
+                error('BM25 ran beyond its budget')
+            end
+            local output, info = service.explore(root, 'no_such_symbol', opts)
+            spec.contains(output, 'No symbols matched')
+            spec.nil_value(info.bm25)
+            spec.equal(clock, 5000)
+            spec.equal(control.callback, previous)
+
+            opts.search_bm25 = function() error(control.cancelled(), 0) end
+            local completed, failure = pcall(service.explore, root, 'no_such_symbol', opts)
+            spec.equal(completed, false)
+            spec.equal(failure.code, 'cancelled')
+            spec.equal(control.callback, previous)
+        end)
+        xtimer.now_ms, control.callback = now, previous
+        service.forget(root)
+        assert(ok, err)
+    end)
+
     spec.it('uses leading Lua docs, exact names, bounded ranking and directory filters', function()
         local indexing = require('codeoutline.indexing.index')
         local bm25 = require('codeoutline.bm25.index')

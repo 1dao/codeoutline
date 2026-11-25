@@ -20,64 +20,65 @@ function M.close()
 end
 
 local function enqueue(index, file, stamp, repair)
-    if index:needs_save() then return 'unavailable' end
-    if active and active.file == file and active.stamp == stamp then return 'building' end
+    if index:needs_save() then return end
+    if active and active.file == file and active.stamp == stamp then return end
     if failure and failure.file == file and failure.stamp == stamp and xtimer.now_ms() < failure.retry then
-        return 'unavailable'
+        return
     end
     local item = {root = index.root, cache = index.cache_path, file = file, stamp = stamp, repair = repair}
     for i, pending in ipairs(queue) do
         if pending.file == file then
             if pending.stamp ~= stamp or repair then queue[i] = item end
-            return 'building'
+            return
         end
     end
     -- A wide burst of projects should not reserve a full build for each one.
-    if #queue >= 8 then return 'unavailable' end
+    if #queue >= 8 then return end
     queue[#queue + 1] = item
-    return 'building'
 end
 
-function M.prepare(index)
-    local file = index.cache_path .. '.bm25'
-    local stamp = snapshot.stamp(index)
-    if not snapshot.current(file, stamp) then enqueue(index, file, stamp) end
-    return function(query, accept, match)
-        local current = snapshot.stamp(index)
-        if not snapshot.current(file, current) then return nil, enqueue(index, file, current) end
-        local ok, result = pcall(require('codeoutline.bm25.index').search, index, file, query,
-            {limit = 20, accept = accept, match = match})
-        if ok then return result, 'searched' end
-        if control.is_interrupted(result) then error(result, 0) end
-        -- The header may have changed after the quick check, or a block may
-        -- be corrupt. Regenerate and preserve the original zero-match result.
-        return nil, enqueue(index, file, current, true)
-    end
-end
-
-function M.definition(index, query, deadline, prefix)
+function M.explore(index, query, accept, match)
     local file = index.cache_path .. '.bm25'
     local stamp = snapshot.stamp(index)
     if not snapshot.current(file, stamp) then
-        return nil, enqueue(index, file, stamp) == 'building' and 'bm25_building' or true
+        enqueue(index, file, stamp)
+        return
     end
+    local ok, result = pcall(require('codeoutline.bm25.index').search, index, file, query,
+        {limit = 20, accept = accept, match = match})
+    if ok then return result, 'searched' end
+    if control.is_interrupted(result) then error(result, 0) end
+    -- The header may have changed after the quick check, or a block may
+    -- be corrupt. Regenerate and preserve the original zero-match result.
+    enqueue(index, file, stamp, true)
+end
+
+function M.definition(index, query, deadline, prefix, candidates, limit)
     local now = xtimer.now_ms()
-    if active or lookup or now >= deadline then return nil, true end
+    if now >= deadline then return end
+    local file = index.cache_path .. '.bm25'
+    local stamp = snapshot.stamp(index)
+    if not snapshot.current(file, stamp) then
+        if not candidates then enqueue(index, file, stamp) end
+        return
+    end
+    now = xtimer.now_ms()
+    if active or lookup or now >= deadline then return end
     next_lookup = next_lookup + 1
     -- Let a cold header warm in the background after F12 returns.
-    local work_until = now + 2000
+    local work_until = candidates and deadline or now + 2000
     local posted = xthread.post(M.lookup_id, 'bm25_lookup', xthread.current_id(), next_lookup,
-        {root = index.root, stamp = stamp, file = file, query = query, deadline = work_until, prefix = prefix})
-    if not posted then return nil, true end
+        {root = index.root, stamp = stamp, file = file, query = query, deadline = work_until,
+            prefix = prefix or nil, candidates = candidates, limit = limit})
+    if not posted then return end
     lookup = {token = next_lookup, wait_until = math.min(now + 180, deadline), work_until = work_until}
     local ok, result = coroutine.yield()
     control.check()
-    if ok then return result, false end
+    if ok then return result end
     if type(result) == 'string' and (result:find('corrupt BM25', 1, true)
         or result:find('invalid BM25', 1, true)) then
-        return nil, enqueue(index, file, stamp, true) == 'building' and 'bm25_building' or true
+        enqueue(index, file, stamp, true)
     end
-    return nil, true
 end
 
 function M.receive_lookup(token)

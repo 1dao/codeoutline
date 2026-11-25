@@ -545,12 +545,11 @@ local text, info = service.explore('C:/src/project', 'Session.save', { budget = 
 
 ### Disk BM25 search
 
-MCP `codeoutline_explore` automatically queues a BM25 snapshot for the
-refreshed project when the snapshot is missing or stale. When the usual
-symbol and file lookup finds nothing, Explore uses BM25 candidates with the
-same filters and returns its usual source and relationship context. While
-a snapshot is being built, a miss reports `bm25.state = "building"`
-in the structured MCP result.
+MCP `codeoutline_explore` checks BM25 when the usual symbol and file lookup
+finds nothing. Explore uses BM25 candidates with the same filters and returns
+its usual source and relationship context. Explore can build or repair the
+snapshot in the background and returns its usual no-match response while the
+snapshot is unavailable.
 
 The BM25 fallback matches any query term by default. Pass `bm25Match: "all"`
 to require all tokenized terms in the same function. This option applies

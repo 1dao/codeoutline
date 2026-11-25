@@ -40,10 +40,28 @@ local function lookup(request)
     end
     local ok, result = pcall(function()
         control.check()
+        local accept
+        if request.candidates then
+            accept = function(path, name, kind, first, last)
+                local lines = request.candidates[path]
+                local entries = lines and lines[first]
+                if not entries then return end
+                for _, candidate in ipairs(entries) do
+                    if candidate[1] == name and candidate[2] == kind and candidate[3] == last then return candidate[4] end
+                end
+            end
+        end
         local hits = bm25.search(snapshot.reader(request.root, request.stamp), request.file, request.query, {
-            match = 'all', limit = 20, prefix = request.prefix,
+            match = 'all', limit = request.limit or 20, prefix = request.prefix, accept = accept,
         })
         control.check()
+        if accept then
+            local ranks = {}
+            for i, hit in ipairs(hits) do
+                ranks[accept(hit.path, hit.symbol, hit.kind, hit.start_line, hit.end_line)] = i
+            end
+            return ranks
+        end
         return hits
     end)
     control.callback = previous

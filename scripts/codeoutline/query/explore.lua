@@ -443,8 +443,9 @@ local function bm25_seeds(G, idx, filters, lookup, match)
         end
     end
     local hits, state = lookup(filters.text, accept, match)
+    if not hits then return {} end
     local ranked, seen = {}, {}
-    for _, hit in ipairs(hits or {}) do
+    for _, hit in ipairs(hits) do
         local file = G.file_index[hit.path]
         for i, id in ipairs(file and G.id_of[file] or {}) do
             if i % 128 == 0 then control.check() end
@@ -561,14 +562,8 @@ local function run(G, idx, query, opts)
     local shown, files_shown, file_order = {}, {}, {}
 
     if #seeds == 0 and #named_files == 0 then
-        local notice = ''
-        if bm25 and bm25.state == 'building' then
-            notice = ' The BM25 index is being built; retry this query shortly.'
-        elseif bm25 and bm25.state == 'unavailable' then
-            notice = ' The BM25 fallback is temporarily unavailable.'
-        end
-        local message, truncated = text.limit('No symbols matched. Name functions, classes, or files (e.g. "xtimer_poll", "Session.save", "xpoll.c").'
-            .. notice, budget)
+        local message, truncated = text.limit(
+            'No symbols matched. Name functions, classes, or files (e.g. "xtimer_poll", "Session.save", "xpoll.c").', budget)
         return message, {seeds = {}, bm25 = bm25, truncated = truncated}
     end
 

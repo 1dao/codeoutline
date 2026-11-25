@@ -10,6 +10,7 @@ local service = require('codeoutline.service')
 local documents = require('codeoutline.query.documents')
 local paths = require('codeoutline.shared.path')
 local control = require('codeoutline.shared.control')
+local text = require('codeoutline.shared.text')
 local lsp = require('codeoutline.protocol.lsp')
 local parse = require('codeoutline.parsing.parse')
 -- Reference scans stop at a result count or time budget and report truncation.
@@ -235,6 +236,7 @@ local function resolve_site(V, f, from, name, kind, recv, evidence, offset, inde
         targets = graph.resolve(V, f, src, name, kind, recv or nil, direct, paired, PROTOTYPE, evidence, V.js_context, site_line) or {}
     end
     -- Resolve methods on objects produced by the local's initializer.
+    local receiver_origin
     if #targets == 0 and recv and (kind == 'member_call' or kind == 'member_symbol')
         and V.files[f].language == 'lua' then
         local bindings = require('codeoutline.analysis.lua.lua_bindings')
@@ -242,8 +244,8 @@ local function resolve_site(V, f, from, name, kind, recv, evidence, offset, inde
         local rec, T
         if offset then rec, T = M.full(V, f) end
         if T then
-            local target = bindings.receiver(V, rec, T, recv, offset, ctx)
-            for _, entry in ipairs(bindings.member(V, target, name)) do
+            receiver_origin = bindings.receiver(V, rec, T, recv, offset, ctx)
+            for _, entry in ipairs(bindings.member(V, receiver_origin, name)) do
                 local id = V.id_of[entry.file] and V.id_of[entry.file][entry.index]
                 if id then targets[#targets + 1] = id end
             end
@@ -260,7 +262,7 @@ local function resolve_site(V, f, from, name, kind, recv, evidence, offset, inde
         end
         targets = kept
     end
-    return targets, reason, evidence, macro_state
+    return targets, reason, evidence, macro_state, receiver_origin
 end
 
 -- What the cursor names: a declaration, an indexed reference, or another identifier.
@@ -1205,7 +1207,8 @@ local function at(req)
     if c and c.decl then targets = { V.id_of[f][c.decl] }
     elseif c then
         c.line = doc:position(c.first).line + 1
-        targets, reason, evidence, macro_state = resolve_site(V, f, c.from, c.name, c.kind, c.recv, c.evidence, c.first, c.index, c.line, req.method == 'lsp_definition')
+        targets, reason, evidence, macro_state, c.receiver_origin = resolve_site(
+            V, f, c.from, c.name, c.kind, c.recv, c.evidence, c.first, c.index, c.line, req.method == 'lsp_definition')
         c.reason, c.evidence, c.macro_state = reason, c.kind == 'type' and c.evidence or evidence, macro_state
     end
     return V, doc, c, targets, f, offset
@@ -1218,9 +1221,10 @@ local function lua_self_member(V, f, c)
         and (c.kind == 'member_call' or c.kind == 'member_symbol')
 end
 
-local function definition_tags(V, f, c, candidates)
+local function definition_tags(V, f, c, candidates, rank)
     local self_fallback = lua_self_member(V, f, c) and c.evidence and c.evidence:match('^lua%-self:%d+$')
-    local ids, info = require('codeoutline.query.definition_candidates').find(V, f, c, V.js_context, self_fallback, true, candidates)
+    local ids, info = require('codeoutline.query.definition_candidates').find(
+        V, f, c, V.js_context, self_fallback, true, candidates, rank)
     local result, seen, bytes, started, count = {}, {}, 0, os.clock(), 0
     for _, id in ipairs(ids) do
         local g = V.node_file[id]
@@ -1295,7 +1299,7 @@ function handlers.lsp_implementation(req)
     return result, relationships.incomplete
 end
 
-local function resolved_definition(V, doc, c, targets, f, offset)
+local function resolved_definition(V, doc, c, targets, f, offset, rank)
     if not c and (V.files[f].language == 'javascript' or V.files[f].language == 'typescript') then
         local events = require('codeoutline.analysis.shared_events').context(V, V.js_context)
         local found, recognized = events.definition(f, offset, doc:position(offset).line + 1)
@@ -1350,7 +1354,7 @@ local function resolved_definition(V, doc, c, targets, f, offset)
                 return result, info.truncated
             end
         end
-        local ids, truncated = definition_tags(V, f, c)
+        local ids, truncated = definition_tags(V, f, c, nil, rank)
         local result = {}
         for _, id in ipairs(ids) do result[#result + 1] = (location(V, id)) end
         return result, truncated or V.js_context.include_incomplete or V.js_context.workspace_incomplete
@@ -1499,25 +1503,63 @@ local function lexical_definition(req, V, c, f, offset, deadline, allow_tags)
         end
     end
     if not query or #query > 256 or not query:find('[%w_]') then return nil end
-    local hits, incomplete = req.bm25_definition(V.idx, query, deadline, c and c.recv)
-    if not hits or #hits == 0 then return {}, incomplete end
-    if c and not allow_tags then return {}, incomplete end
+    local ok, hits = pcall(req.bm25_definition, V.idx, query, deadline, c and c.recv)
+    if not ok then
+        if control.is_interrupted(hits) then error(hits, 0) end
+        control.check()
+        return
+    end
+    if not hits or #hits == 0 or c and not allow_tags then return end
     local ids = lexical_ids(V, hits)
     if not c then
-        local locations, truncated = lexical_locations(V, ids, query, f, offset, origin_call)
-        return locations, incomplete or truncated
+        return lexical_locations(V, ids, query, f, offset, origin_call)
     end
     local found, truncated = definition_tags(V, f, c, ids)
     local locations = {}
     for _, id in ipairs(found) do locations[#locations + 1] = (location(V, id)) end
-    return locations, incomplete or truncated
+    return locations, truncated
+end
+
+local function rank_definition_tags(lookup, V, c, hits, deadline)
+    if xtimer.now_ms() >= deadline then return end
+    local candidates, count = {}, 0
+    for _, hit in ipairs(hits) do
+        local id = hit.id
+        local f, node = V.node_file[id], V.nodes[id]
+        if not V.drafts[f] and (node.kind == 'function' or node.kind == 'method') then
+            local path, first = V.files[f].path, node.line
+            local lines = candidates[path]
+            if not lines then lines = {}; candidates[path] = lines end
+            local entries = lines[first]
+            if not entries then entries = {}; lines[first] = entries end
+            entries[#entries + 1] = {text.valid(node.qualified), node.kind, math.max(first, node.end_line or first), id}
+            count = count + 1
+        end
+    end
+    if count == 0 then return end
+    local previous, expired = control.callback, {}
+    control.callback = function()
+        if previous then previous() end
+        if xtimer.now_ms() >= deadline then error(expired, 0) end
+    end
+    local ok, ranks = pcall(lookup, V.idx, c.name, deadline, c.recv, candidates, count)
+    control.callback = previous
+    if ok and xtimer.now_ms() < deadline then return ranks end
+    if not ok and control.is_interrupted(ranks) then error(ranks, 0) end
+    control.check()
 end
 
 function handlers.lsp_definition(req)
     local started = xtimer.now_ms()
     local V, doc, c, targets, f, offset = at(req)
     if not V then return false end
-    local primary, incomplete, allow_tags = resolved_definition(V, doc, c, targets, f, offset)
+    local rank
+    if c and req.bm25_definition then
+        rank = function(hits)
+            return rank_definition_tags(req.bm25_definition, V, c, hits, math.min(started + 800, xtimer.now_ms() + 180))
+        end
+    end
+    local primary, incomplete, allow_tags = resolved_definition(V, doc, c, targets, f, offset, rank)
     if #primary > 0 or not req.bm25_definition then return primary, incomplete end
     local deadline = math.min(started + 900, xtimer.now_ms() + 250)
     if xtimer.now_ms() >= deadline then return primary, incomplete end
@@ -1529,10 +1571,10 @@ function handlers.lsp_definition(req)
     local ok, result, limited = pcall(lexical_definition, req, V, c, f, offset, deadline, allow_tags)
     control.callback = previous
     if not ok then
-        if result == expired or tostring(result):find('source changed during query', 1, true) then return primary, true end
+        if result == expired or tostring(result):find('source changed during query', 1, true) then return primary, incomplete end
         error(result, 0)
     end
-    return result or primary, incomplete or not not limited, limited == 'bm25_building'
+    return result or primary, incomplete or not not limited
 end
 
 -- Display tags may be truncated before a heavily annotated SDK declaration's
@@ -1924,9 +1966,9 @@ function M.handles(method) return handlers[method] ~= nil end
 
 -- Returns { result = value (false for null), incomplete = bool } or { error = message }.
 function M.execute(req)
-    local result, incomplete, bm25_building = handlers[req.method](req)
+    local result, incomplete = handlers[req.method](req)
     if type(result) == 'table' and result.error then return result end
-    return { result = result, incomplete = incomplete or false, bm25_building = bm25_building or nil }
+    return { result = result, incomplete = incomplete or false }
 end
 
 return M

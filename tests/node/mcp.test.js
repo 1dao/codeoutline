@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, rm, symlink, realpath } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, rm, symlink, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -37,6 +37,13 @@ test('Explore builds a BM25 snapshot in the background and falls back only after
         env: { ...process.env, CODEOUTLINE_MEMORY_CACHE: cache },
     });
     const query = (text, bm25Match) => c.callTool({ name: 'codeoutline_explore', arguments: { query: text, bm25Match } });
+    function assertPlainMiss(result) {
+        assert.equal(result.isError, false, result.content[0].text);
+        assert.equal(result.structuredContent.bm25, undefined);
+        assert.ok(!result.structuredContent.coverage.reasons.some((reason) => reason.startsWith('bm25_')));
+        assert.match(result.content[0].text, /No symbols matched/);
+        assert.doesNotMatch(result.content[0].text, /BM25/i);
+    }
     async function awaitSnapshot(text) {
         for (let i = 0; i < 60; i++) {
             const result = await query(text);
@@ -49,19 +56,25 @@ test('Explore builds a BM25 snapshot in the background and falls back only after
     try {
         await c.connect(transport);
         const phrase = 'path:server lang:lua kind:function amberlantern';
-        const cold = await query(phrase);
-        assert.equal(cold.structuredContent.bm25.state, 'building');
-        assert.ok(cold.structuredContent.coverage.reasons.includes('bm25_building'));
-        assert.match(cold.content[0].text, /BM25 index is being built/);
         const ordinary = await query('deliver_reward');
         assert.equal(ordinary.structuredContent.bm25, undefined);
         assert.match(ordinary.content[0].text, /return 42/);
         const explicitFile = await query('entry.lua');
         assert.equal(explicitFile.structuredContent.bm25, undefined);
+        await assert.rejects(readFile(cache + '.bm25'), { code: 'ENOENT' });
+        assertPlainMiss(await query(phrase));
         const found = await awaitSnapshot(phrase);
         assert.equal(found.structuredContent.bm25.matches, 1);
         assert.match(found.content[0].text, /BM25 fallback matched/);
         assert.match(found.content[0].text, /function deliver_reward\(\) return 42/);
+        const broken = await readFile(cache + '.bm25');
+        broken.fill(0x21, broken.length - 16);
+        await writeFile(cache + '.bm25', broken);
+        const exactWithBrokenSnapshot = await query('deliver_reward');
+        assert.equal(exactWithBrokenSnapshot.structuredContent.bm25, undefined);
+        assert.match(exactWithBrokenSnapshot.content[0].text, /return 42/);
+        assertPlainMiss(await query(phrase));
+        assert.equal((await awaitSnapshot(phrase)).structuredContent.bm25.matches, 1);
         const broad = await query('amberlantern fogsignal');
         assert.equal(broad.structuredContent.bm25.matches, 20);
         const strict = await query('amberlantern fogsignal', 'all');
@@ -72,8 +85,7 @@ test('Explore builds a BM25 snapshot in the background and falls back only after
         const excluded = await query('path:server lang:lua kind:method amberlantern');
         assert.deepEqual(excluded.structuredContent.bm25, { state: 'searched', matches: 0 });
         await writeFile(target, '-- freshlexicaltoken\nfunction deliver_reward() return 4200 end\n');
-        const next = await query('path:server freshlexicaltoken');
-        assert.equal(next.structuredContent.bm25.state, 'building');
+        assertPlainMiss(await query('path:server freshlexicaltoken'));
         const updated = await awaitSnapshot('path:server freshlexicaltoken');
         assert.match(updated.content[0].text, /return 4200/);
         const staleTerm = await query('path:server amberlantern');

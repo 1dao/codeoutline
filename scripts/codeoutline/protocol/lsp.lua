@@ -601,15 +601,13 @@ function M.new(config, emit, submit, cancel, stop, await_worker)
         if value.incomplete then
             if trace then trace:record('limit', { id = id, method = req.method, uri = req.uri,
                 position = req.position, epoch = navigation_epoch }) end
-            local message = value.bm25_building
-                and 'CodeOutline: building the BM25 definition index in the background; retry shortly'
-                or req.method == 'lsp_definition'
+            local message = req.method == 'lsp_definition'
                 and 'CodeOutline: definition lookup reached a candidate, source or visibility limit; some definitions may be omitted'
                 or req.method == 'lsp_references'
                 and 'CodeOutline: results were truncated; too many matching references'
                 or 'CodeOutline: lookup reached a query limit; some results may be omitted'
             local now, previous = xtimer.now_ms(), limit_warnings[message]
-            local definition_limit = req.method == 'lsp_definition' and not value.bm25_building
+            local definition_limit = req.method == 'lsp_definition'
             local show = not definition_limit and (not previous or now - previous >= M.LIMIT_WARNING_MS)
             if show then limit_warnings[message] = now end
             local detail = message

@@ -139,8 +139,7 @@ test('LSP definition checks string candidates against source and drafts after BM
     });
     const lookup = () => definition(0, send.indexOf('update_result') + 2);
     assert.deepEqual(await lookup(), []);
-    assert.ok(client.notifications.some((msg) => msg.method === 'window/showMessage'
-        && msg.params.message.includes('building the BM25 definition index')));
+    assert.ok(!client.notifications.some((msg) => /BM25/i.test(msg.params?.message ?? '')));
     const primary = await definition(2, 2);
     assert.equal(fileURLToPath(primary[0].uri), join(client.project, 'sample.lua'));
     const awaitTargets = async () => {
@@ -161,9 +160,12 @@ test('LSP definition checks string candidates against source and drafts after BM
     assert.deepEqual(targets[0].range, expected(3));
     const builderExits = () => client.logs().match(/BM25_BUILD\] lua_thread_on_cleanup: thread \d+ cleaned up/g)?.length ?? 0;
     assert.equal(builderExits(), 1, client.logs());
-    await rm(client.cache + '.bm25');
+    const broken = await readFile(client.cache + '.bm25');
+    broken.fill(0x21, broken.length - 16);
+    await writeFile(client.cache + '.bm25', broken);
     assert.deepEqual(await lookup(), []);
     assert.deepEqual(await awaitTargets(), targets);
+    assert.ok(!client.notifications.some((msg) => /BM25/i.test(msg.params?.message ?? '')));
     assert.equal(builderExits(), 2, client.logs());
     assert.equal(client.logs().match(/BM25_BUILD\] \[codeoutline parse\] pass completed:/g)?.length, 2, client.logs());
     assert.deepEqual((await definition(1, 9))[0]?.range, expected(3));
@@ -195,8 +197,7 @@ test('LSP BM25 searches the project for an unresolved RPC reply literal', { time
     assert.deepEqual(await client.request('textDocument/definition', {
         textDocument, position: { line: 7, character: missing.indexOf('unresolved_identifier') + 2 },
     }), []);
-    assert.ok(client.notifications.some((msg) => msg.method === 'window/showMessage'
-        && msg.params.message.includes('building the BM25 definition index')));
+    assert.ok(!client.notifications.some((msg) => /BM25/i.test(msg.params?.message ?? '')));
     const lookup = () => client.request('textDocument/definition', {
         textDocument,
         position: { line: 1, character: reply.indexOf('run_rpc') + 2 },
@@ -848,8 +849,7 @@ test('LSP carries the Lua receiver prefix into BM25 before the shortlist is cut'
         textDocument: { uri }, position: { line: 0, character: source.indexOf('finish') + 2 },
     });
     assert.deepEqual(await lookup(), []);
-    assert.ok(client.notifications.some((msg) => msg.method === 'window/showMessage'
-        && msg.params.message.includes('building the BM25 definition index')));
+    assert.ok(!client.notifications.some((msg) => /BM25/i.test(msg.params?.message ?? '')));
     let hits = [];
     const deadline = Date.now() + 7500;
     while (!hits.length && Date.now() < deadline) {
@@ -861,6 +861,95 @@ test('LSP carries the Lua receiver prefix into BM25 before the shortlist is cut'
         uri, languageId: 'lua', version: 1, text: source.replace('cache.finish', 'other.finish'),
     } });
     assert.deepEqual(await lookup(), []);
+});
+
+test('LSP ranks an unresolved Lua member by the receiver origin before the candidate limit', { timeout: 30000 }, async (t) => {
+    const client = await start(t, { isolatedCache: true });
+    const decoys = Array.from({ length: 260 }, (_, i) => `function Decoy${i}.load() end`).join('\n');
+    await writeFile(join(client.project, 'a.lua'), `function Other.load() end\n${decoys}\n`);
+    const dir = join(client.project, 'z', 'storage');
+    await mkdir(dir, { recursive: true });
+    const target = join(dir, 'cache.lua');
+    await writeFile(target, 'local Cache = {}\nfunction Cache.load() end\nreturn {}\n');
+    const call = 'function run() a.load() end';
+    const source = `local cache = require('storage.cache')\nlocal a = cache\n${call}\n`;
+    const entry = join(client.project, 'worker.lua');
+    await writeFile(entry, source);
+    await initialize(client, [client.project]); await indexed(client);
+    const lookup = () => client.request('textDocument/definition', {
+        textDocument: { uri: pathToFileURL(entry).href },
+        position: { line: 2, character: call.indexOf('load') + 2 },
+    });
+    const hits = await lookup();
+    assert.equal(hits[0] && fileURLToPath(hits[0].uri), target, client.logs());
+    assert.ok(hits.some((hit) => fileURLToPath(hit.uri) === join(client.project, 'a.lua')));
+    client.notify('textDocument/didOpen', { textDocument: {
+        uri: pathToFileURL(target).href, languageId: 'lua', version: 1,
+        text: 'local function load() end\n'.repeat(260) + 'return {}\n',
+    } });
+    const fallback = await lookup();
+    assert.equal(fallback[0] && fileURLToPath(fallback[0].uri), join(client.project, 'a.lua'), client.logs());
+    await assert.rejects(readFile(client.cache + '.bm25'), { code: 'ENOENT' });
+});
+
+test('LSP uses a ready BM25 snapshot only to rank overflow before truncation', { timeout: 30000 }, async (t) => {
+    const client = await start(t, { isolatedCache: true });
+    const candidates = join(client.project, 'candidates.lua');
+    const definitions = [
+        ...Array.from({ length: 9 }, (_, i) => `function Decoy${i}.load() return 0 end`),
+        'function Favorite.load() return load(), load(), load() end',
+        ...Array.from({ length: 7 }, (_, i) => `function Decoy${i}.finish() return 0 end`),
+        'function Favorite.finish() return finish(), finish(), finish() end',
+    ];
+    await writeFile(candidates, definitions.join('\n') + '\n');
+    const calls = ['function run() missing_receiver.load() end',
+        'function stop() missing_receiver.finish() end', 'local value = trigger_snapshot'];
+    const entry = join(client.project, 'worker.lua');
+    await writeFile(entry, calls.join('\n') + '\n');
+    const native = [];
+    for (let i = 0; i < 10; i++) {
+        const dir = join(client.project, `native${i}`);
+        await mkdir(dir);
+        const file = join(dir, 'api.c');
+        native.push(file);
+        const value = i === 9 ? 'DistantLoad() + DistantLoad() + DistantLoad()' : '0';
+        await writeFile(file, `int DistantLoad() { return ${value}; }\n`);
+    }
+    const nativeDir = join(client.project, 'use');
+    await mkdir(nativeDir);
+    const nativeSource = 'void run() { DistantLoad(); }';
+    const nativeEntry = join(nativeDir, 'main.cpp');
+    await writeFile(nativeEntry, nativeSource + '\n');
+    await initialize(client, [client.project]); await indexed(client);
+    const lookup = (line, name) => client.request('textDocument/definition', {
+        textDocument: { uri: pathToFileURL(entry).href },
+        position: { line, character: calls[line].indexOf(name) + 2 },
+    });
+    const original = await lookup(0, 'load');
+    assert.equal(original.length, 8);
+    assert.ok(original.every((hit) => hit.range.start.line < 9));
+    await assert.rejects(readFile(client.cache + '.bm25'), { code: 'ENOENT' });
+    assert.deepEqual(await lookup(2, 'trigger_snapshot'), []);
+    const deadline = Date.now() + 7500;
+    let ranked = original;
+    while (ranked[0].range.start.line !== 9 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        ranked = await lookup(0, 'load');
+    }
+    assert.equal(ranked.length, 8);
+    assert.equal(ranked[0].range.start.line, 9, client.logs());
+    assert.deepEqual((await lookup(1, 'finish')).map((hit) => hit.range.start.line),
+        [10, 11, 12, 13, 14, 15, 16, 17]);
+    const nativeHits = await client.request('textDocument/definition', {
+        textDocument: { uri: pathToFileURL(nativeEntry).href },
+        position: { line: 0, character: nativeSource.indexOf('DistantLoad') + 2 },
+    });
+    assert.equal(nativeHits.length, 4, JSON.stringify(nativeHits));
+    assert.equal(fileURLToPath(nativeHits[0].uri), native[9], client.logs());
+    const broken = await readFile(client.cache + '.bm25');
+    broken.fill(0x21, broken.length - 16);
+    await writeFile(client.cache + '.bm25', broken);
+    assert.deepEqual(await lookup(0, 'load'), original);
 });
 
 test('LSP navigates ambiguous proxy macros and respects include path changes and drafts', { timeout: 30000 }, async (t) => {

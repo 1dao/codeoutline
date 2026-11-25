@@ -18,6 +18,12 @@ local function lua_receiver_score(receiver, qualified, path)
     return 0
 end
 
+local function lua_origin_files(origin, files)
+    if origin.file then files[origin.file] = true end
+    for _, f in ipairs(origin.modules or {}) do files[f] = true end
+    for _, alternative in ipairs(origin.alternatives or {}) do lua_origin_files(alternative, files) end
+end
+
 -- An empty answer leaves the editor and the agent nothing to inspect, so a
 -- failed binding still gets name-based suggestions. They remain unconfirmed
 -- candidates: never call edges, references or index data.
@@ -32,7 +38,7 @@ function M.allowed(site)
         or site.kind == 'member_call' or site.kind == 'member_symbol'
 end
 
-function M.find(G, f, site, ctx, lua_self, lua_initializers, candidates)
+function M.find(G, f, site, ctx, lua_self, lua_initializers, candidates, rank)
     local info = { truncated = site and site.macro_state == 'limited' or false,
         scanned = 0, reason = 'exact name; binding unconfirmed' }
     if not lua_self and not M.allowed(site) then return {}, info end
@@ -71,15 +77,28 @@ function M.find(G, f, site, ctx, lua_self, lua_initializers, candidates)
     -- These are hints for unconfirmed candidates. The source can import a
     -- module conditionally even when the resolver cannot bind its receiver.
     local imported = receiver and graph.visible_dependencies(G, f, ctx)
+    local origin_files = {}
+    if receiver and site.receiver_origin then lua_origin_files(site.receiver_origin, origin_files) end
+    local limit = next(origin_files) and #list or math.min(#list, M.MAX_SCAN)
     -- `bare` drops the receiver qualifier: the member name alone still names a
     -- definition worth offering, including top-level method definitions.
     local function scan(qualifier, bare)
-        local hits, macro_hits, scanned = {}, {}, 0
-        for i = 1, math.min(#list, M.MAX_SCAN) do
+        local hits, macro_hits, scanned, qualified_hit = {}, {}, 0, false
+        local ordinary_scanned, origin_matches = 0, 0
+        for i = 1, limit do
             if i % 16 == 0 then control.check() end
-            scanned = i
             local id = list[i]
             local node, g = G.nodes[id], G.node_file[id]
+            local from_origin = origin_files[g] == true
+            -- A private or otherwise ineligible origin symbol cannot take a
+            -- slot from the ordinary fallback or from another origin match.
+            if from_origin then
+                if origin_matches >= M.MAX_SCAN then goto next_candidate end
+            else
+                if ordinary_scanned >= M.MAX_SCAN then goto next_candidate end
+                ordinary_scanned = ordinary_scanned + 1
+            end
+            scanned = scanned + 1
             local rec = G.files[g]
             local parent = node.parent and rec.nodes[node.parent]
             local published = language == 'lua' and require('codeoutline.analysis.lua.lua_bindings').exported(node, site.name, G.lua_global_export_tables)
@@ -94,10 +113,12 @@ function M.find(G, f, site, ctx, lua_self, lua_initializers, candidates)
                     or site.macro_state == 'uncertain' or site.macro_state == 'limited')
                     and (g ~= f or site.line and node.line < site.line)
             end
-            local name_matches = node.name == site.name or published
+            local bare_match = node.name == site.name or published
+            local name_matches = bare_match
             if not bare then name_matches = name_matches and (normalized(node.qualified) == site.name or published) end
             local aliased = language == 'lua' and require('codeoutline.analysis.lua.lua_bindings').member_alias(node, qualifier)
-            if qualifier then name_matches = normalized(node.qualified) == qualifier or aliased end
+            local qualified_match = qualifier and (normalized(node.qualified) == qualifier or aliased)
+            if qualifier then name_matches = qualified_match or from_origin and bare_match end
             if bare and unresolved_receiver then name_matches = name_matches and graph.owner(node.qualified) ~= nil end
             -- Restrict receiver candidates to members and exclude nested
             -- functions unless they are recognized Lua initializer members.
@@ -121,22 +142,26 @@ function M.find(G, f, site, ctx, lua_self, lua_initializers, candidates)
                 end
                 if node.kind ~= 'prototype' and not node.decl then score = score + 1 end
                 local bucket = node.kind == 'macro' and macro_hits or hits
-                bucket[#bucket + 1] = { id = id, score = score, order = i }
+                bucket[#bucket + 1] = { id = id, score = score, order = i, from_origin = from_origin }
+                qualified_hit = qualified_hit or qualified_match
+                if from_origin then origin_matches = origin_matches + 1 end
             end
+            ::next_candidate::
         end
-        return hits, macro_hits, scanned
+        return hits, macro_hits, scanned, qualified_hit
     end
-    local hits, macro_hits, scanned = scan(qualified, false)
+    local hits, macro_hits, scanned, qualified_hit = scan(qualified, false)
     -- An unbound receiver still names a member. Offer the bare name instead of
     -- an empty answer, keeping the qualified match authoritative when it hits.
-    if #hits == 0 and #macro_hits == 0 and (qualified or unresolved_receiver) and not lua_self then
+    if (not qualified_hit and qualified or #hits == 0 and #macro_hits == 0 and unresolved_receiver)
+        and not lua_self then
         hits, macro_hits, scanned = scan(nil, true)
     end
     info.scanned = scanned
     -- Ordinary definitions are more useful than unrelated proxy macros.
     if #hits == 0 then hits = macro_hits
     elseif configured then hits = {} end
-    info.truncated = info.truncated or #list > M.MAX_SCAN
+    info.truncated = info.truncated or scanned < #list
     -- Prefer implementations over repeated API declarations. A declaration is
     -- still useful when the project has no matching implementation at all.
     local defined = {}
@@ -150,8 +175,14 @@ function M.find(G, f, site, ctx, lua_self, lua_initializers, candidates)
         if not graph.is_decl(node) or not defined[node.qualified] then kept[#kept + 1] = hit end
     end
     hits = kept
+    local lexical = #hits > M.MAX_RESULTS and rank and rank(hits)
     table.sort(hits, function(a, b)
+        if a.from_origin ~= b.from_origin then return a.from_origin end
         if a.score ~= b.score then return a.score > b.score end
+        if lexical then
+            local a_rank, b_rank = lexical[a.id] or math.huge, lexical[b.id] or math.huge
+            if a_rank ~= b_rank then return a_rank < b_rank end
+        end
         -- Keep the lexical shortlist's order when semantic hints tie.
         if candidates and site.recv then return a.order < b.order end
         return graph.before(G, a.id, b.id)

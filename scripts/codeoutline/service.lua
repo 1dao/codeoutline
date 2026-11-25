@@ -182,10 +182,28 @@ end
 local function execute_query(engine, root, query, opts)
     engine.validate(query, opts)
     local idx, _, stats = refresh(root, opts, true)
-    if engine == explore and opts and opts.prepare_bm25 then
+    if engine == explore and opts and opts.search_bm25 then
         local query_opts = {}
         for key, value in pairs(opts) do query_opts[key] = value end
-        query_opts.bm25_fallback = opts.prepare_bm25(idx)
+        local search_bm25 = opts.search_bm25
+        query_opts.bm25_fallback = function(text, accept, match)
+            local now = xtimer.now_ms()
+            -- Leave time for Explore to finalize its ordinary no-match result.
+            local deadline = math.min(now + 2000, (opts.request_deadline or math.huge) - 100)
+            if now >= deadline then return end
+            local previous = control.callback
+            control.callback = function()
+                if previous then previous() end
+                if xtimer.now_ms() >= deadline then error(control.deadline(), 0) end
+            end
+            local ok, hits, state = pcall(search_bm25, idx, text, accept, match)
+            control.callback = previous
+            if ok then
+                if xtimer.now_ms() < deadline then return hits, state end
+            elseif control.is_interrupted(hits) and hits.code ~= 'deadline' then
+                error(hits, 0)
+            end
+        end
         opts = query_opts
     end
     idx.query_sources = {}

@@ -66,8 +66,8 @@ local function execute(req)
         return true
     elseif req.method == 'explore' or req.method == 'callers' or req.method == 'type_hierarchy' or req.method == 'type_references' or req.method == 'affected' then
         local text, info = service[req.method](root, req.method == 'affected' and req.files or req.query, { budget = req.budget, depth = req.depth,
-            max_nodes = req.max_nodes, direction = req.direction, bm25_match = req.bm25_match,
-            prepare_bm25 = req.method == 'explore' and bm25 and bm25.prepare or nil })
+            max_nodes = req.max_nodes, direction = req.direction, bm25_match = req.bm25_match, request_deadline = req.deadline,
+            search_bm25 = req.method == 'explore' and bm25 and bm25.explore or nil })
         return { text = text, truncated = info.truncated or false, coverage = info.coverage,
             resolution = info.resolution, generation = info.generation, refresh = info.refresh, bm25 = info.bm25 }
     elseif req.method == 'status' then return service.status(root)

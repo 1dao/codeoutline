@@ -556,7 +556,7 @@ local function search_file(index, file, query, options, limit)
             if accepted[id] == nil then
                 local location = header.locations[id]
                 accepted[id] = not not (in_scope(id)
-                    and options.accept(header.files[location[1]], location[2], location[5]))
+                    and options.accept(header.files[location[1]], location[2], location[5], location[3], location[4]))
             end
             return accepted[id]
         end

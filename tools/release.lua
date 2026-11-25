@@ -241,12 +241,20 @@ local function release(project)
     sequence = sequence + 1
     local output = parent .. '/' .. version
     io.write('Version ', version, ', sequence ', sequence, ', mode ', mode, ', output ', output, '\n'); io.stdout:flush()
-    if dry then io.write('DRY_RUN: checks passed; no files, commits, tags or publications changed.\n'); xthread.stop(0); return end
-    -- The user commits feature changes first. Only version files are committed here.
-    assert(command('git status --porcelain --untracked-files=normal --ignore-submodules=untracked') == '',
-        'Commit project changes first; the release tool only commits version files')
+    local version_files = 'package.json package-lock.json scripts/codeoutline/version.lua scripts/codeoutline/update_sequence.lua'
+    local status = 'git status --porcelain --untracked-files=normal --ignore-submodules=untracked'
+    local version_changes = command(status .. ' -- ' .. version_files)
+    assert(version_changes == '', 'Release would overwrite changes to version files:\n' .. version_changes)
+    local changes = command(status)
+    if changes ~= '' then
+        io.write('Local changes detected:\n', changes, '\n', mode == 'update'
+            and 'Script bundles use local files. The release commit includes only version files.\n'
+            or 'Release artifacts use the tagged commit and its recorded submodule revisions.\n')
+        io.stdout:flush()
+    end
     assert(command('git branch --show-current') == 'main', 'Release from main')
     assert(command('git rev-parse --show-toplevel'):gsub('\\', '/') == root, 'Run from repository root')
+    if dry then io.write('DRY_RUN: checks passed; no files, commits, tags or publications changed.\n'); xthread.stop(0); return end
     local baseline
     if mode == 'update' then
         for _, target in ipairs(targets) do
@@ -272,7 +280,6 @@ local function release(project)
         step('Verify MCP SDK interoperability...', 'npm test')
         step('Verify installed packages...', 'npm run test:package')
     end
-    local version_files = 'package.json package-lock.json scripts/codeoutline/version.lua scripts/codeoutline/update_sequence.lua'
     local previous = command('git rev-parse HEAD')
     local bundles = output .. '/bundles'
     local commit
@@ -286,8 +293,7 @@ local function release(project)
         c.write(root .. '/package-lock.json', assert(u.json_pack(lock)) .. '\n')
         c.write(root .. '/scripts/codeoutline/version.lua', "return '" .. version .. "'\n")
         c.write(root .. '/scripts/codeoutline/update_sequence.lua', 'return ' .. sequence .. '\n')
-        step('Commit release version...', 'git add -- ' .. version_files)
-        step('Commit release version...', 'git commit -m ' .. quote('release: ' .. version))
+        step('Commit release version...', 'git commit --only -m ' .. quote('release: ' .. version) .. ' -- ' .. version_files)
         commit = command('git rev-parse HEAD')
         assert(u.mkdir_p(output))
         if mode == 'update' then
@@ -298,8 +304,8 @@ local function release(project)
     end)
     if not built then
         -- Nothing left this machine yet; undo the local commit and output.
-        command('git reset --keep ' .. quote(previous), true)
-        command('git checkout -- ' .. version_files, true)
+        if commit then command('git reset --soft ' .. quote(previous)) end
+        command('git restore --source=' .. quote(previous) .. ' --staged --worktree -- ' .. version_files)
         if u.stat(output).exists then u.rmtree(output) end
         error(tostring(failure) .. '\nLocal release commit and output were removed; nothing was pushed or uploaded.', 0)
     end

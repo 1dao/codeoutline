@@ -38,11 +38,13 @@ test('packed npm and native artifacts work outside the checkout', { timeout: 120
     const nativeBin = join(native, 'bin', process.platform === 'win32' ? 'xnet.exe' : 'xnet');
     if (process.platform !== 'win32') { await chmod(nativeBin, 0o755); await chmod(join(native, 'codeoutline'), 0o755); }
     const info = JSON.parse(await readFile(join(native, 'build-info.json'), 'utf8'));
+    assert.equal(info.releaseReady, false);
     for (const [path, hash] of Object.entries(info.sha256)) {
         assert.equal(createHash('sha256').update(await readFile(join(native, path))).digest('hex'), hash);
     }
     const archives = [];
     for (const folder of [native, join(stage, 'npm')]) {
+        assert.equal(JSON.parse(await readFile(join(folder, 'package.json'), 'utf8')).private, true);
         const [packed] = JSON.parse(npm(['pack', folder, '--json', '--pack-destination', temp]));
         for (const f of packed.files) assert(!/(^|\/)(AGENTS\.md|PLAN\.md|tests|node_modules|\.git)(\/|$)/.test(f.path), f.path);
         if (folder === native) {

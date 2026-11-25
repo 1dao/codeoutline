@@ -52,6 +52,16 @@ function M.lease(files_root)
     leases[lease]=true
     return lease
 end
+local function older_version(version, current)
+    local parts = current:gmatch('%d+')
+    for part in version:gmatch('%d+') do
+        local other = parts():gsub('^0+', '')
+        part = part:gsub('^0+', '')
+        if #part ~= #other then return #part < #other end
+        if part ~= other then return part < other end
+    end
+    return false
+end
 function M.open(config)
     assert(c.id(config.project) and c.id(config.platform),'invalid project/platform')
     assert(type(config.publicKey)=='string','pinned publicKey required')
@@ -103,9 +113,22 @@ function M.open(config)
         if not ok then error(result) end
         return result
     end
-    -- Remove versions other than keep that no live process leases, then the
-    -- runtime cache, which only feeds installation.
-    local function prune(keep)
+    local function retired_versions(keep, current)
+        local versions = {}
+        for _, entry in ipairs(u.list_dir(root .. '/versions') or {}) do
+            -- Hash-named directories belong to old bootstraps with incompatible leases.
+            if entry.dir and c.version(entry.name) and not keep[entry.name]
+                and (not current or older_version(entry.name, current)) then
+                versions[#versions + 1] = entry.name
+            end
+        end
+        return versions
+    end
+    local function prune(versions)
+        assert(u.stat(root).type == 'directory' and u.stat(root .. '/versions').type == 'directory')
+        local trash = root .. '/trash'
+        local trash_info = u.stat(trash)
+        assert(not trash_info.exists or trash_info.type == 'directory')
         local now,busy=os.time(),{}
         for _,entry in ipairs(u.list_dir(root .. '/leases') or {})do
             local path=root .. '/leases/' .. entry.name
@@ -115,29 +138,49 @@ function M.open(config)
                 if not legacy or #legacy~=64 then os.remove(path) end
             elseif lease_alive(path)then busy[version]=true end
         end
-        for _,entry in ipairs(u.list_dir(root .. '/versions') or {})do
-            -- Hash-named directories belong to old bootstraps whose leases are
-            -- incompatible. Leave them untouched until users stop old processes.
-            local removable=entry.dir and c.version(entry.name) and not keep[entry.name] and not busy[entry.name]
+        for _, version in ipairs(versions) do
+            local path = root .. '/versions/' .. version
+            local removable = not busy[version] and u.stat(path).type == 'directory'
             -- Versions predating leases may still run unseen: delete them only
             -- after a grace period counted from the first prune that saw them.
-            if removable and config.leased and not config.leased(root .. '/versions/' .. entry.name .. '/files') then
-                local marker=root .. '/retired/' .. entry.name
+            if removable and config.leased and not config.leased(path .. '/files') then
+                local marker=root .. '/retired/' .. version
                 local info=u.stat(marker)
                 if not (info and info.exists) then c.write(marker,now .. '\n');removable=false
                 else removable=now-(info.mtime or now)>=(config.legacyGrace or LEGACY_GRACE) end
             end
             if removable then
                 -- Moving first keeps a half-deleted tree out of versions/.
-                assert(u.mkdir_p(root .. '/trash'))
-                os.rename(root .. '/versions/' .. entry.name,root .. '/trash/' .. entry.name .. '-' .. token())
+                assert(u.mkdir_p(trash))
+                os.rename(path, trash .. '/' .. version .. '-' .. token())
             end
         end
-        for _,entry in ipairs(u.list_dir(root .. '/trash') or {})do u.rmtree(root .. '/trash/' .. entry.name)end
+        for _, entry in ipairs(u.list_dir(trash, nil, true) or {}) do
+            if entry.type == 'directory' then u.rmtree(trash .. '/' .. entry.name) end
+        end
         for _,entry in ipairs(u.list_dir(root .. '/retired') or {})do
             if not u.stat(root .. '/versions/' .. entry.name).exists then os.remove(root .. '/retired/' .. entry.name)end
         end
-        if u.stat(root .. '/runtime-cache').exists then u.rmtree(root .. '/runtime-cache')end
+    end
+    function api.prune_older(files_root)
+        if not config.prune then return end
+        local function candidates()
+            local s = state()
+            if not s.current then return end
+            local active_dir = root .. '/versions/' .. s.current
+            local active_root = active_dir .. '/files'
+            if windows then active_root = active_root:lower() end
+            if active_root ~= (windows and files_root:lower() or files_root)
+                or not u.stat(active_dir .. '/complete').exists then return end
+            return retired_versions({[s.current] = true, [s.previous or s.current] = true}, s.current)
+        end
+        local versions = candidates()
+        if versions and (#versions > 0 or #(u.list_dir(root .. '/trash', 1) or {}) > 0) then
+            locked(function()
+                local current = candidates()
+                if current then prune(current) end
+            end)
+        end
     end
     local function verified(envelope)
         local m=c.manifest(envelope,config.publicKey)
@@ -242,7 +285,13 @@ function M.open(config)
             local ok,result=pcall(api.current)
             if not ok then save(s);error(result)end
             -- Cleanup never fails an installation that is already active.
-            if config.prune then pcall(prune,{[m.version]=true,[previous or m.version]=true})end
+            if config.prune then
+                pcall(function()
+                    prune(retired_versions({[m.version]=true,[previous or m.version]=true}))
+                    local cache = root .. '/runtime-cache'
+                    if u.stat(cache).type == 'directory' then u.rmtree(cache) end
+                end)
+            end
             return result
         end)
     end

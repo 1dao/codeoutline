@@ -620,7 +620,14 @@ end
 
 -- Lease the installed update this process runs from, so installing a newer
 -- one does not delete files it may still load (language parsers load lazily).
-local lease = require('xupgate.client').lease(install)
+local update_client = require('xupgate.client')
+local lease = update_client.lease(install)
+if lease then
+    -- Retrying cleanup at startup reclaims versions whose last process exited.
+    pcall(function()
+        update_client.open(require('codeoutline.updater').config()).prune_older(install)
+    end)
+end
 local ok, result = pcall(run)
 if not ok then io.stderr:write('codeoutline: ', tostring(result), '\n'); result = 1 end
 if type(result) == 'table' then

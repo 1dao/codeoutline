@@ -152,9 +152,10 @@ A `serve --http` service keeps running and uses the update at its next start.
 Set `CODEOUTLINE_AUTO_UPDATE=0` to disable automatic checks. Manual update still works.
 Only the active update is kept. After installing, the updater deletes other
 installed versions and the runtime cache, except versions a running process
-still uses: each process started from an installed update holds a lease for as
-long as it runs. On Windows the process keeps its lease file open; elsewhere the
-file records its PID. Versions before 0.1.7 hold no lease, so they are
+still uses. Each process started from an installed update holds a lease for as
+long as it runs. Starting the active update retries cleanup of older versions
+after their processes exit. On Windows the process keeps its lease file open.
+Elsewhere the file records its PID. Versions before 0.1.7 hold no lease, so they are
 deleted only 7 days after cleanup first finds them inactive. There is no local
 rollback: to return to the npm (or native) installation, delete
 `~/.codeoutline/updates` and set `CODEOUTLINE_AUTO_UPDATE=0` so `serve` does not
@@ -305,8 +306,12 @@ starting the service.
 
 ### Make an all-platform script update with xnet
 
-For automatic releases, commit the feature changes and the release tools first,
-then run one command from a clean `main` checkout:
+For automatic releases, run the tool from `main`. Keep `package.json`,
+`package-lock.json`, `scripts/codeoutline/version.lua`, and
+`scripts/codeoutline/update_sequence.lua` free of local edits so the tool can
+bump the version. Other staged and unstaged changes stay in the checkout.
+Full and runtime releases ship from the tagged commit, which includes the
+recorded runtime submodule revision.
 
 ```powershell
 .\bin\xnet.exe tools/release.lua LOG_STDERR=1 LOG_FILE=0
@@ -350,8 +355,8 @@ the Node SDK and package tests; update mode skips them unless `NODE_TESTS=1`,
 because script bundles ship no npm launcher.
 
 Update mode commits the release version locally, builds the signed script
-bundles, installs this machine's bundle through the real updater (including its
-health check) and runs `explore` on a sample project with it. Only then does it
+bundles from the working tree, installs this machine's bundle through the real
+updater (including its health check) and runs `explore` on a sample project with it. Only then does it
 tag, push, upload and publish. If any of these local steps fail, the release
 commit and output directory are removed; nothing is pushed or uploaded, and the
 same version can be retried. CI runs on the pushed tag, but the local tool does

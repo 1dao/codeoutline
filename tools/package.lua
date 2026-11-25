@@ -49,8 +49,16 @@ local function git(command)
     assert(ok, 'run this tool from the repository root with Git available')
     return value:gsub('%s+$', '')
 end
+-- Preview packages stay private. Ignore untracked submodule build output.
+local release = options.RELEASE == '1'
+local source_dirty = git('git status --porcelain --untracked-files=normal --ignore-submodules=untracked') ~= ''
+if release then
+    assert(not source_dirty, 'RELEASE=1 requires a clean checkout')
+    assert(not version:find('-', 1, true), 'RELEASE=1 requires a final version, not ' .. version)
+    assert(not options.TAG or options.TAG == 'v' .. version,
+        'tag ' .. tostring(options.TAG) .. ' does not match version ' .. version)
+end
 local runtime_commit = git('git -C core rev-parse HEAD')
-assert(git('git -C core diff --name-only') == '', 'runtime has uncommitted changes; commit upstream first')
 local runtime_build = dofile(root .. '/tools/runtime_build.lua')(root)
 local binary = platform[1] == 'win32' and 'xnet.exe' or 'xnet'
 copy(options.RUNTIME or root .. '/bin/' .. binary, 'bin/' .. binary)
@@ -83,18 +91,7 @@ local editor_assets = options.EDITOR_ASSETS or root .. '/dist/editor-assets'
 for _, relative in ipairs({ 'codeoutline.vsix', 'zed/extension.toml', 'zed/extension.wasm' }) do
     local path = editor_assets .. '/' .. relative
     if xutils.stat(path).exists then copy(path, 'editors/' .. relative)
-    else assert(options.RELEASE ~= '1', 'missing editor asset: ' .. path) end
-end
--- RELEASE=1 stages publishable packages; anything else keeps `private: true`
--- so a preview cannot be published by accident. Untracked files inside the
--- submodule (its build output) do not count as a dirty checkout.
-local release = options.RELEASE == '1'
-local source_dirty = git('git status --porcelain --untracked-files=normal --ignore-submodules=untracked') ~= ''
-if release then
-    assert(not source_dirty, 'RELEASE=1 requires a clean checkout')
-    assert(not version:find('-', 1, true), 'RELEASE=1 requires a final version, not ' .. version)
-    assert(not options.TAG or options.TAG == 'v' .. version,
-        'tag ' .. tostring(options.TAG) .. ' does not match version ' .. version)
+    else assert(not release, 'missing editor asset: ' .. path) end
 end
 local repository = { type = 'git', url = 'git+https://github.com/1dao/codeoutline.git' }
 -- Platform packages are scoped: npm's spam filter rejects new unscoped

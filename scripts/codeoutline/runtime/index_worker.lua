@@ -146,6 +146,7 @@ return {
         assert(xnet.init())
         xtimer.init()
         pool.configure(scripts .. '/codeoutline/runtime/parse_worker.lua', pool.configured_threads())
+        if bm25 then bm25.configure(scripts .. '/codeoutline/runtime/bm25_worker.lua') end
         assert(xthread.post(1, 'worker_ready'))
     end,
     -- A suspended job still holds its project: sweeping waits for it. Idle
@@ -187,6 +188,7 @@ return {
     end,
     __uninit = function()
         timer_gc.close()
+        if bm25 then bm25.close() end
         pool.stop()
         xnet.uninit()
     end,

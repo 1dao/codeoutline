@@ -1,10 +1,23 @@
--- Foreground coordinator. The lexical index is built in a separate Lua state
--- from the saved base snapshot, never in the foreground request coroutine.
+-- Foreground coordinator. Each build owns a temporary Lua state so it can
+-- release the base snapshot and its allocator when the build finishes.
 local snapshot = require('codeoutline.bm25.snapshot')
 local control = require('codeoutline.shared.control')
-local M = {worker_id = 6}
+local M = {lookup_id = 6}
+local builder_id = 9
 local queue, active, failure = {}, nil, nil
 local lookup, next_lookup = nil, 0
+local builder_script
+
+function M.configure(script)
+    builder_script = script
+end
+
+function M.close()
+    if active then
+        xthread.shutdown_thread(builder_id)
+        active = nil
+    end
+end
 
 local function enqueue(index, file, stamp, repair)
     if index:needs_save() then return 'unavailable' end
@@ -53,7 +66,7 @@ function M.definition(index, query, deadline, prefix)
     next_lookup = next_lookup + 1
     -- Let a cold header warm in the background after F12 returns.
     local work_until = now + 2000
-    local posted = xthread.post(M.worker_id, 'bm25_lookup', xthread.current_id(), next_lookup,
+    local posted = xthread.post(M.lookup_id, 'bm25_lookup', xthread.current_id(), next_lookup,
         {root = index.root, stamp = stamp, file = file, query = query, deadline = work_until, prefix = prefix})
     if not posted then return nil, true end
     lookup = {token = next_lookup, wait_until = math.min(now + 180, deadline), work_until = work_until}
@@ -86,15 +99,18 @@ end
 function M.pump()
     if active or lookup or #queue == 0 then return end
     local item = table.remove(queue, 1)
-    local posted = xthread.post(M.worker_id, 'bm25_build', xthread.current_id(), item)
-    if posted then active = item
-    else failure = {file = item.file, stamp = item.stamp, retry = xtimer.now_ms() + 1000} end
+    if xthread.create_thread(builder_id, 'BM25_BUILD', builder_script) then
+        active = item
+        if xthread.post(builder_id, 'bm25_build', xthread.current_id(), item) then return end
+        M.close()
+    end
+    failure = {file = item.file, stamp = item.stamp, retry = xtimer.now_ms() + 1000}
 end
 
 function M.finish(file, stamp, ok)
     if not active or active.file ~= file or active.stamp ~= stamp then return end
     if not ok then failure = {file = file, stamp = stamp, retry = xtimer.now_ms() + 1000} end
-    active = nil
+    M.close()
 end
 
 return M

@@ -17,12 +17,13 @@ async function start(t, { isolatedCache = false } = {}) {
     // Exercise the tilde found in Windows CI's RUNNER~1 temporary directory.
     const temp = await mkdtemp(join(tmpdir(), 'codeoutline-lsp~-'));
     const project = join(temp, 'workspace');
+    const cache = join(temp, 'index');
     await mkdir(project);
     await writeFile(join(project, 'sample.lua'), 'function saved() end\n');
     const child = spawn(defaultRuntime, [join(root, 'scripts/codeoutline/command.lua'),
         'LOG_STDERR=1', 'LOG_FILE=0', 'lsp', '--stdio'], { cwd: tmpdir(), windowsHide: true,
         stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, CODEOUTLINE_AUTO_UPDATE: '1',
-            ...(isolatedCache && { CODEOUTLINE_MEMORY_CACHE: join(temp, 'index') }) } });
+            ...(isolatedCache && { CODEOUTLINE_MEMORY_CACHE: cache }) } });
     const pending = new Map(), notifications = [];
     let buffer = Buffer.alloc(0), nextId = 0, logs = '', failure;
     child.stderr.on('data', (chunk) => { logs += chunk; });
@@ -86,7 +87,7 @@ async function start(t, { isolatedCache = false } = {}) {
         }
         await rm(temp, { recursive: true, force: true });
     });
-    return { child, project, request, rawRequest, notify, response,
+    return { child, project, cache, request, rawRequest, notify, response,
         notifications, id: () => ++nextId, logs: () => logs };
 }
 
@@ -129,6 +130,9 @@ test('LSP definition checks string candidates against source and drafts after BM
     await writeFile(senderPath, `${send}\nprint('update_result')\nsaved()\n`);
     await writeFile(receiverPath, receiver);
     await writeFile(join(client.project, 'unrelated.lua'), receiver.replace("op == 'update_result'", "op == 'result_update'"));
+    // Cross the parallel collection threshold on both builds.
+    await Promise.all(Array.from({ length: 32 }, (_, i) =>
+        writeFile(join(client.project, `extra${i}.lua`), `function extra${i}() end\n`)));
     await initialize(client, [client.project]); await indexed(client);
     const definition = (line, character) => client.request('textDocument/definition', {
         textDocument: { uri: senderUri }, position: { line, character },
@@ -139,18 +143,29 @@ test('LSP definition checks string candidates against source and drafts after BM
         && msg.params.message.includes('building the BM25 definition index')));
     const primary = await definition(2, 2);
     assert.equal(fileURLToPath(primary[0].uri), join(client.project, 'sample.lua'));
-    let targets = [];
-    const deadline = Date.now() + 7500;
-    while (!targets.length && Date.now() < deadline) {
-        await new Promise((resolve) => setTimeout(resolve, 30));
-        targets = await lookup();
-    }
+    const awaitTargets = async () => {
+        let targets = [];
+        const deadline = Date.now() + 7500;
+        while (!targets.length && Date.now() < deadline) {
+            await new Promise((resolve) => setTimeout(resolve, 30));
+            targets = await lookup();
+        }
+        return targets;
+    };
     const event = "'update_result'";
     const first = branch.indexOf(event);
     const expected = (line) => ({ start: { line, character: first }, end: { line, character: first + event.length } });
+    const targets = await awaitTargets();
     assert.equal(targets.length, 1, client.logs());
     assert.equal(fileURLToPath(targets[0].uri), receiverPath);
     assert.deepEqual(targets[0].range, expected(3));
+    const builderExits = () => client.logs().match(/BM25_BUILD\] lua_thread_on_cleanup: thread \d+ cleaned up/g)?.length ?? 0;
+    assert.equal(builderExits(), 1, client.logs());
+    await rm(client.cache + '.bm25');
+    assert.deepEqual(await lookup(), []);
+    assert.deepEqual(await awaitTargets(), targets);
+    assert.equal(builderExits(), 2, client.logs());
+    assert.equal(client.logs().match(/BM25_BUILD\] \[codeoutline parse\] pass completed:/g)?.length, 2, client.logs());
     assert.deepEqual((await definition(1, 9))[0]?.range, expected(3));
     client.notify('textDocument/didOpen', { textDocument: {
         uri: receiverUri, languageId: 'lua', version: 1, text: `\n\n${receiver}`,

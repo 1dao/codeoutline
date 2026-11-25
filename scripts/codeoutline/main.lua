@@ -50,7 +50,7 @@ if #config.roots == 0 then
 end
 local shared = assert(xshared.create('codeoutline_control', 65536, 256))
 local jobs, next_id, job_count, worker_ready = {}, 0, 0, false
-local stopping, indexing, building_bm25 = false, false, false
+local stopping, indexing, bm25_lookup = false, false, false
 local endpoint, stdio, input = nil, nil, ''
 local updating = false
 local startup = xtimer.now_ms()
@@ -130,8 +130,8 @@ return {
             os.remove(daemon.stop_file(config.port))
         end
         local bm25 = require('codeoutline.bm25.automatic')
-        building_bm25 = xthread.create_thread(bm25.worker_id, 'BM25', scripts .. '/codeoutline/runtime/bm25_worker.lua')
-        shared:set('bm25_worker', building_bm25 and true or false)
+        bm25_lookup = xthread.create_thread(bm25.lookup_id, 'BM25', scripts .. '/codeoutline/runtime/bm25_worker.lua')
+        shared:set('bm25_worker', bm25_lookup and true or false)
         assert(xthread.create_thread(2, 'INDEX', scripts .. '/codeoutline/runtime/index_worker.lua'))
         indexing = true
         -- Launchers enable this for serve; the background service updates unless
@@ -267,7 +267,7 @@ return {
         shared:set('shutdown', true)
         if stdio then stdio:close() end
         if endpoint then endpoint.close() end
-        if building_bm25 then xthread.shutdown_thread(require('codeoutline.bm25.automatic').worker_id) end
+        if bm25_lookup then xthread.shutdown_thread(require('codeoutline.bm25.automatic').lookup_id) end
         if indexing then xthread.shutdown_thread(2) end
         if updating then xthread.shutdown_thread(3) end
         xnet.uninit()

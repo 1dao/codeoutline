@@ -7,7 +7,7 @@ local snapshot = require('codeoutline.bm25.snapshot')
 local control = require('codeoutline.shared.control')
 local pool = require('codeoutline.indexing.parse_pool')
 local shared = assert(xshared.dict('codeoutline_control'))
-local job
+local job, owner, item
 
 local function build(item)
     control.check()
@@ -22,14 +22,14 @@ end
 
 local function advance(...)
     local ok, err = coroutine.resume(job, ...)
-    if not ok then
+    if ok and coroutine.status(job) ~= 'dead' then return end
+    if not ok and not control.is_interrupted(err) then
         io.stderr:write('[codeoutline bm25] ', tostring(err), '\n')
-        job = nil
-        pool.bind(nil)
-    elseif coroutine.status(job) == 'dead' then
-        job = nil
-        pool.bind(nil)
     end
+    job = nil
+    pool.bind(nil)
+    -- The owner joins this thread so closing its Lua state releases the build heap.
+    xthread.post(owner, 'bm25_done', item.file, item.stamp, ok)
 end
 
 local function lookup(request)
@@ -52,7 +52,6 @@ end
 
 return {
     __init = function()
-        assert(xnet.init())
         -- Keep worker IDs separate from the foreground index's parse pool.
         pool.FIRST_ID = 256
         pool.configure(scripts .. '/codeoutline/runtime/parse_worker.lua', pool.configured_threads())
@@ -62,25 +61,16 @@ return {
     end,
     __thread_handle = function(_, op, owner_or_token, item_or_results, failure)
         if op == 'bm25_lookup' then
-            local ok, result = false, 'BM25 builder is busy'
-            if not job then ok, result = lookup(failure) end
+            local ok, result = lookup(failure)
             xthread.post(owner_or_token, 'bm25_lookup_done', item_or_results, ok, result)
         elseif op == 'bm25_build' then
-            local owner, item = owner_or_token, item_or_results
-            job = coroutine.create(function()
-                local ok, err = pcall(build, item)
-                if not ok and not control.is_interrupted(err) then
-                    io.stderr:write('[codeoutline bm25] ', tostring(err), '\n')
-                end
-                pool.stop('BM25 snapshot complete')
-                collectgarbage('collect')
-                xthread.post(owner, 'bm25_done', item.file, item.stamp, ok)
-            end)
+            owner, item = owner_or_token, item_or_results
+            job = coroutine.create(build)
             pool.bind(job)
-            advance()
+            advance(item)
         elseif op == 'parsed' and pool.receive(owner_or_token) and job and pool.waiting() then
             advance(owner_or_token, item_or_results, failure)
         end
     end,
-    __uninit = function() pool.stop(); xnet.uninit() end,
+    __uninit = function() pool.stop() end,
 }

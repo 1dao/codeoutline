@@ -220,22 +220,34 @@ function Index:save()
     local list = {}
     for _, rec in pairs(self.files) do list[#list + 1] = rec end
     table.sort(list, function(a, b) return a.path < b.path end)
-    local payload = cmsgpack.pack({ version = M.VERSION, root = paths.key(self.root), files = list })
-    local packed = xcompress.deflate(payload, M.CACHE_COMPRESSION_LEVEL)
-    local hash = xutils.sha256_hex(packed)
-    local blob = cmsgpack.pack({ codec = 'deflate', size = #payload, sha256 = hash, payload = packed })
+    local snapshot = { version = M.VERSION, root = paths.key(self.root), files = list }
+    local native_write = xcompress.write_deflate_msgpack
+    local hash, blob
+    if not native_write then
+        local payload = cmsgpack.pack(snapshot)
+        local packed = xcompress.deflate(payload, M.CACHE_COMPRESSION_LEVEL)
+        hash = xutils.sha256_hex(packed)
+        blob = cmsgpack.pack({ codec = 'deflate', size = #payload, sha256 = hash, payload = packed })
+    end
     local d = self.cache_path:match('^(.*)/[^/]*$') or '.'
     local made, err = xutils.mkdir_p(d)
     if not made then return false, err end
     local tmp
     tmp, err = xutils.temp_file(d)
     if not tmp then return false, err end
-    local f
-    f, err = io.open(tmp, 'wb')
-    if not f then os.remove(tmp); return false, err end
-    local wrote, write_err = f:write(blob)
-    local closed, close_err = f:close()
-    if not wrote or not closed then os.remove(tmp); return false, write_err or close_err end
+    if native_write then
+        local ok
+        ok, hash, err = pcall(native_write, tmp, snapshot, M.CACHE_COMPRESSION_LEVEL)
+        if not ok then os.remove(tmp); error(hash, 0) end
+        if not hash then os.remove(tmp); return false, err end
+    else
+        local f
+        f, err = io.open(tmp, 'wb')
+        if not f then os.remove(tmp); return false, err end
+        local wrote, write_err = f:write(blob)
+        local closed, close_err = f:close()
+        if not wrote or not closed then os.remove(tmp); return false, write_err or close_err end
+    end
     local published
     published, err = xutils.replace_file(tmp, self.cache_path)
     if not published then os.remove(tmp); return false, err end

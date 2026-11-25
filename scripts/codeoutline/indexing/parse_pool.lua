@@ -45,6 +45,8 @@ local function start_threads()
     shared = assert(xshared.dict('codeoutline_control'))
     owner = xthread.current_id()
     abort_key = 'parse_abort:' .. owner
+    -- A recreated host can reuse the thread ID and its previous abort marker.
+    token = math.max(token, shared:get(abort_key) or 0)
     for i = 1, thread_count do
         local id = M.FIRST_ID + i - 1
         local ok, err = xthread.create_thread(id, 'PARSE' .. i, script_path)

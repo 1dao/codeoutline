@@ -1321,6 +1321,28 @@ spec.describe('explore', function()
         spec.equal(stats.parsed, 0)
         spec.truthy(stats.unchanged >= 4)
     end)
+    spec.it('writes the existing deflate envelope from native MessagePack buffers', function()
+        local write_native = xcompress.write_deflate_msgpack
+        if not write_native then return end
+        local path = tmp_root .. '/缓存.idx'
+        local value = { files = {{ path = 'example.lua', bytes = '\0\255' }}, version = 3 }
+        local hash = assert(write_native(path, value, 1))
+        local file = assert(io.open(path, 'rb'))
+        local encoded = assert(file:read('*a'))
+        assert(file:close())
+        assert(os.remove(path))
+
+        local envelope = cmsgpack.unpack(encoded)
+        local raw = cmsgpack.pack(value)
+        spec.equal(envelope.codec, 'deflate')
+        spec.equal(envelope.size, #raw)
+        spec.equal(envelope.sha256, hash)
+        spec.equal(hash, xutils.sha256_hex(envelope.payload))
+        spec.equal(xcompress.inflate(envelope.payload, envelope.size), raw)
+        local result, err = write_native(tmp_root, value, 1)
+        spec.nil_value(result)
+        spec.truthy(err)
+    end)
 end)
 
 spec.describe('agent exploration contract', function()

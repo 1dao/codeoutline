@@ -36,6 +36,8 @@ test('Explore builds a BM25 snapshot in the background and falls back only after
         command: defaultRuntime, args: [main, 'STDIO=1', `PROJECT=${f.project}`], cwd: tmpdir(), stderr: 'pipe',
         env: { ...process.env, CODEOUTLINE_MEMORY_CACHE: cache },
     });
+    // Drain stderr so the child process can emit 'close' during SDK cleanup.
+    transport.stderr?.resume();
     const query = (text, bm25Match) => c.callTool({ name: 'codeoutline_explore', arguments: { query: text, bm25Match } });
     function assertPlainMiss(result) {
         assert.equal(result.isError, false, result.content[0].text);

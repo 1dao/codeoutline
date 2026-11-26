@@ -167,14 +167,17 @@ spec.describe('service stability', function()
         spec.equal(ok, false)
     end)
     spec.it('degrades with a warning instead of failing when enumeration limits are hit', function()
+        local limit_project = root .. '/limit-project'
+        assert(xutils.mkdir_p(limit_project))
+        write(limit_project .. '/first.lua', 'function first() end\n')
+        write(limit_project .. '/second.lua', 'function second() end\n')
+        write(limit_project .. '/fragment.unknown', 'int fragment(void) { return 1; }')
         local limit = index.MAX_WALK_FILES
         index.MAX_WALK_FILES = 1
-        write(project .. '/extra.lua', 'function extra() end\n')
-        write(project .. '/aux.unknown', 'int aux(void) { return 1; }')
         local ok, err = pcall(function()
             for _, lister in ipairs({ 'walk', 'rg' }) do
                 if lister == 'walk' or index.rg_available() then
-                    local idx = index.open(project, { cache_path = root .. '/limit.idx', lister = lister, rebuild = true })
+                    local idx = index.open(limit_project, { cache_path = root .. '/limit.idx', lister = lister, rebuild = true })
                     local files = idx:list_files()
                     spec.equal(#files, 1) -- source cap: partial results, no error
                     idx:refresh()
@@ -183,8 +186,6 @@ spec.describe('service stability', function()
             end
         end)
         index.MAX_WALK_FILES = limit
-        os.remove(project .. '/extra.lua'); os.remove(project .. '/aux.unknown')
-        os.remove(root .. '/limit.idx')
         if not ok then error(err, 0) end
     end)
     spec.it('bounds resident projects and evicts idle indexes', function()

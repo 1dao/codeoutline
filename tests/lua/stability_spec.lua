@@ -166,6 +166,27 @@ spec.describe('service stability', function()
         xutils.list_dir = saved
         spec.equal(ok, false)
     end)
+    spec.it('degrades with a warning instead of failing when enumeration limits are hit', function()
+        local limit = index.MAX_WALK_FILES
+        index.MAX_WALK_FILES = 1
+        write(project .. '/extra.lua', 'function extra() end\n')
+        write(project .. '/aux.unknown', 'int aux(void) { return 1; }')
+        local ok, err = pcall(function()
+            for _, lister in ipairs({ 'walk', 'rg' }) do
+                if lister == 'walk' or index.rg_available() then
+                    local idx = index.open(project, { cache_path = root .. '/limit.idx', lister = lister, rebuild = true })
+                    local files = idx:list_files()
+                    spec.equal(#files, 1) -- source cap: partial results, no error
+                    idx:refresh()
+                    spec.truthy(next(idx.files) ~= nil)
+                end
+            end
+        end)
+        index.MAX_WALK_FILES = limit
+        os.remove(project .. '/extra.lua'); os.remove(project .. '/aux.unknown')
+        os.remove(root .. '/limit.idx')
+        if not ok then error(err, 0) end
+    end)
     spec.it('bounds resident projects and evicts idle indexes', function()
         service.configure({ max_projects = 1 })
         service.get(project, opts)

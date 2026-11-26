@@ -387,6 +387,18 @@ M.rg_available = rg_available
 M.WALK_SKIP = { node_modules = true, __pycache__ = true }
 M.MAX_WALK_FILES = 100000
 
+-- Enumeration limits degrade with a warning instead of aborting the whole
+-- index: a huge tree (e.g. an unignored Unity Library/) still indexes its
+-- supported sources; auxiliary fragment intake stops at the cap.
+local function warn_limit(warned, key, message)
+    if warned[key] then return end
+    warned[key] = true
+    local line = '[codeoutline index] ' .. message .. ' (limit ' .. M.MAX_WALK_FILES
+        .. '); add .gitignore/.ignore rules for generated directories'
+    if xthread and xthread.log_warn then xthread.log_warn(line)
+    else io.stderr:write(line .. '\n') end
+end
+
 -- Root .gitignore, the common subset: `name`, `*.ext`, `dir/`, `/anchored`,
 -- `a/b` (anchored), `**`. Negations are ignored (keep the file listed).
 local function load_ignore(root)
@@ -425,28 +437,35 @@ function Index:walk_files()
     assert(xutils and xutils.list_dir, 'file enumeration unavailable: install rg or use a runtime with list_dir')
     local rules = load_ignore(self.root)
     local dirs = { '' }
-    local visited = 0
+    local warned = {}
     while #dirs > 0 do
         control.check()
         local rel_dir = table.remove(dirs)
         local entries, truncated = xutils.list_dir(rel_dir == '' and self.root or (self.root .. '/' .. rel_dir),
             M.MAX_WALK_FILES + 1, true)
         assert(entries, 'cannot enumerate directory: ' .. rel_dir .. ': ' .. tostring(truncated))
-        assert(not truncated, 'directory enumeration limit exceeded')
+        if truncated then
+            warn_limit(warned, 'directory', 'directory enumeration truncated in ' .. (rel_dir == '' and '.' or rel_dir))
+        end
         for _, e in ipairs(entries) do
-            visited = visited + 1
-            assert(visited <= M.MAX_WALK_FILES, 'directory enumeration limit exceeded')
             local name = e.name
             local rel = rel_dir == '' and name or (rel_dir .. '/' .. name)
             local st = e.type and e or xutils.stat(self.root .. '/' .. rel)
             if st and st.type ~= 'link' and name:sub(1, 1) ~= '.' and not ignored(rules, rel, name, e.dir) then
                 if e.dir then
                     if not M.WALK_SKIP[name] then dirs[#dirs + 1] = rel end
+                elseif ci.language(name) then
+                    if #out >= M.MAX_WALK_FILES then
+                        warn_limit(warned, 'sources', 'source file enumeration stopped; indexing partial results')
+                        dirs = {}
+                        break
+                    end
+                    out[#out + 1] = rel
+                    meta[rel] = st
+                elseif self.fragment_inventory.count < M.MAX_WALK_FILES then
+                    fragments.add(self.fragment_inventory, rel)
                 else
-                    if ci.language(name) then
-                        out[#out + 1] = rel
-                        meta[rel] = st
-                    else fragments.add(self.fragment_inventory, rel) end
+                    warn_limit(warned, 'fragments', 'auxiliary file intake stopped; unknown-suffix files are skipped')
                 end
             end
         end
@@ -475,15 +494,20 @@ function Index:list_files()
     local listing = p:read('a')
     local ok, _, code = p:close()
     assert(ok or code == 1, 'rg file enumeration failed: ' .. tostring(code))
+    local warned = {}
     for line in listing:gmatch('([^%z]+)%z') do
         local path = norm(line)
         if path:sub(1, #prefix) == prefix then path = path:sub(#prefix + 1) end
         if ci.language(path) then
+            if #out >= M.MAX_WALK_FILES then
+                warn_limit(warned, 'sources', 'source file enumeration stopped; indexing partial results')
+                break
+            end
             out[#out + 1] = path
-            assert(#out <= M.MAX_WALK_FILES, 'file enumeration limit exceeded')
-        else
+        elseif self.fragment_inventory.count < M.MAX_WALK_FILES then
             fragments.add(self.fragment_inventory, path)
-            assert(self.fragment_inventory.count <= M.MAX_WALK_FILES, 'file enumeration limit exceeded')
+        else
+            warn_limit(warned, 'fragments', 'auxiliary file intake stopped; unknown-suffix files are skipped')
         end
     end
     table.sort(out)
